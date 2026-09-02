@@ -1,0 +1,209 @@
+---
+# Step 4: EKS control plane, kubeconfig, and the IRSA OIDC provider.
+#
+# Takes ~10-15 minutes. Costs $0.10/hr for the control plane regardless of
+# whether any nodes exist.
+
+- name: Look up the VPC stack outputs
+  # Read these from CloudFormation rather than relying on facts set by the
+  # vpc role, so this role can be run on its own with --tags eks.
+  amazon.aws.cloudformation_info:
+    stack_name: "{{ infrastructure.environment_name }}-vpc"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  register: _vpc_info
+  check_mode: false
+
+- name: Extract subnet ids from the VPC stack
+  ansible.builtin.set_fact:
+    _vpc_outputs: "{{ _vpc_info.cloudformation[infrastructure.environment_name + '-vpc'].stack_outputs }}"
+
+- name: Fail clearly if the VPC does not exist yet
+  ansible.builtin.assert:
+    that: _vpc_outputs.PrivateSubnetIds is defined
+    fail_msg: "VPC stack not found. Run: ansible-playbook deploy.yml --tags vpc"
+
+- name: Announce cost and duration
+  ansible.builtin.debug:
+    msg:
+      - "creating EKS {{ infrastructure.eks_version }} control plane: ~10-15 min"
+      - "cost: $0.10/hr (~$2.40/day) for the control plane alone, nodes extra"
+      - "public API endpoint: {{ eks_public_endpoint | default('true') }}"
+      - "teardown: ansible-playbook deploy.yml --tags eks -e eks_state=absent"
+
+# A CloudFormation stack whose very first CREATE fails is left in
+# ROLLBACK_COMPLETE, holding no resources but blocking both update and
+# re-create ("can not be updated").
+#
+# This account is SHARED between SAs, so we never delete such a stack
+# automatically -- an unusable husk may be a colleague's in-progress
+# debugging, and stack names can collide. We only report it, and delete
+# only when explicitly asked:
+#     ansible-playbook deploy.yml --tags eks -e clear_failed_stack=true
+- name: Check for a stack stuck in ROLLBACK_COMPLETE
+  ansible.builtin.command:
+    argv:
+      - aws
+      - cloudformation
+      - describe-stacks
+      - --stack-name={{ infrastructure.environment_name }}-eks
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=Stacks[0].StackStatus
+      - --output=text
+  register: _eks_stack_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse to proceed past a rolled-back stack unless told to clear it
+  ansible.builtin.assert:
+    that: clear_failed_stack | default(false) | bool
+    fail_msg: >-
+      Stack {{ infrastructure.environment_name }}-eks is in ROLLBACK_COMPLETE
+      and cannot be updated. This is a SHARED account, so it is not deleted
+      automatically. Confirm it is yours, then re-run with
+      -e clear_failed_stack=true
+  when: _eks_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
+
+- name: Delete the rolled-back stack (explicitly requested)
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-eks"
+    state: absent
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  when:
+    - _eks_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
+    - clear_failed_stack | default(false) | bool
+
+- name: Deploy the EKS control plane stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-eks"
+    state: "{{ eks_state | default('present') }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    template: "{{ role_path }}/files/eks-cluster.yaml"
+    template_parameters:
+      EnvironmentName: "{{ infrastructure.environment_name }}"
+      EksClusterName: "{{ infrastructure.eks_cluster_name }}"
+      EksVersion: "{{ infrastructure.eks_version }}"
+      SubnetIds: "{{ _vpc_outputs.PrivateSubnetIds }}"
+      PublicEndpointAccess: "{{ eks_public_endpoint | default('true') }}"
+      PublicEndpointCidrs: "{{ eks_public_cidrs | default('0.0.0.0/0') }}"
+    capabilities:
+      - CAPABILITY_IAM
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _eks_stack
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (eks_state | default('present')) == 'absent'
+
+- name: Write a project-local kubeconfig
+  # Deliberately NOT ~/.kube/config: the same reasoning as the AWS config.
+  # Everything this project needs travels with the directory, and we cannot
+  # clobber a kubeconfig you use for other clusters.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - eks
+      - update-kubeconfig
+      - --name={{ infrastructure.eks_cluster_name }}
+      - --region={{ aws.target_region }}
+      - --profile={{ aws.target_profile }}
+      - --kubeconfig={{ kubeconfig_path }}
+  # Rewriting the same context is a no-op in effect, so don't report a change
+  # on every run -- it would mask genuine changes elsewhere in the play.
+  changed_when: false
+
+- name: Verify the Kubernetes API answers
+  ansible.builtin.command:
+    argv: [kubectl, version, --output=json]
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _kubectl_version
+  changed_when: false
+  retries: 6
+  delay: 10
+  until: _kubectl_version.rc == 0
+
+- name: Report client/server versions and skew
+  vars:
+    _v: "{{ _kubectl_version.stdout | from_json }}"
+  ansible.builtin.debug:
+    msg:
+      - "kubectl client: {{ _v.clientVersion.gitVersion }}"
+      - "cluster server: {{ _v.serverVersion.gitVersion }}"
+      - "endpoint:       {{ _eks_stack.stack_outputs.ClusterEndpoint }}"
+
+# --- IRSA: the OIDC identity provider -------------------------------------
+# IRSA (IAM Roles for Service Accounts) lets a pod assume an IAM role with no
+# static credentials: the pod gets a signed JWT from the cluster, and STS
+# trades it for temporary AWS credentials. For STS to trust those tokens, the
+# cluster's OIDC issuer must be registered in IAM as an identity provider.
+#
+# This is not done in CloudFormation because AWS::IAM::OIDCProvider requires a
+# CA thumbprint, which can only be computed from the live endpoint after the
+# cluster exists.
+
+- name: Determine the OIDC issuer hostname
+  ansible.builtin.set_fact:
+    _oidc_url: "{{ _eks_stack.stack_outputs.OidcIssuerUrl }}"
+    _oidc_host: "{{ _eks_stack.stack_outputs.OidcIssuerUrl | regex_replace('^https://([^/]+).*$', '\\1') }}"
+
+- name: Check whether the OIDC provider is already registered
+  ansible.builtin.command:
+    argv:
+      - aws
+      - iam
+      - list-open-id-connect-providers
+      - --profile={{ aws.target_profile }}
+      - --query=OpenIDConnectProviderList[].Arn
+      - --output=text
+  register: _oidc_existing
+  changed_when: false
+  check_mode: false
+
+- name: Compute the issuer CA thumbprint
+  # IAM wants the SHA-1 fingerprint of the ROOT certificate in the endpoint's
+  # chain -- the last one openssl prints (Amazon Root CA 1), not the leaf.
+  # Split the chain into files, fingerprint the highest-numbered one.
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      host="{{ _oidc_host }}"
+      work="$(mktemp -d)"
+      trap 'rm -rf "$work"' EXIT
+      openssl s_client -servername "$host" -showcerts -connect "$host:443" \
+        < /dev/null 2>/dev/null \
+        | awk -v d="$work" '/-----BEGIN CERTIFICATE-----/{c++} c>0{print > (d "/cert-" c ".pem")}'
+      last="$(ls "$work"/cert-*.pem | sort -t- -k2 -n | tail -1)"
+      test -s "$last"
+      openssl x509 -in "$last" -fingerprint -sha1 -noout \
+        | sed 's/.*=//; s/://g' | tr 'A-Z' 'a-z'
+    executable: /bin/bash
+  register: _thumbprint
+  changed_when: false
+  check_mode: false
+  when: _oidc_url | regex_replace('^https://', '') not in _oidc_existing.stdout
+
+- name: Register the OIDC provider for IRSA
+  ansible.builtin.command:
+    argv:
+      - aws
+      - iam
+      - create-open-id-connect-provider
+      - --url={{ _oidc_url }}
+      - --client-id-list=sts.amazonaws.com
+      - --thumbprint-list={{ _thumbprint.stdout | trim }}
+      - --profile={{ aws.target_profile }}
+  when: _oidc_url | regex_replace('^https://', '') not in _oidc_existing.stdout
+  register: _oidc_created
+
+- name: Report IRSA readiness
+  ansible.builtin.debug:
+    msg: >-
+      OIDC provider {{ 'registered' if (_oidc_created is defined and _oidc_created is changed) else 'already present' }}
+      for {{ _oidc_host }} -- IRSA trust policies can now reference it

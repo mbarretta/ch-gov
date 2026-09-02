@@ -46,5 +46,9 @@
     - role: vpc
       tags: [infra, vpc]
 
-    # --- Steps 4-11: EKS, node groups, S3/IRSA, operator, cluster ----------
+    # --- Step 4: EKS control plane + IRSA OIDC provider --------------------
+    - role: eks_cluster
+      tags: [infra, eks]
+
+    # --- Steps 5-11: node groups, S3/IRSA, operator, cluster ---------------
     # Not implemented yet.

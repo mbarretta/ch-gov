@@ -35,7 +35,10 @@ aws:
 infrastructure:
   environment_name: "clickhouse-private"
   eks_cluster_name: "clickhouse-private-eks"
-  eks_version: "1.34"        # current; keeps kubectl skew within tolerance
+  # 1.36 is the current EKS default. 1.34 is still supported but reaches
+  # end of standard support 2026-12-01. 1.36 also puts kubectl 1.37 within
+  # the supported +/-1 minor skew.
+  eks_version: "1.36"
 
   vpc_cidr: "10.20.0.0/16"
 
@@ -110,3 +113,7 @@ all_artifacts: "{{ container_images + helm_charts }}"
 # skopeo credentials are written here, not to ~/.config/containers, so the
 # project stays self-contained. Gitignored -- it holds real registry tokens.
 skopeo_authfile: "{{ playbook_dir }}/../state/skopeo-auth.json"
+
+# Same reasoning as .aws/config: keep it in the project, never touch
+# ~/.kube/config, which may hold clusters unrelated to this work.
+kubeconfig_path: "{{ playbook_dir }}/../state/kubeconfig"

@@ -17,10 +17,14 @@ export AWS_CONFIG_FILE="${_ch_root}/.aws/config"
 # Override per-command with --profile private-us when reading the source ECR.
 export AWS_PROFILE="sa"
 
+# Same reasoning: never touch ~/.kube/config, which may hold unrelated
+# clusters. Written by the eks_cluster role.
+export KUBECONFIG="${_ch_root}/state/kubeconfig"
+
 # Homebrew tools must be reachable even in a non-login shell.
 [[ ":$PATH:" == *":/opt/homebrew/bin:"* ]] || export PATH="/opt/homebrew/bin:$PATH"
 
-printf 'AWS_CONFIG_FILE=%s\nAWS_PROFILE=%s\n' "$AWS_CONFIG_FILE" "$AWS_PROFILE"
+printf 'AWS_CONFIG_FILE=%s\nAWS_PROFILE=%s\nKUBECONFIG=%s\n' "$AWS_CONFIG_FILE" "$AWS_PROFILE" "$KUBECONFIG"
 if command -v aws >/dev/null 2>&1; then
   if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then
     printf 'identity: %s\n' "$arn"

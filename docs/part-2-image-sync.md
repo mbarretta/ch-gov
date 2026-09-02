@@ -296,3 +296,164 @@ patterns:
 - [x] AZ/instance-type compatibility asserted before creation
 - [ ] Step 4: EKS control plane
 - [ ] Step 5: node groups ← **where cost becomes significant**
+
+---
+
+# Step 4 — EKS control plane and IRSA
+
+**Run it:** `cd ansible && ansible-playbook deploy.yml --tags eks`
+Takes ~12 min. Costs **$0.10/hr** for the control plane, with or without nodes.
+
+## This account is shared
+
+Account `<YOUR_ACCOUNT_ID>` is shared by all ClickHouse SAs. Two rules follow, and
+they shaped the code:
+
+1. **Never delete or modify a resource we did not create** — including stacks
+   stuck in `ROLLBACK_COMPLETE`, which may be a colleague's debugging session.
+   The role therefore *refuses* to clear a rolled-back stack unless you pass
+   `-e clear_failed_stack=true`.
+2. **Never use explicit resource names.** See below — this cost us three failed
+   attempts.
+
+## The bug worth remembering: named resources collide
+
+The first three attempts failed with exactly this, and nothing else:
+
+```
+Validation failed with 1 error(s). Call DescribeEvents to retrieve the full
+list of issues with resource and property details...
+```
+
+That message names neither the resource nor the reason, and `DescribeEvents`
+is not a real API you can call for more. `validate-template` passed happily.
+
+The cause: the template set `RoleName: !Sub "${EnvironmentName}-eks-cluster-role"`,
+and **a role of that name already existed** — left orphaned by another SA's
+attempt on 2026-08-31, its stack long gone.
+
+The fix is to omit `RoleName` and let CloudFormation generate one
+(`clickhouse-private-eks-EksClusterRole-h70WrPCu8OCf`). Two benefits: runs can
+never collide with anyone's leftovers, and the stack needs only
+`CAPABILITY_IAM` instead of `CAPABILITY_NAMED_IAM`.
+
+**Diagnostic technique that cracked it:** the Ansible module reported only
+`Module failed: Unknown error`. Re-creating the identical stack with
+`aws cloudformation create-stack` directly, then reading
+`describe-stack-events`, isolated it to a parameter value rather than to
+Ansible. When a wrapper hides an error, go under the wrapper.
+
+## Other traps hit
+
+**Strings are not booleans.** `EndpointPublicAccess: !Ref PublicEndpointAccess`
+from a `String` parameter fails property validation with that same opaque
+message. Use a `Condition` to produce a real boolean:
+
+```yaml
+Conditions:
+  PublicEndpoint: !Equals [!Ref PublicEndpointAccess, 'true']
+# ...
+        EndpointPublicAccess: !If [PublicEndpoint, true, false]
+```
+
+**A failed CREATE leaves an unusable husk.** The stack sits in
+`ROLLBACK_COMPLETE` holding no resources, and can neither be updated nor
+re-created. It must be deleted — deliberately, in a shared account.
+
+## Choosing the Kubernetes version
+
+Don't inherit a version from an old doc. Ask AWS:
+
+```bash
+aws eks describe-cluster-versions --profile sa --region us-east-1
+```
+
+`1.36` is the current default. `1.34` is still supported but reaches end of
+standard support **2026-12-01**. Picking 1.36 also puts kubectl 1.37 within the
+supported ±1 minor skew — the skew problem Part 1 flagged, now resolved:
+
+```
+kubectl client: v1.37.0
+cluster server: v1.36.2-eks-bca9cf6
+```
+
+## Access: EKS access entries, not aws-auth
+
+```yaml
+AccessConfig:
+  AuthenticationMode: API_AND_CONFIG_MAP
+  BootstrapClusterCreatorAdminPermissions: true
+```
+
+Historically cluster permissions lived in an `aws-auth` ConfigMap that you
+hand-edited, and a mistake could lock you out of your own cluster
+irrecoverably. `API_AND_CONFIG_MAP` grants permissions with EKS **access
+entries** — real IAM-side objects. `BootstrapClusterCreatorAdminPermissions`
+gives whoever creates the stack cluster-admin; without it you can build a
+cluster you cannot log into.
+
+## Endpoint access
+
+`EndpointPrivateAccess` stays `true` always — nodes inside the VPC resolve the
+API through it, and disabling it pushes node→API traffic out over the NAT.
+
+`EndpointPublicAccess` defaults to `true` here so `kubectl` works from your
+laptop. A hardened or gov posture sets it `false` and reaches the API via
+bastion, VPN, or Direct Connect. Override without editing the config:
+
+```bash
+ansible-playbook deploy.yml --tags eks -e eks_public_endpoint=false
+ansible-playbook deploy.yml --tags eks -e eks_public_cidrs=1.2.3.4/32
+```
+
+## IRSA: why there's a separate OIDC step
+
+**IRSA** (IAM Roles for Service Accounts) is how a pod gets AWS credentials
+with no static keys: the cluster hands the pod a signed JWT, and STS trades it
+for temporary credentials. Step 6 uses this so ClickHouse can reach its S3
+bucket.
+
+For STS to trust those tokens, the cluster's OIDC issuer must be registered in
+IAM as an identity provider. That is **not** done in CloudFormation, because
+`AWS::IAM::OIDCProvider` needs a CA thumbprint that can only be computed from
+the live endpoint after the cluster exists.
+
+The thumbprint is the SHA-1 fingerprint of the **root** certificate in the
+endpoint's chain — the last one `openssl` prints, not the leaf:
+
+```
+cert-1: CN=*.eks.us-east-1.amazonaws.com          ← leaf, wrong one
+cert-2: CN=Amazon RSA 2048 M01                    ← intermediate
+cert-3: CN=Amazon Root CA 1                       ← this one
+        06b25927c42a721631c1efd9431e648fa62e1e39
+```
+
+## What exists now
+
+```
+cluster:  clickhouse-private-eks  (v1.36, ACTIVE)
+endpoint: https://168697C932A4ED501BF7EB85D199193C.gr7.us-east-1.eks.amazonaws.com
+oidc:     arn:aws:iam::<YOUR_ACCOUNT_ID>:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/1686...
+kubeconfig: state/kubeconfig  (project-local; `source scripts/env.sh` exports KUBECONFIG)
+```
+
+```
+$ kubectl get nodes
+No resources found
+
+$ kubectl get pods -A
+kube-system  coredns-b8b6dd877-8qzdz  Pending
+kube-system  coredns-b8b6dd877-lsvzr  Pending
+```
+
+CoreDNS pending with nothing to schedule on is exactly right — the control
+plane is healthy and waiting for Step 5.
+
+## Checkpoint
+
+- [x] EKS 1.36 control plane, private + public endpoint access
+- [x] Control plane logging (api, audit, authenticator) to CloudWatch
+- [x] Project-local kubeconfig; API verified, skew within ±1
+- [x] OIDC provider registered — IRSA trust policies can reference it
+- [x] Role idempotent (`changed=0` on re-run)
+- [ ] Step 5: node groups ← **~$13/hr at the documented sizes**

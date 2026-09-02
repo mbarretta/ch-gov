@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- EKS control plane and its IAM role.
+  Node groups are a separate stack so they can be scaled or destroyed
+  without touching the cluster.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  EksClusterName:
+    Type: String
+  EksVersion:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      Private subnets. EKS places control-plane ENIs here to reach nodes.
+      Load balancer placement is driven by subnet tags, not by this list.
+  PublicEndpointAccess:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether the Kubernetes API is reachable from the internet. 'true' lets
+      kubectl work from a laptop. A hardened/gov posture uses 'false' and
+      reaches the API through a bastion, VPN, or Direct Connect.
+  PublicEndpointCidrs:
+    Type: CommaDelimitedList
+    Description: Source CIDRs allowed to reach the public endpoint.
+
+Conditions:
+  # Needed so EndpointPublicAccess receives a real boolean. Passing the
+  # string "true" from a String parameter fails CloudFormation's property
+  # validation before any resource is created, with a message that names
+  # neither the property nor the reason.
+  PublicEndpoint: !Equals [!Ref PublicEndpointAccess, 'true']
+
+Resources:
+  # The control plane assumes this role to manage AWS resources on your
+  # behalf -- creating ENIs in your subnets, and load balancers for services.
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Deliberately NO RoleName. An explicit name collides with leftovers
+      # from any previous attempt in the account -- and CloudFormation reports
+      # that collision only as "Validation failed with 1 error(s)", naming
+      # neither the resource nor the reason. Letting CFN generate the name
+      # also means we need only CAPABILITY_IAM, not CAPABILITY_NAMED_IAM.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref EksClusterName
+      Version: !Ref EksVersion
+      RoleArn: !GetAtt EksClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds: !Ref SubnetIds
+        # Private access must stay on: nodes inside the VPC resolve the API
+        # through it. Turning it off forces node traffic out via the NAT.
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: !If [PublicEndpoint, true, false]
+        PublicAccessCidrs: !Ref PublicEndpointCidrs
+      AccessConfig:
+        # API_AND_CONFIG_MAP is the modern path: cluster permissions are
+        # granted with EKS access entries (real IAM objects) instead of by
+        # hand-editing the aws-auth ConfigMap, which was easy to corrupt and
+        # could lock you out of your own cluster irrecoverably.
+        AuthenticationMode: API_AND_CONFIG_MAP
+        # Grants whoever creates the stack cluster-admin. Without this you
+        # can create a cluster you cannot log into.
+        BootstrapClusterCreatorAdminPermissions: true
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            # Sent to CloudWatch Logs (billed by ingestion + retention).
+            # 'audit' is the one that matters for a gov authorization package:
+            # it records every API call made against the cluster.
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+      Tags:
+        - {Key: Name, Value: !Ref EksClusterName}
+        - {Key: Project, Value: clickhouse-private}
+
+Outputs:
+  ClusterName:
+    Value: !Ref EksCluster
+  ClusterArn:
+    Value: !GetAtt EksCluster.Arn
+  ClusterEndpoint:
+    Value: !GetAtt EksCluster.Endpoint
+  # The issuer URL IRSA is built on. Step 6 needs it to write the trust
+  # policy that lets a Kubernetes service account assume an IAM role.
+  OidcIssuerUrl:
+    Value: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+  ClusterSecurityGroupId:
+    Value: !GetAtt EksCluster.ClusterSecurityGroupId
