@@ -185,3 +185,114 @@ live registry tokens and is gitignored.
 
 **Next:** Step 3, the VPC. This is where AWS spend starts — NAT gateways bill
 hourly whether or not anything runs.
+
+---
+
+# Step 3 — VPC and networking
+
+**Run it:** `cd ansible && ansible-playbook deploy.yml --tags vpc`
+**Tear it down:** `ansible-playbook deploy.yml --tags vpc -e vpc_state=absent`
+
+## Why CloudFormation here, when Steps 1–2 used plain modules
+
+Infrastructure gets a CloudFormation stack rather than a chain of
+`ec2_vpc_*` Ansible tasks, for one reason: **teardown**. NAT gateways and
+Elastic IPs bill hourly whether or not anything uses them, and a half-finished
+module chain leaves orphans that quietly cost money. `state: absent` on a stack
+deletes every resource in dependency order.
+
+## The AZ trap
+
+Subnets are pinned to an availability zone and cannot be moved. If you place
+one in an AZ that does not offer your node instance type, nothing fails until
+the node group is created — and the error does not mention availability zones.
+
+In `us-east-1`, **`us-east-1e` offers none** of the candidate instance types
+(`m7gd.16xlarge`, `m7g.2xlarge`, `m7i.2xlarge`, `m5d.16xlarge`, `m8i.2xlarge`).
+We use `1a/1b/1c`, which support every type for both builds. The `vpc` role
+asserts this before creating anything.
+
+## The layout
+
+| | CIDR | Purpose |
+|---|---|---|
+| VPC | `10.20.0.0/16` | |
+| private ×3 | `10.20.0.0/18`, `.64.0/18`, `.128.0/18` | all nodes and pods |
+| public ×3 | `10.20.192.0/20`, `.208.0/20`, `.224.0/20` | NAT gateways, internet-facing LBs |
+
+**Why /18 for private subnets** (~16k addresses each): the AWS VPC CNI gives
+every *pod* a real VPC IP address. Pod density is therefore bounded by subnet
+size, not just by node count. Undersizing here is painful to fix later.
+
+## Two things EKS needs that are easy to miss
+
+- **`EnableDnsSupport` + `EnableDnsHostnames`** — without both, pods get no
+  working DNS and the private hosted zones that EKS and VPC endpoints depend on
+  do not resolve.
+- **Subnet tags** — `kubernetes.io/role/elb=1` on public,
+  `kubernetes.io/role/internal-elb=1` on private. This is how the load balancer
+  controller decides where to place a service's load balancer. Without them,
+  `type: LoadBalancer` services just hang in `pending`.
+
+## NAT: the first real cost decision
+
+```yaml
+nat_mode: "single"    # or "per_az"
+```
+
+| Mode | NAT gateways | ~Idle cost | Failure behavior |
+|---|---|---|---|
+| `single` | 1 | ~$33/mo | all private egress dies if that one AZ fails |
+| `per_az` | 3 | ~$100/mo | AZ-independent egress |
+
+We default to `single` because this is a learning deployment. Production and
+gov postures want `per_az`.
+
+The template creates **one private route table per AZ even in single mode**, so
+flipping to `per_az` later only changes route targets — no subnet
+re-association, no resource replacement.
+
+## The S3 gateway endpoint is not optional
+
+ClickHouse Private stores its table data in S3. Without a gateway endpoint,
+every byte of that traffic would route through the NAT gateway and be billed
+per GB. The endpoint is free and attaches to all three private route tables.
+
+This is also the first piece of true airgap architecture: S3 traffic never
+leaves the AWS network. A fully airgapped posture extends this with *interface*
+endpoints for ECR, STS and CloudWatch, which would let you delete the NAT
+gateway entirely. We haven't done that yet — worth revisiting for the FIPS
+build.
+
+## What got created
+
+```
+vpc-0d5974aa53e1b0031
+private: subnet-04d867d3…(1a)  subnet-03a9e5dc…(1b)  subnet-09f986b8…(1c)
+public:  subnet-04c1db39…(1a)  subnet-094e6106…(1b)  subnet-047bcb03…(1c)
+nat-063e3858e1aeb9a78 (available)
+```
+
+Verified: private subnets do not auto-assign public IPs, all three private
+route tables default to the NAT plus carry the S3 prefix-list route, and 6/6
+subnets have their `kubernetes.io/role` tag.
+
+## Note on `--check`
+
+Two check-mode bugs surfaced while building this, both worth knowing as
+patterns:
+
+1. A read-only `command` used to gather facts gets **skipped** under `--check`,
+   so a downstream `assert` sees empty output and fails misleadingly. Fix:
+   `check_mode: false` on read-only lookups.
+2. `set_fact` reading `stack_outputs` fails under `--check` because no stack
+   exists. Fix: guard on `_vpc_stack.stack_outputs is defined`, not on state.
+
+## Checkpoint
+
+- [x] VPC, 3 AZs, public + private subnets, correct EKS tags
+- [x] Single NAT gateway, per-AZ private route tables
+- [x] S3 gateway endpoint on all private route tables
+- [x] AZ/instance-type compatibility asserted before creation
+- [ ] Step 4: EKS control plane
+- [ ] Step 5: node groups ← **where cost becomes significant**

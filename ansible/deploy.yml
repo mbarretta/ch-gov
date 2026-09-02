@@ -42,5 +42,9 @@
     - role: image_sync
       tags: [images, sync]
 
-    # --- Steps 3-11: VPC, EKS, node groups, S3/IRSA, operator, cluster -----
+    # --- Step 3: VPC and networking ----------------------------------------
+    - role: vpc
+      tags: [infra, vpc]
+
+    # --- Steps 4-11: EKS, node groups, S3/IRSA, operator, cluster ----------
     # Not implemented yet.

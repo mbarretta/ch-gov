@@ -1,0 +1,92 @@
+---
+# Step 3: VPC, subnets, NAT, S3 gateway endpoint.
+#
+# Delivered as one CloudFormation stack rather than individual Ansible
+# modules. The reason is teardown: `state: absent` on this stack removes
+# every resource in the right order, which matters because NAT gateways and
+# Elastic IPs bill hourly whether or not anything uses them. Hand-rolled
+# module chains leave orphans when a run is interrupted.
+
+- name: Warn about hourly cost before creating anything
+  ansible.builtin.debug:
+    msg:
+      - "NAT mode: {{ infrastructure.nat_mode }}"
+      - "{{ 1 if infrastructure.nat_mode == 'single' else 3 }} NAT gateway(s) at ~$0.045/hr each"
+      - "estimated idle cost: ~${{ (0.045 * 24 * 30 * (1 if infrastructure.nat_mode == 'single' else 3)) | round(0, 'common') | int }}/month"
+      - "teardown: ansible-playbook deploy.yml --tags vpc -e vpc_state=absent"
+
+- name: Verify the requested AZs can host the chosen instance types
+  # Subnets are AZ-pinned and cannot be moved. Creating them in an AZ that
+  # lacks the node instance type means the node group fails much later, with
+  # an error that does not mention availability zones at all.
+  # In us-east-1, us-east-1e offers none of these types.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ec2
+      - describe-instance-type-offerings
+      - --location-type=availability-zone
+      - --filters=Name=instance-type,Values={{ item }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=InstanceTypeOfferings[].Location
+      - --output=text
+  loop: "{{ [infrastructure.server.instance_type, infrastructure.keeper.instance_type, infrastructure.operator.instance_type] | unique }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _offerings
+  changed_when: false
+  # Read-only lookup: must run even under --check, or the assert below sees
+  # empty output and fails with a misleading "not offered in ..." message.
+  check_mode: false
+
+- name: Fail if any requested AZ cannot host a required instance type
+  ansible.builtin.assert:
+    that: infrastructure.availability_zones | difference(item.stdout.split()) | length == 0
+    fail_msg: >-
+      {{ item.item }} is not offered in
+      {{ infrastructure.availability_zones | difference(item.stdout.split()) | join(', ') }}.
+      Choose different AZs in group_vars/all.yml, or a different instance type.
+    success_msg: "{{ item.item }} available in all requested AZs"
+  loop: "{{ _offerings.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Deploy the VPC stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-vpc"
+    state: "{{ vpc_state | default('present') }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    template: "{{ role_path }}/files/vpc.yaml"
+    template_parameters:
+      EnvironmentName: "{{ infrastructure.environment_name }}"
+      VpcCidr: "{{ infrastructure.vpc_cidr }}"
+      AvailabilityZones: "{{ infrastructure.availability_zones | join(',') }}"
+      PublicSubnetCidrs: "{{ infrastructure.public_subnet_cidrs | join(',') }}"
+      PrivateSubnetCidrs: "{{ infrastructure.private_subnet_cidrs | join(',') }}"
+      NatMode: "{{ infrastructure.nat_mode }}"
+      EksClusterName: "{{ infrastructure.eks_cluster_name }}"
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _vpc_stack
+
+- name: Record stack outputs for later steps
+  ansible.builtin.set_fact:
+    vpc_id: "{{ _vpc_stack.stack_outputs.VpcId }}"
+    private_subnet_ids: "{{ _vpc_stack.stack_outputs.PrivateSubnetIds.split(',') }}"
+    public_subnet_ids: "{{ _vpc_stack.stack_outputs.PublicSubnetIds.split(',') }}"
+  # stack_outputs is absent under --check (no stack was created) and when
+  # tearing down, so guard on the outputs themselves rather than on state.
+  when:
+    - (vpc_state | default('present')) == 'present'
+    - _vpc_stack.stack_outputs is defined
+
+- name: Show what exists
+  ansible.builtin.debug:
+    msg:
+      - "vpc:             {{ vpc_id }}"
+      - "private subnets: {{ private_subnet_ids | join(', ') }}"
+      - "public subnets:  {{ public_subnet_ids | join(', ') }}"
+  when: vpc_id is defined

@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- VPC, subnets, NAT, and S3 gateway endpoint.
+  Three AZs with a public and a private subnet each. Nodes live in the private
+  subnets; the public subnets exist only to host NAT gateways and any
+  internet-facing load balancer.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Name prefix for all resources.
+  VpcCidr:
+    Type: String
+  AvailabilityZones:
+    Type: List<AWS::EC2::AvailabilityZone::Name>
+    Description: Exactly three AZs. Must all support the chosen node instance types.
+  PublicSubnetCidrs:
+    Type: CommaDelimitedList
+  PrivateSubnetCidrs:
+    Type: CommaDelimitedList
+  NatMode:
+    Type: String
+    AllowedValues: [single, per_az]
+    Description: >-
+      single = one NAT gateway shared by all AZs (cheaper; egress dies if that
+      AZ fails). per_az = one per AZ (production posture, ~3x the hourly cost).
+  EksClusterName:
+    Type: String
+    Description: Used for the kubernetes.io/cluster subnet tags.
+
+Conditions:
+  MultiNat: !Equals [!Ref NatMode, per_az]
+
+Resources:
+  # ---------------------------------------------------------------- networking
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      # Both required for EKS: pods get DNS, and the private-hosted-zone
+      # records that EKS and VPC endpoints rely on must resolve.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-vpc"}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-igw"}
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ------------------------------------------------------------ public subnets
+  # MapPublicIpOnLaunch is required for a NAT gateway to work here.
+  # The kubernetes.io/role/elb tag is how the AWS load balancer controller
+  # discovers where to place internet-facing load balancers.
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !Ref AvailabilityZones]
+      CidrBlock: !Select [0, !Ref PublicSubnetCidrs]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-public-1"}
+        - {Key: "kubernetes.io/role/elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !Ref AvailabilityZones]
+      CidrBlock: !Select [1, !Ref PublicSubnetCidrs]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-public-2"}
+        - {Key: "kubernetes.io/role/elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [2, !Ref AvailabilityZones]
+      CidrBlock: !Select [2, !Ref PublicSubnetCidrs]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-public-3"}
+        - {Key: "kubernetes.io/role/elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+
+  # ----------------------------------------------------------- private subnets
+  # /18 each: ~16k addresses. Generous on purpose -- every pod takes a VPC IP
+  # under the AWS VPC CNI, so pod density is bounded by subnet size.
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !Ref AvailabilityZones]
+      CidrBlock: !Select [0, !Ref PrivateSubnetCidrs]
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-private-1"}
+        - {Key: "kubernetes.io/role/internal-elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !Ref AvailabilityZones]
+      CidrBlock: !Select [1, !Ref PrivateSubnetCidrs]
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-private-2"}
+        - {Key: "kubernetes.io/role/internal-elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [2, !Ref AvailabilityZones]
+      CidrBlock: !Select [2, !Ref PrivateSubnetCidrs]
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-private-3"}
+        - {Key: "kubernetes.io/role/internal-elb", Value: "1"}
+        - {Key: !Sub "kubernetes.io/cluster/${EksClusterName}", Value: shared}
+
+  # -------------------------------------------------------------- NAT gateways
+  NatEip1:
+    Type: AWS::EC2::EIP
+    Properties: {Domain: vpc}
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-nat-1"}
+
+  NatEip2:
+    Type: AWS::EC2::EIP
+    Condition: MultiNat
+    Properties: {Domain: vpc}
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: MultiNat
+    Properties:
+      AllocationId: !GetAtt NatEip2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-nat-2"}
+
+  NatEip3:
+    Type: AWS::EC2::EIP
+    Condition: MultiNat
+    Properties: {Domain: vpc}
+  NatGateway3:
+    Type: AWS::EC2::NatGateway
+    Condition: MultiNat
+    Properties:
+      AllocationId: !GetAtt NatEip3.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-nat-3"}
+
+  # ------------------------------------------------------------- route tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${EnvironmentName}-public-rt"}
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnet1, RouteTableId: !Ref PublicRouteTable}
+  PublicAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnet2, RouteTableId: !Ref PublicRouteTable}
+  PublicAssoc3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnet3, RouteTableId: !Ref PublicRouteTable}
+
+  # One private route table per AZ. Needed even in single-NAT mode so that
+  # switching NatMode to per_az later only changes the route targets --
+  # no subnet re-association, no resource replacement.
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-private-rt-1"}]
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  PrivateAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrivateSubnet1, RouteTableId: !Ref PrivateRouteTable1}
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-private-rt-2"}]
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [MultiNat, !Ref NatGateway2, !Ref NatGateway1]
+  PrivateAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrivateSubnet2, RouteTableId: !Ref PrivateRouteTable2}
+
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "${EnvironmentName}-private-rt-3"}]
+  PrivateRoute3:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [MultiNat, !Ref NatGateway3, !Ref NatGateway1]
+  PrivateAssoc3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PrivateSubnet3, RouteTableId: !Ref PrivateRouteTable3}
+
+  # --------------------------------------------------------- S3 gateway endpoint
+  # Free, and important: ClickHouse stores its data in S3. Without this, every
+  # byte of S3 traffic would traverse the NAT gateway and be billed per GB.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+        - !Ref PrivateRouteTable3
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: {Name: !Sub "${EnvironmentName}-VpcId"}
+  PrivateSubnetIds:
+    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2, !Ref PrivateSubnet3]]
+    Export: {Name: !Sub "${EnvironmentName}-PrivateSubnetIds"}
+  PublicSubnetIds:
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2, !Ref PublicSubnet3]]
+    Export: {Name: !Sub "${EnvironmentName}-PublicSubnetIds"}
+  AvailabilityZones:
+    Value: !Join [",", !Ref AvailabilityZones]
