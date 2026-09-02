@@ -1,0 +1,78 @@
+# ===========================================================================
+# ClickHouse Private on AWS EKS -- deployment configuration
+#
+# Versions here track the official tutorial:
+#   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
+# All were verified present in the source ECR.
+# ===========================================================================
+
+# Ansible modules from amazon.aws / community.aws need boto3, which brew's
+# Python does not have. We keep it in a project-local venv (../.venv) rather
+# than mutating any system Python, so the repo stays self-contained.
+# Created by scripts/part1-setup.sh.
+ansible_python_interpreter: "{{ playbook_dir }}/../.venv/bin/python3"
+
+# ---------------------------------------------------------------------------
+# THE key switch. false = standard ARM64 build; true = FIPS x86_64 build.
+# Flipping this changes image tags, the target registry hostname, node
+# architecture, and (later) TLS requirements. See docs/part-1-prerequisites.md
+# ---------------------------------------------------------------------------
+fips: false
+
+aws:
+  # Your account -- where everything gets built.
+  target_account_id: "<YOUR_ACCOUNT_ID>"
+  target_region: "us-east-1"
+  target_profile: "sa"
+  # ClickHouse's registry -- read-only, never deployed into.
+  source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
+  source_ecr_region: "us-east-1"
+  source_ecr_profile: "private-us"
+
+versions:
+  server: "26.2.1.525"
+  keeper: "26.2.1.258"
+  operator_image: "main-1.20441.1"   # container tag
+  operator_chart: "1.20441.1"        # helm chart version (no "main-" prefix)
+  cluster_chart: "1.8.7"
+  preflight_chart: "1.38.4"
+
+# ---------------------------------------------------------------------------
+# Derived values -- do not edit; change `fips` or `versions` instead.
+# ---------------------------------------------------------------------------
+
+# Only the three CONTAINER images have -fips variants. The helm charts are
+# shared between both builds, so they never take the suffix.
+fips_suffix: "{{ '-fips' if fips else '' }}"
+
+source_registry: "{{ aws.source_ecr_account_id }}.dkr.ecr.{{ aws.source_ecr_region }}.amazonaws.com"
+
+# FIPS deployments must pull over FIPS-validated endpoints, which use a
+# different hostname shape entirely: <acct>.dkr-ecr-fips.<region>.on.aws
+target_registry: >-
+  {{ aws.target_account_id ~ '.dkr-ecr-fips.' ~ aws.target_region ~ '.on.aws'
+     if fips
+     else aws.target_account_id ~ '.dkr.ecr.' ~ aws.target_region ~ '.amazonaws.com' }}
+
+container_images:
+  - repo: clickhouse-server
+    tag: "{{ versions.server }}{{ fips_suffix }}"
+  - repo: clickhouse-keeper
+    tag: "{{ versions.keeper }}{{ fips_suffix }}"
+  - repo: clickhouse-operator
+    tag: "{{ versions.operator_image }}{{ fips_suffix }}"
+
+helm_charts:
+  - repo: helm/clickhouse-operator-helm
+    tag: "{{ versions.operator_chart }}"
+  - repo: helm/onprem-clickhouse-cluster
+    tag: "{{ versions.cluster_chart }}"
+  - repo: helm/preflight-check
+    tag: "{{ versions.preflight_chart }}"
+
+# Everything that must exist in your ECR before images can be copied in.
+all_artifacts: "{{ container_images + helm_charts }}"
+
+# skopeo credentials are written here, not to ~/.config/containers, so the
+# project stays self-contained. Gitignored -- it holds real registry tokens.
+skopeo_authfile: "{{ playbook_dir }}/../state/skopeo-auth.json"

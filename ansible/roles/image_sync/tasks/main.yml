@@ -1,0 +1,121 @@
+---
+# Copy container images and Helm charts from ClickHouse's ECR into yours.
+#
+# This is the airgap hop. skopeo talks registry-to-registry, so layers never
+# touch this machine -- no docker daemon, no multi-GB local round trip.
+#
+# `--all` copies the full multi-arch manifest list rather than only the
+# manifest matching this laptop's architecture. That matters: we run on arm64
+# macOS, the standard build needs arm64 Linux, and the FIPS build needs
+# x86_64. Without --all you can silently publish the wrong architecture.
+#
+# Note on style: these tasks deliberately avoid `shell:` with a pipeline.
+# Piping `aws ecr get-login-password | skopeo login` inside a folded YAML
+# scalar is fragile (indented continuation lines become real newlines and
+# break the pipe), and a broken pipe dumps the registry token into the log.
+# Passing the token via the command module's `stdin` keeps it out of argv
+# and out of the process table.
+
+- name: Ensure state directory exists for the skopeo auth file
+  ansible.builtin.file:
+    path: "{{ skopeo_authfile | dirname }}"
+    state: directory
+    mode: "0700"
+
+# --- registry logins -------------------------------------------------------
+# ECR tokens last 12h and are scoped to a single registry, so each side needs
+# its own login. Both land in a project-local authfile (state/, gitignored).
+
+- name: Request ECR tokens for both registries
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ item.profile }}
+      - --region={{ item.region }}
+  loop:
+    - { name: source, profile: "{{ aws.source_ecr_profile }}", region: "{{ aws.source_ecr_region }}", registry: "{{ source_registry }}" }
+    - { name: target, profile: "{{ aws.target_profile }}",     region: "{{ aws.target_region }}",     registry: "{{ target_registry }}" }
+  loop_control:
+    label: "{{ item.name }}"
+  register: _ecr_tokens
+  changed_when: false
+  no_log: true          # stdout IS the credential
+
+- name: Log in to each registry
+  ansible.builtin.command:
+    argv:
+      - skopeo
+      - login
+      - --username=AWS
+      - --password-stdin
+      - --authfile={{ skopeo_authfile }}
+      - "{{ item.item.registry }}"
+    stdin: "{{ item.stdout }}"
+  loop: "{{ _ecr_tokens.results }}"
+  loop_control:
+    label: "{{ item.item.name }} -> {{ item.item.registry }}"
+  register: _logins
+  changed_when: false
+  failed_when: false    # checked below, so we can report clearly
+  no_log: true          # stdin carries the credential
+
+- name: Verify both logins succeeded
+  # Separate task so the diagnostic is readable: only rc and stderr are
+  # surfaced, neither of which contains the token.
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      skopeo login failed for {{ item.item.item.name }} registry
+      ({{ item.item.item.registry }}), rc={{ item.rc }}:
+      {{ item.stderr | default('no stderr') }}
+    success_msg: "logged in to {{ item.item.item.registry }}"
+  loop: "{{ _logins.results }}"
+  loop_control:
+    label: "{{ item.item.item.name }}"
+
+# --- the copy itself -------------------------------------------------------
+
+- name: Check which tags already exist in the target registry
+  # Makes the role idempotent and, more usefully, resumable: a sync
+  # interrupted halfway continues instead of recopying gigabytes.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - describe-images
+      - --repository-name={{ item.repo }}
+      - --image-ids=imageTag={{ item.tag }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=imageDetails[0].imageDigest
+      - --output=text
+  loop: "{{ all_artifacts }}"
+  loop_control:
+    label: "{{ item.repo }}:{{ item.tag }}"
+  register: _existing
+  changed_when: false
+  failed_when: false      # "not found" is an expected, meaningful answer
+
+- name: Copy each artifact that is not already present
+  ansible.builtin.command:
+    argv:
+      - skopeo
+      - copy
+      - --all
+      - --authfile={{ skopeo_authfile }}
+      - "docker://{{ source_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
+      - "docker://{{ target_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
+  loop: "{{ _existing.results }}"
+  loop_control:
+    label: "{{ item.item.repo }}:{{ item.item.tag }}"
+  when: item.rc != 0 or 'sha256:' not in (item.stdout | default(''))
+  register: _copied
+
+- name: Report what was copied vs already present
+  ansible.builtin.debug:
+    msg: >-
+      {{ _copied.results | rejectattr('skipped', 'defined') | list | length }} copied,
+      {{ _copied.results | selectattr('skipped', 'defined') | list | length }} already present
+      ({{ 'FIPS' if fips else 'standard' }} build)

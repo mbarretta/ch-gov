@@ -1,0 +1,51 @@
+---
+# Create the ECR repositories in YOUR account that images get copied into.
+#
+# Why this role exists: the official tutorial goes straight from "create the
+# pull role" to "skopeo copy". But ECR does not create repositories on push --
+# a copy into a nonexistent repo fails with RepositoryNotFoundException. So
+# every target repo must exist first.
+
+- name: Confirm we are authenticated to the target account
+  ansible.builtin.command:
+    argv:
+      - aws
+      - sts
+      - get-caller-identity
+      - --profile={{ aws.target_profile }}
+      - --query=Account
+      - --output=text
+  register: _target_acct
+  changed_when: false
+
+- name: Fail early if the profile points at an unexpected account
+  # Cheap guard against copying images into somebody else's account because
+  # a profile got edited. Better a clear failure than a confusing one.
+  ansible.builtin.assert:
+    that: _target_acct.stdout | trim == aws.target_account_id
+    fail_msg: >-
+      Profile '{{ aws.target_profile }}' resolves to account
+      {{ _target_acct.stdout | trim }}, but group_vars says
+      {{ aws.target_account_id }}. Fix one of them before continuing.
+    success_msg: "Authenticated to target account {{ aws.target_account_id }}"
+
+- name: Create ECR repository for each artifact
+  # community.aws.ecs_ecr is idempotent: existing repos report ok, not changed.
+  # image_tag_mutability=IMMUTABLE means a tag, once pushed, cannot be
+  # repointed at different content -- worth having for a database you must
+  # be able to reason about after the fact.
+  community.aws.ecs_ecr:
+    name: "{{ item.repo }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    image_tag_mutability: immutable
+    scan_on_push: true
+    state: present
+  loop: "{{ all_artifacts }}"
+  loop_control:
+    label: "{{ item.repo }}"
+  register: _ecr_repos
+
+- name: Summarize repositories
+  ansible.builtin.debug:
+    msg: "{{ all_artifacts | map(attribute='repo') | list }} present in {{ target_registry }}"

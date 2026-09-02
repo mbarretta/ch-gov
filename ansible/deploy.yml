@@ -1,0 +1,46 @@
+---
+# ClickHouse Private on AWS EKS -- deployment playbook
+#
+# Run from the ansible/ directory:
+#   ansible-playbook deploy.yml                    # everything implemented so far
+#   ansible-playbook deploy.yml --tags images      # just ECR setup + image sync
+#   ansible-playbook deploy.yml --check            # dry run
+#   ansible-playbook deploy.yml -e fips=true       # FIPS build
+#
+# Steps map to the official tutorial:
+#   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
+
+- name: ClickHouse Private -- AWS EKS
+  hosts: localhost
+  gather_facts: false
+
+  environment:
+    # Keep AWS config project-local, matching scripts/env.sh. Without this,
+    # a shell that never sourced env.sh would find no profiles at all.
+    AWS_CONFIG_FILE: "{{ playbook_dir }}/../.aws/config"
+
+  pre_tasks:
+    - name: Show what this run will do
+      ansible.builtin.debug:
+        msg:
+          - "build:           {{ 'FIPS (x86_64)' if fips else 'standard (arm64)' }}"
+          - "target account:  {{ aws.target_account_id }} / {{ aws.target_region }}"
+          - "target registry: {{ target_registry }}"
+          - "source registry: {{ source_registry }}"
+          - "artifacts:       {{ all_artifacts | map(attribute='repo') | list | join(', ') }}"
+      tags: [always]
+
+  roles:
+    # --- Step 1: IAM role for ECR access -----------------------------------
+    # Already satisfied: ClickHouseAirgapECRPullRole exists in this account
+    # and the `private-us` profile assumes it. Verified by
+    # scripts/part1-setup.sh. No role needed here.
+
+    # --- Step 2: copy container images -------------------------------------
+    - role: ecr_setup
+      tags: [images, ecr]
+    - role: image_sync
+      tags: [images, sync]
+
+    # --- Steps 3-11: VPC, EKS, node groups, S3/IRSA, operator, cluster -----
+    # Not implemented yet.

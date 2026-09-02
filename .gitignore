@@ -8,3 +8,7 @@
 state/
 logs/
 kubeconfig*
+
+# project-local python for ansible modules (recreate with part1-setup.sh)
+.venv/
+state/skopeo-auth.json

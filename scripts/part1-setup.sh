@@ -104,6 +104,27 @@ else
 fi
 
 # ===========================================================================
+step "3b/6  Python venv for Ansible AWS modules"
+# ===========================================================================
+# amazon.aws / community.aws modules import boto3 inside whichever Python runs
+# the module. Homebrew's Python does not have it, and PEP 668 blocks
+# pip-installing into it. A project-local venv keeps the repo self-contained;
+# ansible/group_vars/all.yml points ansible_python_interpreter at it.
+VENV="$(cd .. && pwd)/.venv"
+if [[ -x "$VENV/bin/python3" ]] && "$VENV/bin/python3" -c 'import boto3' 2>/dev/null; then
+  ok "venv present with boto3 ($("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)'))"
+elif ((CHECK_ONLY)); then
+  fail "venv missing or lacks boto3 at $VENV"; note_problem
+else
+  python3 -m venv "$VENV" >/dev/null 2>&1 || true
+  if "$VENV/bin/pip" install -q --upgrade pip boto3 botocore packaging >/dev/null 2>&1; then
+    ok "venv created with boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)')"
+  else
+    fail "could not provision venv at $VENV"; note_problem
+  fi
+fi
+
+# ===========================================================================
 step "4/6  Version report"
 # ===========================================================================
 # Minimum versions per the guide. We warn rather than hard-fail on drift,

@@ -232,17 +232,18 @@ work. The original guide never mentions these, and for a government target this
 is probably a day-one `deploy-config.yaml` decision rather than a later
 migration.
 
-## 5. Still open: the deployment repository
+## 5. The deployment repository question, resolved
 
-The guide's Section 3 opens with `cd cloud/aws/ansible` but **never says where
-that directory comes from** — no clone URL, no artifact, no repo name. Searching
-the ClickHouse GitHub org for the distinctive filenames (`deploy-config.yaml`,
-the Makefile targets) returned nothing accessible.
+The training guide's Section 3 opens with `cd cloud/aws/ansible` but never says
+where that directory comes from — no clone URL, no repo name. Searching the
+ClickHouse GitHub org for its distinctive filenames turned up nothing reachable.
 
-So Part 1 stops one step short of complete. Sections 1 and 2 are done and
-verified; Section 3 (project layout + `deploy-config.yaml`) needs that source.
-
----
+**We stopped looking and wrote our own.** The public tutorial at
+[docs/cloud/clickhouse-private/tutorials/deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws)
+documents all 11 steps as explicit commands, and it is *current* — its versions
+match what actually exists in the source ECR today, unlike the training doc. Our
+Ansible lives in `ansible/` and follows that tutorial. See
+`docs/part-2-image-sync.md`.
 
 ## 6. Checkpoint
 
@@ -253,8 +254,8 @@ Verified working:
 - [x] `sa` profile authenticates via SSO
 - [x] `private-us` assumes the pull role
 - [x] Source ECR reachable; real image versions enumerated
-- [ ] Deployment repo obtained — **blocked**
-- [ ] `deploy-config.yaml` configured — needs repo, region, FIPS decision
+- [x] Python venv with boto3 for Ansible's AWS modules
+- [x] Deployment automation — we write our own (`ansible/`)
 
 Re-verify any time with:
 
