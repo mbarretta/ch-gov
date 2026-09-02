@@ -92,8 +92,39 @@ brew unlink helm && brew link --overwrite --force helm@3
 
 ## 3. AWS access: two profiles, one login
 
-An AWS **profile** is a named set of credentials in `~/.aws/config`. You select
-one per command with `--profile`, or globally with `export AWS_PROFILE=...`.
+An AWS **profile** is a named set of credentials. You select one per command
+with `--profile`, or globally with `export AWS_PROFILE=...`.
+
+### Config lives in the repo, not in your home directory
+
+By default the CLI reads `~/.aws/config`. We instead keep it at **`.aws/config`
+inside this project** and point the CLI at it with `AWS_CONFIG_FILE`, so the
+entire setup moves as one directory.
+
+```bash
+source scripts/env.sh    # sets AWS_CONFIG_FILE + AWS_PROFILE, prints your identity
+```
+
+The scripts under `scripts/` detect and use the in-repo config on their own, so
+they work without activating anything. Sourcing `env.sh` is only for your own
+interactive `aws` / `kubectl` commands.
+
+**Two consequences worth knowing:**
+
+1. **A bare `aws` command outside this project finds no profiles.** That's
+   deliberate — there is one source of truth, not two that can drift. If you
+   want these profiles available everywhere, copy `.aws/config` to `~/.aws/config`,
+   and accept that you now maintain both.
+2. **The SSO token cache does not move.** The CLI hardcodes `~/.aws/sso/cache`
+   and offers no environment variable to relocate it. This is a non-issue: it
+   holds only a short-lived token that `aws sso login` regenerates. Just don't
+   expect a copy of this directory to arrive somewhere already logged in.
+
+`.aws/config` is tracked in git. It contains no credentials — only an SSO start
+URL, an account ID, and a role ARN. `.gitignore` blocks `.aws/credentials` and
+the cache directories so that static keys can never be committed by accident.
+If you'd rather not have account identifiers in the repo, make `.aws/config` a
+template and gitignore the real one.
 
 We use the two names the deployment config expects:
 
@@ -130,6 +161,7 @@ SSO tokens expire (roughly daily). When commands start failing with
 `Error loading SSO Token`, that's all it is:
 
 ```bash
+source scripts/env.sh            # if not already active in this shell
 aws sso login --profile sa
 ```
 

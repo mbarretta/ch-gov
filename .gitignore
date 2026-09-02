@@ -1,4 +1,9 @@
+# Never commit actual credentials or cached tokens
+.aws/credentials
+.aws/sso/
+.aws/cli/
 .env
+
 *.log
 state/
 logs/

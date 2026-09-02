@@ -5,6 +5,13 @@
 # Homebrew's bin must be on PATH even under non-login shells (cron, CI, agents).
 [[ ":$PATH:" == *":/opt/homebrew/bin:"* ]] || export PATH="/opt/homebrew/bin:$PATH"
 
+# This project keeps its AWS config in-repo rather than in ~/.aws, so the whole
+# setup is portable. Point the CLI at it unless the caller already chose a file.
+CH_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -z "${AWS_CONFIG_FILE:-}" && -f "$CH_PROJECT_ROOT/.aws/config" ]]; then
+  export AWS_CONFIG_FILE="$CH_PROJECT_ROOT/.aws/config"
+fi
+
 # ---- output helpers -------------------------------------------------------
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
