@@ -181,7 +181,7 @@ actually in the registry before deploying** rather than trusting a pinned
 config, because a missing tag fails at the image-sync phase well into a run.
 `part1-setup.sh` prints the current tags for that reason.
 
-### 4.4 Everything runs current, which shifts the version question to EKS
+### 4.3 Everything runs current, which shifts the version question to EKS
 
 All tooling is at current releases (kubectl 1.37, helm 4.2.4, ansible-core 2.21,
 jq 1.8.2, skopeo 1.24, aws-cli 2.36). Nothing is pinned backwards.
@@ -192,7 +192,7 @@ generally still work, but the fix is to pick a **current** `eks_version` in
 `deploy-config.yaml` rather than to downgrade kubectl — one more reason not to
 take the old guide's config values literally.
 
-### 4.3 FIPS and hardened variants
+### 4.4 FIPS and hardened variants
 
 Every image also ships as `-fips`, `-nocve`, and sometimes `-fips-ubi9`.
 `-fips` means FIPS 140 validated crypto — typically **mandatory** for US federal
