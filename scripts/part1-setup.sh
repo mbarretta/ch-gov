@@ -34,7 +34,7 @@ step "1/6  Required CLI tools"
 #   skopeo   -- copies images registry->registry WITHOUT a local docker pull;
 #               this is the heart of the airgap model
 #   jq       -- parses the JSON that aws/kubectl emit
-#   python3  -- Ansible's runtime
+#   python3  -- Ansible's runtime; 3.12+ (ansible-core 2.21 requires it)
 #   ansible  -- runs the 14-phase deployment playbook
 BREW_PKGS=(awscli kubectl skopeo jq ansible)
 MISSING=()
@@ -50,6 +50,18 @@ else
   info "installing: ${BREW_PKGS[*]}"
   brew install "${BREW_PKGS[@]}" >/dev/null 2>&1 || warn "brew install reported errors; verification below is authoritative"
   ok "base tools installed"
+fi
+
+# Presence is not enough for Python. ansible-core 2.21 declares
+# Requires-Python >=3.12, so check the floor here rather than letting a stale
+# python3 fail obscurely inside an Ansible module several steps later.
+if have python3; then
+  if py_at_least; then
+    ok "python3 $(py_version) (floor is ${PY_MIN})"
+  else
+    fail "python3 is $(py_version); need ${PY_MIN}+ -- run: brew install python@3.14"
+    note_problem
+  fi
 fi
 
 # ===========================================================================
@@ -111,12 +123,21 @@ step "3b/6  Python venv for Ansible AWS modules"
 # pip-installing into it. A project-local venv keeps the repo self-contained;
 # ansible/group_vars/all.yml points ansible_python_interpreter at it.
 VENV="$(cd .. && pwd)/.venv"
-if [[ -x "$VENV/bin/python3" ]] && "$VENV/bin/python3" -c 'import boto3' 2>/dev/null; then
-  ok "venv present with boto3 ($("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)'))"
+if [[ -x "$VENV/bin/python3" ]] && py_at_least "$VENV/bin/python3" \
+   && "$VENV/bin/python3" -c 'import boto3' 2>/dev/null; then
+  ok "venv present: python $(py_version "$VENV/bin/python3"), boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)')"
 elif ((CHECK_ONLY)); then
-  fail "venv missing or lacks boto3 at $VENV"; note_problem
+  fail "venv at $VENV is missing, below python ${PY_MIN}, or lacks boto3"; note_problem
 else
-  python3 -m venv "$VENV" >/dev/null 2>&1 || true
+  # A venv is pinned to the interpreter that built it, so one left over from an
+  # older Python has to be rebuilt, not just re-pip'd. --clear does that; the
+  # venv is gitignored and created by this script, so discarding it is safe.
+  if [[ -x "$VENV/bin/python3" ]] && ! py_at_least "$VENV/bin/python3"; then
+    info "existing venv runs python $(py_version "$VENV/bin/python3"); rebuilding on ${PY_MIN}+"
+    python3 -m venv --clear "$VENV" >/dev/null 2>&1 || true
+  else
+    python3 -m venv "$VENV" >/dev/null 2>&1 || true
+  fi
   if "$VENV/bin/pip" install -q --upgrade pip boto3 botocore packaging >/dev/null 2>&1; then
     ok "venv created with boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)')"
   else
@@ -137,8 +158,8 @@ vrow kubectl "$(kubectl version --client 2>/dev/null | awk '/Client/{print $3}')
 vrow helm    "$(helm version --short 2>/dev/null)"                           "v3+ (v4 in use)"
 vrow skopeo  "$(skopeo --version 2>/dev/null | awk '{print $3}')"            "v1.x"
 vrow jq      "$(jq --version 2>/dev/null)"                                   "any"
-vrow python3 "$(python3 --version 2>/dev/null | awk '{print $2}')"           "3.9+"
-vrow ansible "$(ansible --version </dev/null 2>/dev/null | head -1 | tr -d '[]' | awk '{print $3}')" "2.15+"
+vrow python3 "$(py_version)"                                                 "${PY_MIN}+"
+vrow ansible "$(ansible --version </dev/null 2>/dev/null | head -1 | tr -d '[]' | awk '{print $3}')" "2.21+ (sets py floor)"
 
 # ===========================================================================
 step "5/6  AWS profiles"

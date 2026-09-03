@@ -34,6 +34,25 @@ note_problem() { PROBLEMS=$((PROBLEMS + 1)); }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ---- python floor ---------------------------------------------------------
+# 3.12 is the floor, and it is not an arbitrary choice: ansible-core 2.21
+# declares Requires-Python >=3.12, so anything older cannot run the playbook at
+# all. It also happens to be the oldest line with real life left -- 3.9 went EOL
+# in Oct 2025 and 3.10 goes EOL in Oct 2026, while 3.12 is supported to Oct 2028.
+readonly PY_MIN_MAJOR=3
+readonly PY_MIN_MINOR=12
+readonly PY_MIN="${PY_MIN_MAJOR}.${PY_MIN_MINOR}"
+
+# Succeeds if the given interpreter (default: python3 on PATH) is >= PY_MIN.
+py_at_least() {
+  "${1:-python3}" -c \
+    "import sys; sys.exit(0 if sys.version_info[:2] >= ($PY_MIN_MAJOR, $PY_MIN_MINOR) else 1)" \
+    2>/dev/null
+}
+
+# Prints e.g. 3.14.7, or nothing if the interpreter is missing/unrunnable.
+py_version() { "${1:-python3}" -c 'import platform; print(platform.python_version())' 2>/dev/null; }
+
 # ---- constants (from the ClickHouse Private training guide) ---------------
 # Where ClickHouse publishes its images. You never deploy into this account;
 # you only read from it, then copy images into your own ECR.

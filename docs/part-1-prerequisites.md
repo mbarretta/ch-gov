@@ -56,10 +56,21 @@ Install them all; the deployment fails on a missing one.
 | **helm** | v3+ (**we use v4**) | Installs the ClickHouse operator and cluster as packaged "charts". |
 | **skopeo** | v1.x | Copies images registry→registry *without* a local `docker pull`. The airgap workhorse. |
 | **jq** | any | Parses the JSON that `aws` and `kubectl` emit. The scripts lean on it heavily. |
-| **python3** | 3.9+ | Ansible's runtime. |
-| **ansible** | 2.15+ | Runs the 14-phase deployment playbook that does the real work. |
+| **python3** | 3.12+ | Ansible's runtime. |
+| **ansible** | 2.21+ | Runs the 14-phase deployment playbook that does the real work. |
 
-Two details worth internalizing:
+Three details worth internalizing:
+
+**Why Python 3.12 and not the 3.9 the older guide names.** The floor is set by
+Ansible, not by us: `ansible-core` 2.21 declares `Requires-Python >=3.12`, so an
+older interpreter cannot run the playbook at all. It lines up with support dates
+anyway — 3.9 reached end-of-life in October 2025 and 3.10 does so in October
+2026, while 3.12 is supported until October 2028. `part1-setup.sh` checks this
+explicitly and fails loudly, because the alternative is a confusing error from
+inside an Ansible module several steps into a deployment. Two interpreters are
+involved and both must clear the floor: the one Homebrew bundles with Ansible
+(which runs `ansible-playbook` itself) and the project-local `.venv` (which is
+where AWS modules import `boto3`) — see §3.
 
 **Why skopeo and not docker?** `docker pull` + `docker push` would drag every
 image layer down to your laptop and back up again — gigabytes, twice, slowly.
