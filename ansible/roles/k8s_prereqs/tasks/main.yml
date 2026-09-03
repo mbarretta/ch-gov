@@ -1,0 +1,276 @@
+---
+# Step 7: the things that must exist in Kubernetes before the operator will
+# run -- snapshot CRDs, a working EBS CSI driver, and a StorageClass.
+#
+# Nothing here costs money beyond the one test volume, which is deleted again.
+#
+# Teardown: ansible-playbook deploy.yml --tags prereqs -e prereqs_state=absent
+
+# --- VolumeSnapshot CRDs ---------------------------------------------------
+# The operator's backup machinery references VolumeSnapshot types, so the CRDs
+# must be registered or the operator fails to start. Applied from vendored
+# copies pinned to external-snapshotter v8.6.0 -- see the README beside them
+# for why they are not fetched from a URL.
+#
+# These are cluster-scoped API definitions, not workloads: applying them
+# creates no pods and costs nothing.
+
+- name: Register the VolumeSnapshot CRDs
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    # Server-side apply. These CRDs are large, and a client-side apply stores
+    # the whole manifest in a last-applied-configuration annotation, which
+    # runs into the 256 KiB annotation limit as they grow.
+    apply: true
+    server_side_apply:
+      field_manager: clickhouse-private-ansible
+    src: "{{ role_path }}/files/volumesnapshot-crds/{{ item }}"
+  loop:
+    - snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+    - snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+    - snapshot.storage.k8s.io_volumesnapshots.yaml
+  loop_control:
+    label: "{{ item | regex_replace('^snapshot.storage.k8s.io_', '') }}"
+
+# --- EBS CSI driver --------------------------------------------------------
+
+- name: Look up the IRSA role ARNs from Step 6
+  # Read from CloudFormation rather than relying on facts from the
+  # storage_iam role, so this role runs standalone with --tags prereqs.
+  amazon.aws.cloudformation_info:
+    stack_name: "{{ infrastructure.environment_name }}-irsa"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  register: _irsa_info
+  check_mode: false
+
+- name: Extract the EBS CSI role ARN
+  ansible.builtin.set_fact:
+    _ebs_csi_role_arn: >-
+      {{ _irsa_info.cloudformation[infrastructure.environment_name + '-irsa']
+         .stack_outputs.EbsCsiDriverRoleArn }}
+
+- name: Fail clearly if Step 6 has not run
+  ansible.builtin.assert:
+    that: _ebs_csi_role_arn | length > 0
+    fail_msg: "No IRSA stack. Run: ansible-playbook deploy.yml --tags storage"
+
+- name: Install the EBS CSI driver add-on
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-ebs-csi"
+    state: "{{ prereqs_state | default('present') }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    template_body: "{{ lookup('file', role_path ~ '/files/ebs-csi-addon.yaml') }}"
+    template_parameters:
+      EksClusterName: "{{ infrastructure.eks_cluster_name }}"
+      EbsCsiRoleArn: "{{ _ebs_csi_role_arn }}"
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _ebs_addon
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (prereqs_state | default('present')) == 'absent'
+
+- name: Wait for the EBS CSI controller to be available
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace=kube-system
+      - --for=condition=Available
+      - --timeout=300s
+      - deployment/ebs-csi-controller
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  check_mode: false
+
+- name: Confirm the driver's service account really is wired to IAM
+  # The whole point of IRSA is that no credential is stored anywhere. What
+  # makes it work is this one annotation, added by the add-on. If it is
+  # missing, volume creation fails later with an opaque AccessDenied.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - serviceaccount/ebs-csi-controller-sa
+      - --namespace=kube-system
+      - -o=jsonpath={.metadata.annotations.eks\.amazonaws\.com/role-arn}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ebs_sa_annotation
+  changed_when: false
+  check_mode: false
+
+- name: Assert the annotation points at our role
+  ansible.builtin.assert:
+    that: _ebs_sa_annotation.stdout | trim == _ebs_csi_role_arn | trim
+    fail_msg: >-
+      ebs-csi-controller-sa is annotated with
+      '{{ _ebs_sa_annotation.stdout | trim | default('nothing', true) }}',
+      expected {{ _ebs_csi_role_arn }}
+    success_msg: "ebs-csi-controller-sa -> {{ _ebs_csi_role_arn | regex_replace('^.*/', '') }}"
+
+# --- StorageClass ----------------------------------------------------------
+# Installed from the cluster chart with everything except the StorageClass
+# switched off. The same chart deploys the actual cluster in Step 9; here it
+# only contributes the shared, cluster-wide pieces.
+
+- name: Log in to the ECR Helm registry
+  # Charts live in the same ECR as the images. Token via stdin, never argv --
+  # see the note in the image_sync role.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _helm_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _helm_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+
+- name: Install the shared StorageClass
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: clickhouse-prerequisites
+    chart_ref: "oci://{{ target_registry }}/helm/onprem-clickhouse-cluster"
+    chart_version: "{{ versions.cluster_chart }}"
+    release_namespace: default
+    release_state: present
+    values:
+      # The one thing we actually want from this release.
+      storageClass:
+        create: true
+      # No ClickHouseCluster custom resource -- that is Step 9.
+      createCluster: false
+      # No service account either; each cluster gets its own, created by its
+      # own release with its own IRSA annotation.
+      serviceAccount:
+        create: false
+      # Not in the tutorial's command, and it should be: the chart's
+      # ResourceQuota template is NOT gated on createCluster, so without this
+      # the release drops a quota into the `default` namespace capping
+      # ClickHouseClusters at 1 there -- for a release that creates no
+      # cluster at all.
+      resourceQuota:
+        enabled: false
+  register: _sc_release
+
+- name: Show the StorageClass
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - storageclass
+      - -o=custom-columns=NAME:.metadata.name,PROVISIONER:.provisioner,BINDING:.volumeBindingMode,EXPAND:.allowVolumeExpansion
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _sc_table
+  changed_when: false
+  check_mode: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _sc_table.stdout_lines }}"
+
+# --- prove storage actually works end to end -------------------------------
+# CRDs, driver and StorageClass can all look healthy while volume
+# provisioning is still broken -- a missing IAM permission, a driver that
+# cannot assume its role, an AZ mismatch. Step 9 would then fail with
+# ClickHouse pods stuck Pending on an unbound PVC, which is a long way from
+# the actual cause. One 1Gi volume settles it in about a minute.
+#
+# The PVC uses WaitForFirstConsumer binding, so it cannot bind without a pod
+# to pin it to an AZ -- which is why this creates both.
+
+- name: Provision a throwaway volume to test the full storage path
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      cleanup() {
+        kubectl delete pod storage-probe --ignore-not-found --wait --timeout=120s >/dev/null 2>&1 || true
+        kubectl delete pvc storage-probe --ignore-not-found --wait --timeout=120s >/dev/null 2>&1 || true
+      }
+      trap cleanup EXIT
+      cleanup
+
+      kubectl apply -f - >/dev/null <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: storage-probe
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: gp3-encrypted
+        resources:
+          requests:
+            storage: 1Gi
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: storage-probe
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: probe
+            image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
+            command: ["sh", "-c", "echo ok > /data/probe && df -h /data | tail -1"]
+            volumeMounts:
+              - {name: data, mountPath: /data}
+        volumes:
+          - name: data
+            persistentVolumeClaim: {claimName: storage-probe}
+      EOF
+
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/storage-probe --timeout=300s >/dev/null
+      echo "--- pod output ---"
+      kubectl logs pod/storage-probe
+      echo "--- volume ---"
+      kubectl get pvc storage-probe \
+        -o=jsonpath='{.status.phase} {.spec.volumeName} {.status.capacity.storage}'
+      echo
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _storage_probe
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Confirm dynamic provisioning works
+  ansible.builtin.assert:
+    that:
+      - _storage_probe.rc == 0
+      - _storage_probe.stdout is search('Bound')
+    fail_msg: >-
+      A 1Gi PVC on gp3-encrypted did not bind and mount, so ClickHouse will not
+      start either. Look at the driver and the claim:
+        kubectl -n kube-system logs deployment/ebs-csi-controller -c csi-provisioner
+        kubectl describe pvc storage-probe
+      Output was: {{ _storage_probe.stdout | default('') }} {{ _storage_probe.stderr | default('') }}
+    success_msg: "dynamic EBS provisioning works: PVC bound, mounted and written to"
+
+- name: Show the probe result
+  ansible.builtin.debug:
+    msg: "{{ _storage_probe.stdout_lines }}"

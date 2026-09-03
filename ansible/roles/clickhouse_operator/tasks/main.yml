@@ -1,0 +1,194 @@
+---
+# Step 8: install the ClickHouse operator.
+#
+# The operator is a controller, not a database: it watches for
+# ClickHouseCluster custom resources and builds the StatefulSets, Services,
+# PVCs and config maps that make up an actual cluster. Nothing ClickHouse-ish
+# exists until Step 9 creates one of those resources.
+#
+# Cheap: two small pods on the operator node group.
+#
+# Teardown: ansible-playbook deploy.yml --tags operator -e operator_state=absent
+
+- name: Log in to the ECR Helm registry
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _op_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _op_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+
+- name: Install the ClickHouse operator
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: clickhouse-operator
+    chart_ref: "oci://{{ target_registry }}/helm/clickhouse-operator-helm"
+    chart_version: "{{ versions.operator_chart }}"
+    release_namespace: "{{ clickhouse.operator_namespace }}"
+    create_namespace: true
+    release_state: "{{ operator_state | default('present') }}"
+    values:
+      image:
+        # Point at YOUR registry. The chart defaults to ClickHouse's own
+        # us-west-2 ECR, which you cannot pull from -- this override is the
+        # entire reason Step 2 copied the images.
+        repository: "{{ target_registry }}/clickhouse-operator"
+        tag: "{{ versions.operator_image }}{{ fips_suffix }}"
+
+      # --- the tutorial's four switches ---
+      # Cilium NetworkPolicy objects. This cluster runs the AWS VPC CNI, which
+      # does not implement CiliumNetworkPolicy, so the resources would be
+      # created and silently enforce nothing.
+      cilium:
+        enabled: false
+      # Scale-to-zero on idle. A ClickHouse Cloud feature that needs control
+      # plane components not present in a private deployment.
+      idleScalerEnabled: false
+      # Admission webhooks. They need a serving certificate and a reachable
+      # webhook service; off is the documented posture for this install.
+      webhooks:
+        enabled: false
+
+      operator:
+        # The operator pins replicas and spreads them across zones, so it has
+        # to be told which zones exist. Without this it cannot place anything.
+        availabilityZones: "{{ infrastructure.availability_zones }}"
+
+        # NOT in the tutorial's command, and required for an airgapped
+        # cluster. The operator hands this base path to the debug and init
+        # containers it generates; left at its default it emits pod specs
+        # pointing at ClickHouse's us-west-2 ECR, and those pods sit in
+        # ImagePullBackOff with no obvious connection to a Helm value.
+        imageRegistryBasePath: "{{ target_registry }}"
+
+      kubeRBACProxy:
+        image:
+          # Also not in the tutorial. The chart's default is
+          # registry.k8s.io/kubebuilder/kube-rbac-proxy, a public registry an
+          # airgapped cluster cannot reach. Step 2 mirrors it into ECR
+          # (see third_party_images in group_vars); this points at the mirror.
+          #
+          # The alternative is kubeRBACProxy.enabled=false, which works but
+          # removes the RBAC guard in front of the operator's metrics
+          # endpoint -- the wrong default for a hardened deployment.
+          repository: "{{ target_registry }}/kubebuilder/kube-rbac-proxy"
+  register: _operator_release
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (operator_state | default('present')) == 'absent'
+
+# --- verification ----------------------------------------------------------
+
+- name: Wait for the operator deployment to become available
+  # Selected by label, not by name. Helm's fullname is <release>-<chart>
+  # unless the release name already contains the chart name, so this
+  # deployment is actually called
+  # clickhouse-operator-clickhouse-operator-helm. Hardcoding a guessed name
+  # fails with "deployments.apps \"clickhouse-operator\" not found" while the
+  # release is in fact perfectly healthy.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace={{ clickhouse.operator_namespace }}
+      - --for=condition=Available
+      - --timeout=300s
+      - deployment
+      - --selector=app.kubernetes.io/instance=clickhouse-operator
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  check_mode: false
+
+- name: Confirm every container is running the image from your ECR
+  # The single most useful airgap check. Anything still pointing at
+  # 609927696493.dkr.ecr.us-west-2.amazonaws.com will never start here, and
+  # the symptom (ImagePullBackOff) does not name the Helm value at fault.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.operator_namespace }}
+      - -o=jsonpath={range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _op_images
+  changed_when: false
+  check_mode: false
+
+- name: Assert no container pulls from outside your registry
+  ansible.builtin.assert:
+    that: _op_images.stdout_lines | reject('search', '^' ~ target_registry) | list | length == 0
+    fail_msg: >-
+      These operator containers do not come from {{ target_registry }}:
+      {{ _op_images.stdout_lines | reject('search', '^' ~ target_registry) | list | join(', ') }}.
+      Each one needs a Helm override and a mirrored image.
+    success_msg: >-
+      all {{ _op_images.stdout_lines | length }} operator containers pull from
+      {{ target_registry }}
+
+- name: Check the ClickHouse CRDs are registered
+  # The chart ships the CRDs, so their presence is what tells you the operator
+  # is ready to accept a ClickHouseCluster in Step 9.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - crd
+      - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _crds
+  changed_when: false
+  check_mode: false
+
+- name: Report what the operator installed
+  vars:
+    _ch_crds: "{{ _crds.stdout_lines | select('search', 'clickhouse\\.com$') | list }}"
+    _snap_crds: "{{ _crds.stdout_lines | select('search', 'snapshot\\.storage\\.k8s\\.io$') | list }}"
+  ansible.builtin.debug:
+    msg:
+      - "operator:        {{ versions.operator_image }}{{ fips_suffix }} in {{ clickhouse.operator_namespace }}"
+      - "containers:      {{ _op_images.stdout_lines | length }}, all from {{ target_registry }}"
+      - "clickhouse CRDs: {{ _ch_crds | length }} ({{ _ch_crds | map('regex_replace', '\\.clickhouse\\.com$', '') | join(', ') }})"
+      - "snapshot CRDs:   {{ _snap_crds | length }}"
+      - "next: Step 9 creates a ClickHouseCluster for the operator to act on"
+
+- name: Show operator pods
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.operator_namespace }}
+      - -o=wide
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _op_pods
+  changed_when: false
+  check_mode: false
+
+- name: Pods
+  ansible.builtin.debug:
+    msg: "{{ _op_pods.stdout_lines }}"

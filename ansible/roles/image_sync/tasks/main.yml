@@ -105,7 +105,10 @@
       - copy
       - --all
       - --authfile={{ skopeo_authfile }}
-      - "docker://{{ source_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
+      # Most artifacts come from ClickHouse's ECR; a third-party mirror
+      # entry overrides that with its own registry. skopeo needs no
+      # credentials for a public source, and finds none in the authfile.
+      - "docker://{{ item.item.source | default(source_registry) }}/{{ item.item.repo }}:{{ item.item.tag }}"
       - "docker://{{ target_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
   loop: "{{ _existing.results }}"
   loop_control:

@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- IRSA roles. Two roles that Kubernetes service
+  accounts assume directly, with no static credentials anywhere: one for
+  clickhouse-server to reach its S3 bucket, one for the EBS CSI driver to
+  create and attach volumes.
+
+# NOTE: this file is a Jinja template, not plain CloudFormation, and it is the
+# only one in the project that has to be. An IRSA condition key embeds the
+# cluster's OIDC issuer in the key NAME:
+#
+#     "oidc.eks.us-east-1.amazonaws.com/id/ABC123:sub": "system:serviceaccount:..."
+#
+# CloudFormation cannot build that, because !Sub may not be used as a map key
+# ("map keys must be strings; received a map instead"). Rendering the issuer in
+# with Ansible first makes the key a literal, so the stack stays in
+# CloudFormation like every other piece of infrastructure here.
+
+Parameters:
+  BucketName:
+    Type: String
+
+Resources:
+  # =========================================================================
+  # clickhouse-server -> S3
+  # =========================================================================
+  # This is IRSA. The trust policy says: any pod presenting a token signed by
+  # THIS cluster's OIDC issuer, whose subject is exactly this one service
+  # account, may assume this role. Nothing else can -- not another namespace,
+  # not another service account, not another cluster.
+  #
+  # Both conditions matter:
+  #   :aud must be sts.amazonaws.com, so a token minted for a different
+  #        audience cannot be replayed against STS here.
+  #   :sub pins the exact system:serviceaccount:<ns>:<name>. Omit it and any
+  #        pod in the cluster could assume this role and read the bucket.
+  ClickHouseS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      # No RoleName, for the same reason as every other role in this project:
+      # a collision in a shared account surfaces only as "Validation failed
+      # with 1 error(s)". The tutorial suggests the convention
+      # CH-S3-$NAME-$REGION-$ORDINAL-Role; nothing here depends on the name,
+      # because the service account is annotated from this stack's output.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: "{{ _oidc_provider_arn }}"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "{{ _oidc_issuer_host }}:aud": "sts.amazonaws.com"
+                "{{ _oidc_issuer_host }}:sub": "system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
+      Policies:
+        - PolicyName: clickhouse-s3-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to this bucket only. The tutorial specifies s3:* here;
+              # broad in verbs but narrow in resources, which is the trade
+              # that matters -- ClickHouse needs multipart upload, tagging,
+              # object listing and more, and hand-enumerating them breaks on
+              # the next server release.
+              - Effect: Allow
+                Action: 's3:*'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BucketName}'
+                  - !Sub 'arn:aws:s3:::${BucketName}/*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+  # =========================================================================
+  # EBS CSI driver -> EC2 volume APIs
+  # =========================================================================
+  # The driver needs to create, attach, resize and snapshot EBS volumes on
+  # your behalf. Its service account name is fixed by the driver itself, not
+  # chosen by us -- which is why it is hardcoded rather than parameterised.
+  EbsCsiDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: "{{ _oidc_provider_arn }}"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "{{ _oidc_issuer_host }}:aud": "sts.amazonaws.com"
+                "{{ _oidc_issuer_host }}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+      ManagedPolicyArns:
+        # Note the service-role/ path. AmazonEBSCSIDriverPolicy does not exist
+        # at the top level, and the wrong ARN fails at stack creation.
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+Outputs:
+  ClickHouseS3RoleArn:
+    Description: The ClickHouse service account is annotated with this in Step 9.
+    Value: !GetAtt ClickHouseS3Role.Arn
+  EbsCsiDriverRoleArn:
+    Description: Passed to the EBS CSI driver add-on in Step 7.
+    Value: !GetAtt EbsCsiDriverRole.Arn

@@ -116,18 +116,19 @@ else
 fi
 
 # ===========================================================================
-step "3b/6  Python venv for Ansible AWS modules"
+step "3b/6  Python venv for Ansible AWS and Kubernetes modules"
 # ===========================================================================
-# amazon.aws / community.aws modules import boto3 inside whichever Python runs
-# the module. Homebrew's Python does not have it, and PEP 668 blocks
+# Ansible modules import their SDK inside whichever Python runs the module:
+# amazon.aws / community.aws need boto3, and kubernetes.core needs the
+# `kubernetes` client. Homebrew's Python has neither, and PEP 668 blocks
 # pip-installing into it. A project-local venv keeps the repo self-contained;
 # ansible/group_vars/all.yml points ansible_python_interpreter at it.
 VENV="$(cd .. && pwd)/.venv"
 if [[ -x "$VENV/bin/python3" ]] && py_at_least "$VENV/bin/python3" \
-   && "$VENV/bin/python3" -c 'import boto3' 2>/dev/null; then
-  ok "venv present: python $(py_version "$VENV/bin/python3"), boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)')"
+   && "$VENV/bin/python3" -c 'import boto3, kubernetes' 2>/dev/null; then
+  ok "venv present: python $(py_version "$VENV/bin/python3"), boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)'), kubernetes $("$VENV/bin/python3" -c 'import kubernetes;print(kubernetes.__version__)')"
 elif ((CHECK_ONLY)); then
-  fail "venv at $VENV is missing, below python ${PY_MIN}, or lacks boto3"; note_problem
+  fail "venv at $VENV is missing, below python ${PY_MIN}, or lacks boto3/kubernetes"; note_problem
 else
   # A venv is pinned to the interpreter that built it, so one left over from an
   # older Python has to be rebuilt, not just re-pip'd. --clear does that; the
@@ -138,8 +139,8 @@ else
   else
     python3 -m venv "$VENV" >/dev/null 2>&1 || true
   fi
-  if "$VENV/bin/pip" install -q --upgrade pip boto3 botocore packaging >/dev/null 2>&1; then
-    ok "venv created with boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)')"
+  if "$VENV/bin/pip" install -q --upgrade pip boto3 botocore packaging kubernetes >/dev/null 2>&1; then
+    ok "venv created with boto3 $("$VENV/bin/python3" -c 'import boto3;print(boto3.__version__)'), kubernetes $("$VENV/bin/python3" -c 'import kubernetes;print(kubernetes.__version__)')"
   else
     fail "could not provision venv at $VENV"; note_problem
   fi

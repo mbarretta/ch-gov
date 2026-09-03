@@ -1,0 +1,145 @@
+---
+# Step 6: the S3 bucket ClickHouse stores its data in, and the two IRSA roles
+# that let pods reach AWS with no static credentials.
+#
+# Cheap step -- an empty bucket and two IAM roles cost nothing. It is also
+# where the OIDC provider registered in Step 4 finally gets used.
+#
+# Teardown: ansible-playbook deploy.yml --tags storage -e storage_state=absent
+#   (the bucket is deliberately NOT deleted -- see the task at the end)
+
+# --- the bucket ------------------------------------------------------------
+# Managed with the s3_bucket module rather than CloudFormation, unlike every
+# other resource here. A bucket holding a database's data must outlive its
+# stack: CloudFormation would either refuse to delete a non-empty bucket
+# (failing the whole teardown) or, with a retain policy, leave an orphan that
+# then blocks the next create. The module is idempotent, so an existing
+# bucket is simply adopted.
+
+- name: Create the ClickHouse data bucket
+  amazon.aws.s3_bucket:
+    name: "{{ clickhouse.bucket_name }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    state: present
+    # Server-side encryption with S3-managed keys. The tutorial requires
+    # encryption but not a customer-managed key; KMS would add a per-request
+    # cost and a second thing to get the IAM policy right on.
+    encryption: "AES256"
+    # Nothing about this bucket should ever be public. This blocks it at the
+    # bucket level, independent of any policy or ACL applied later.
+    public_access:
+      block_public_acls: true
+      block_public_policy: true
+      ignore_public_acls: true
+      restrict_public_buckets: true
+    # Versioning stays OFF on purpose. ClickHouse manages the lifecycle of
+    # its own objects; versioning would retain every overwritten part
+    # indefinitely and quietly multiply storage cost. For the same reason the
+    # tutorial says explicitly: do not add S3 lifecycle rules to this bucket.
+    versioning: false
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _ch_bucket
+
+- name: Report the bucket
+  ansible.builtin.debug:
+    msg:
+      - "bucket:     {{ clickhouse.bucket_name }} ({{ aws.target_region }})"
+      - "key prefix: {{ clickhouse.s3_key_prefix }}"
+      - "one bucket can serve several clusters, separated by key prefix"
+
+# --- the OIDC issuer this cluster's tokens are signed by --------------------
+
+- name: Look up the cluster's OIDC issuer
+  ansible.builtin.command:
+    argv:
+      - aws
+      - eks
+      - describe-cluster
+      - --name={{ infrastructure.eks_cluster_name }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=cluster.identity.oidc.issuer
+      - --output=text
+  register: _oidc_issuer
+  changed_when: false
+  check_mode: false
+
+- name: Derive the issuer host and provider ARN
+  # The condition keys in an IRSA trust policy are named after the issuer with
+  # the scheme stripped; the provider ARN is that same host under
+  # iam::<account>:oidc-provider/.
+  ansible.builtin.set_fact:
+    _oidc_issuer_host: "{{ _oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
+    _oidc_provider_arn: >-
+      arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+        _oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
+
+- name: Confirm the OIDC provider is registered in IAM
+  # Step 4 registers it. Without it the roles below would be created happily
+  # and then fail at runtime with "Not authorized to perform
+  # sts:AssumeRoleWithWebIdentity" -- a much later, much vaguer failure.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - iam
+      - get-open-id-connect-provider
+      - --open-id-connect-provider-arn={{ _oidc_provider_arn }}
+      - --profile={{ aws.target_profile }}
+      - --query=Url
+      - --output=text
+  register: _oidc_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if IRSA was never set up
+  ansible.builtin.assert:
+    that: _oidc_check.rc == 0
+    fail_msg: >-
+      No IAM OIDC provider for {{ _oidc_issuer_host }}. Run:
+      ansible-playbook deploy.yml --tags eks
+    success_msg: "OIDC provider present for {{ _oidc_issuer_host }}"
+
+# --- the roles -------------------------------------------------------------
+
+- name: Deploy the IRSA role stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-irsa"
+    state: "{{ storage_state | default('present') }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    # lookup('template', ...) not lookup('file', ...): the issuer has to be
+    # baked in as a literal map key. See the comment at the top of the
+    # template for why CloudFormation cannot do this itself.
+    template_body: "{{ lookup('template', role_path ~ '/templates/irsa-roles.yaml.j2') }}"
+    template_parameters:
+      BucketName: "{{ clickhouse.bucket_name }}"
+    capabilities:
+      - CAPABILITY_IAM
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _irsa_stack
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (storage_state | default('present')) == 'absent'
+
+- name: Record the role ARNs for later steps
+  ansible.builtin.set_fact:
+    clickhouse_s3_role_arn: "{{ _irsa_stack.stack_outputs.ClickHouseS3RoleArn }}"
+    ebs_csi_role_arn: "{{ _irsa_stack.stack_outputs.EbsCsiDriverRoleArn }}"
+  when: _irsa_stack.stack_outputs is defined
+
+- name: Report the IRSA wiring
+  ansible.builtin.debug:
+    msg:
+      - "clickhouse role: {{ clickhouse_s3_role_arn }}"
+      - "  assumable only by system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
+      - "ebs csi role:    {{ ebs_csi_role_arn }}"
+      - "  assumable only by system:serviceaccount:kube-system:ebs-csi-controller-sa"
+      - "note: the bucket is never deleted by teardown -- it holds data."
+  when: clickhouse_s3_role_arn is defined

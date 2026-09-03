@@ -54,5 +54,17 @@
     - role: eks_nodegroups
       tags: [infra, nodes]
 
-    # --- Steps 6-11: S3/IRSA, k8s prerequisites, operator, cluster ---------
+    # --- Step 6: S3 bucket + IRSA roles ------------------------------------
+    - role: storage_iam
+      tags: [infra, storage]
+
+    # --- Step 7: Kubernetes prerequisites ----------------------------------
+    - role: k8s_prereqs
+      tags: [k8s, prereqs]
+
+    # --- Step 8: the ClickHouse operator -----------------------------------
+    - role: clickhouse_operator
+      tags: [k8s, operator]
+
+    # --- Steps 9-11: cluster, preflight checks, verification ---------------
     # Not implemented yet.

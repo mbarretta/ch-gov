@@ -1,0 +1,48 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- the EBS CSI driver, installed as an EKS managed
+  add-on rather than from an upstream Helm repository.
+
+Parameters:
+  EksClusterName:
+    Type: String
+  EbsCsiRoleArn:
+    Type: String
+    Description: >-
+      IRSA role from Step 6. Passing it here is what wires the driver's
+      service account to IAM -- the add-on annotates
+      kube-system/ebs-csi-controller-sa for us.
+
+Resources:
+  # Why the managed add-on instead of the tutorial's
+  # `helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver`:
+  #
+  #  * The Helm route needs a public Helm repository at deploy time. An
+  #    airgapped cluster has no route to it, which defeats the purpose.
+  #  * The add-on's images come from an AWS-owned ECR registry, reachable over
+  #    PrivateLink with no internet route at all. That is *more* airgap-
+  #    friendly, not less.
+  #  * EKS picks the driver version that matches the cluster's Kubernetes
+  #    version and keeps it patched.
+  #
+  # The Helm path in the tutorial still matters for non-EKS Kubernetes; on EKS
+  # this is the supported one.
+  EbsCsiAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      ClusterName: !Ref EksClusterName
+      # No AddonVersion: EKS then installs the default version for the
+      # cluster's Kubernetes version, which is what we want on a fresh
+      # cluster and keeps us off a pinned-and-forgotten release.
+      ServiceAccountRoleArn: !Ref EbsCsiRoleArn
+      # If something has already created this add-on by hand, overwrite its
+      # config rather than failing the stack. Scoped to this add-on on this
+      # cluster, both of which this project owns.
+      ResolveConflicts: OVERWRITE
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+Outputs:
+  AddonArn:
+    Value: !Ref EbsCsiAddon
