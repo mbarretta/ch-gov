@@ -82,7 +82,9 @@
     state: "{{ eks_state | default('present') }}"
     region: "{{ aws.target_region }}"
     profile: "{{ aws.target_profile }}"
-    template: "{{ role_path }}/files/eks-cluster.yaml"
+    # template_body, not template: the `template` param is deprecated and
+    # scheduled for removal from amazon.aws.
+    template_body: "{{ lookup('file', role_path ~ '/files/eks-cluster.yaml') }}"
     template_parameters:
       EnvironmentName: "{{ infrastructure.environment_name }}"
       EksClusterName: "{{ infrastructure.eks_cluster_name }}"

@@ -50,5 +50,9 @@
     - role: eks_cluster
       tags: [infra, eks]
 
-    # --- Steps 5-11: node groups, S3/IRSA, operator, cluster ---------------
+    # --- Step 5: managed node groups ---------------------------------------
+    - role: eks_nodegroups
+      tags: [infra, nodes]
+
+    # --- Steps 6-11: S3/IRSA, k8s prerequisites, operator, cluster ---------
     # Not implemented yet.

@@ -54,17 +54,46 @@ infrastructure:
 
   # Instance types differ by build, because FIPS crypto is not validated on
   # ARM64 -- the FIPS build must run x86_64 throughout.
+  #
+  # These are LEARNING sizes, deliberately smaller than the tutorial's
+  # (m7g.2xlarge / m7gd.16xlarge / m7i.2xlarge, ~$12.04/hr). They are not
+  # arbitrary: the onprem-clickhouse-cluster chart requests 4 CPU / 8Gi per
+  # server pod and 2 CPU / 4Gi per keeper pod, and a node's allocatable CPU
+  # is a little under its vCPU count once kubelet reservations are taken.
+  # So a 4-vCPU node cannot hold a 4-CPU server pod, and a 2-vCPU node
+  # cannot hold a 2-CPU keeper pod -- these are the smallest types that fit.
+  # Shrinking further means overriding the chart's resource requests too.
   keeper:
-    instance_type: "{{ 'm7i.2xlarge' if fips else 'm7g.2xlarge' }}"
+    instance_type: "{{ 'm7i.xlarge' if fips else 'm7g.xlarge' }}"
     node_count: 3            # always 3: Keeper needs an odd quorum
   server:
-    instance_type: "{{ 'm5d.16xlarge' if fips else 'm7gd.16xlarge' }}"
-    min_nodes: 3
-    max_nodes: 10
+    # The trailing "d" is required, not cosmetic: it means local NVMe SSD,
+    # which is where ClickHouse puts its read cache (/nvme/disk).
+    instance_type: "{{ 'm6id.2xlarge' if fips else 'm7gd.2xlarge' }}"
+    min_nodes: 3             # matches the chart's server.replicaCount
+    max_nodes: 6
   operator:
-    instance_type: "{{ 'm7i.2xlarge' if fips else 'm7i.2xlarge' }}"
+    # x86_64 in both builds -- the tutorial specifies AL2023_x86_64 for this
+    # group only. It is also the only untainted group, so cluster add-ons
+    # (CoreDNS, EBS CSI controller) land here.
+    instance_type: "m7i.xlarge"
     min_nodes: 2
-    max_nodes: 5
+    max_nodes: 4
+  # Root EBS per node: OS and container images only. ClickHouse data goes on
+  # separate EBS volumes the Helm chart provisions.
+  node_boot_disk_gb: 20
+
+# us-east-1 on-demand list prices in USD/hr, read from the AWS Pricing API on
+# 2026-09-03. Used only to print an honest estimate before anything is
+# created; a type missing here simply counts as 0.
+pricing:
+  instance_hourly_usd:
+    m7g.xlarge:   0.1632
+    m7gd.2xlarge: 0.4271
+    m7i.xlarge:   0.2016
+    m6id.2xlarge: 0.4746
+  eks_control_plane_hourly_usd: 0.10
+  nat_gateway_hourly_usd: 0.045
 
 versions:
   server: "26.2.1.525"
@@ -83,6 +112,19 @@ versions:
 fips_suffix: "{{ '-fips' if fips else '' }}"
 
 source_registry: "{{ aws.source_ecr_account_id }}.dkr.ecr.{{ aws.source_ecr_region }}.amazonaws.com"
+
+# EKS AMI family for the keeper and server node groups. The _STANDARD suffix
+# is required: the tutorial writes "AL2023_x86_64", but the real API enum is
+# AL2023_x86_64_STANDARD (the other variants are _NVIDIA and _NEURON). Getting
+# it wrong fails at node group creation with "AMI type ... is not valid", after
+# the stack has already built the IAM role and launch templates.
+node_ami_type: "{{ 'AL2023_x86_64_STANDARD' if fips else 'AL2023_ARM_64_STANDARD' }}"
+
+# The tutorial labels ARM64 node groups `clickhouseGroup: keeper-arm64` /
+# `server-arm64`. The cluster chart's nodeSelector nonetheless stays
+# `clickhouseGroup: keeper` / `server` -- the operator appends the suffix
+# itself. That mismatch is intentional; do not "fix" either side.
+node_label_suffix: "{{ '' if fips else '-arm64' }}"
 
 # FIPS deployments must pull over FIPS-validated endpoints, which use a
 # different hostname shape entirely: <acct>.dkr-ecr-fips.<region>.on.aws

@@ -456,4 +456,397 @@ plane is healthy and waiting for Step 5.
 - [x] Project-local kubeconfig; API verified, skew within ±1
 - [x] OIDC provider registered — IRSA trust policies can reference it
 - [x] Role idempotent (`changed=0` on re-run)
-- [ ] Step 5: node groups ← **~$13/hr at the documented sizes**
+- [x] Step 5: node groups — see below (done at ~$2.32/hr, not the ~$12.18/hr the tutorial's sizes cost)
+
+---
+
+# Step 5 — Managed node groups
+
+This is the first step that starts real compute, and the most expensive thing
+in the whole deployment. Everything up to now cost about $3.50/day; this adds
+roughly $52/day at the sizes we picked, and would add $289/day at the sizes the
+tutorial specifies.
+
+Run it with:
+
+```bash
+ansible-playbook deploy.yml --tags nodes
+```
+
+## Three node groups, because there are three different jobs
+
+| Group | What runs there | Why it is separate |
+|---|---|---|
+| **keeper** | ClickHouse Keeper (the Raft-style consensus service) | Small, odd-numbered, latency-sensitive. Three nodes, never two or four — a quorum needs an odd count. |
+| **server** | `clickhouse-server` — the database itself | Large, and the only group that needs local NVMe SSD for its read cache. |
+| **operator** | The ClickHouse operator, plus cluster add-ons (CoreDNS, EBS CSI controller) | The only **untainted** group. Once the other two are tainted, this is the only place an ordinary pod can land. |
+
+That last row is the one people miss. If you taint every node group, CoreDNS
+never schedules and DNS inside the cluster silently never works.
+
+## Picking sizes: let the chart tell you the floor
+
+The tutorial specifies `m7g.2xlarge` / `m7gd.16xlarge` / `m7i.2xlarge`. We are
+running smaller ones — but not arbitrarily smaller. The floor is set by what
+the `onprem-clickhouse-cluster` chart actually asks for. Pull it and look:
+
+```bash
+helm pull oci://<your-ecr>/helm/onprem-clickhouse-cluster --version 1.8.7 --untar
+grep -A12 'podPolicy:' onprem-clickhouse-cluster/values.yaml
+```
+
+```yaml
+server.podPolicy.resources.requests:   {cpu: "4", memory: 8Gi}
+keeper.podPolicy.resources.requests:   {cpu: "2", memory: 4Gi}
+server.replicaCount: 3
+keeper.replicaCount: 3
+```
+
+Now the subtlety: **a node's allocatable CPU is less than its vCPU count.**
+The kubelet reserves some for itself and the OS, so a 4-vCPU node advertises
+around 3,920m of allocatable CPU. A pod requesting exactly `4` CPU therefore
+does *not* fit on a 4-vCPU node — it stays `Pending` with
+`0/9 nodes are available: Insufficient cpu`, which is a maddening error to
+debug because the node looks big enough.
+
+So the smallest types that actually work are one size class up from the pod
+request:
+
+| Group | Pod request | Smallest node that fits | Tutorial size |
+|---|---|---|---|
+| keeper | 2 CPU / 4Gi | `m7g.xlarge` (4 vCPU, 16Gi) | `m7g.2xlarge` |
+| server | 4 CPU / 8Gi | `m7gd.2xlarge` (8 vCPU, 32Gi, 474 GB NVMe) | `m7gd.16xlarge` |
+| operator | — | `m7i.xlarge` (4 vCPU, 16Gi) | `m7i.2xlarge` |
+
+To go smaller than this you must also override the chart's resource requests,
+which changes what you are testing. This is the honest floor for an unmodified
+chart.
+
+### What that saves
+
+Prices are us-east-1 on-demand, read from the AWS Pricing API on 2026-09-03.
+
+| | Tutorial sizes | Our sizes |
+|---|---|---|
+| keeper (3) | $0.98/hr | $0.49/hr |
+| server (3) | $10.25/hr | $1.28/hr |
+| operator (2) | $0.81/hr | $0.40/hr |
+| **compute** | **$12.04/hr** | **$2.17/hr** |
+| + control plane + NAT | $12.18/hr | $2.32/hr |
+| **per day** | **~$292** | **~$56** |
+
+The role prints this before it creates anything. Note that `max_nodes` costs
+nothing until something scales — only `min_nodes` is running.
+
+The knobs are in `group_vars/all.yml` under `infrastructure`, and the VPC role
+re-validates any instance type you choose against the AZs before use.
+
+## Labels: the `-arm64` suffix that looks like a bug
+
+The tutorial says to label ARM64 node groups:
+
+```
+clickhouseGroup: server-arm64      # not "server"
+clickhouseGroup: keeper-arm64
+```
+
+But the chart's `nodeSelector` stays:
+
+```yaml
+server.podPolicy.nodeSelector:
+  clickhouseGroup: server          # no suffix
+```
+
+This looks like a mismatch that would leave every pod unschedulable. It is
+not. The chart's own comment settles it:
+
+> **This value must match the node labels of the server node group** excluding
+> the `-arm64` suffix, if using arm64.
+
+The operator appends the suffix itself. So: **label the nodes with the suffix,
+leave the chart without it, and do not "fix" either side.** `group_vars`
+derives the suffix from the `fips` switch (`node_label_suffix`), since the FIPS
+build is x86 and takes no suffix.
+
+## Taints, and a deliberate asymmetry
+
+| Group | Taints |
+|---|---|
+| keeper | `clickhouse.com/do-not-schedule=true:NoSchedule` + (arm64 only) `clickhouse.com/arch=arm64:NoSchedule` |
+| server | `clickhouse.com/do-not-schedule=true:NoSchedule` |
+| operator | none |
+
+`do-not-schedule` fences off the dedicated database nodes. Notice the chart
+ships `tolerations: []` — you do **not** add tolerations yourself; the operator
+injects the matching ones when it creates the pods. (DaemonSets like
+`aws-node` and `kube-proxy` tolerate everything by default, so the CNI still
+comes up on tainted nodes.)
+
+The arch taint appears on **keeper only**, not server. That asymmetry is in the
+tutorial and we reproduce it exactly rather than tidying it up. The reasoning is
+about which mistake is worse: a taint the operator does not tolerate leaves
+pods `Pending` forever, whereas a missing taint merely allows an unrelated pod
+onto a database node. Deviating toward the silent-failure side is not worth it,
+and taints can be changed on a live node group later if Step 9 shows otherwise.
+
+## Launch templates, and three gotchas
+
+All three groups use a launch template. Two of the reasons are CloudFormation
+trivia worth knowing:
+
+**1. `DiskSize` and `LaunchTemplate` are mutually exclusive.** Set both on an
+`AWS::EKS::Nodegroup` and it fails validation. Once you want a launch template
+for any reason, the boot disk moves into its `BlockDeviceMappings`.
+
+**2. Omit `ImageId`, and EKS *merges* rather than replaces.** With no `ImageId`
+in the template, EKS supplies the AMI from `AmiType` and appends its own
+`nodeadm` bootstrap config to your user data. This is why the user data must be
+a **MIME multipart document**, not a bare `#!/bin/bash` script — a bare script
+would be discarded and the node would boot without ever joining the cluster.
+
+```
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="//"
+
+--//
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/usr/bin/env bash
+...our NVMe setup...
+--//--
+```
+
+**3. IMDS hop limit.** The template sets `HttpTokens: required` (IMDSv2 only,
+which defeats the SSRF attack class that made IMDSv1 notorious) and
+`HttpPutResponseHopLimit: 2`. A hop limit of 1 stops at the host and cuts
+*pods* off from IMDS entirely; the tutorial states nodes require IMDS for
+authentication. Once every workload uses IRSA instead, drop it to 1.
+
+## The NVMe cache disk
+
+The `d` in `m7gd` is not cosmetic — it means local NVMe SSD, and it is the
+whole reason to choose that family. ClickHouse uses it as a read cache, at
+`/nvme/disk` (the operator's default `hostPathBaseDirectory`). Pick a type
+without the `d` and the cache silently lands on the 20 GiB root volume and
+fills it.
+
+Nothing mounts that disk for you. The user data does it, and there is one trap
+in doing it safely:
+
+> **On Nitro instances, EBS volumes also appear as `/dev/nvme*`.** Selecting
+> devices by path would happily reformat your root disk. The only safe
+> discriminator is the model string — ephemeral instance store reports
+> `Amazon EC2 NVMe Instance Storage`.
+
+```bash
+lsblk -dn -o NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}'
+```
+
+With more than one device (the bigger `d` types expose several) the script
+stripes them with `mdadm --level=0`. RAID0 has no redundancy, which is the
+right call for a cache that can be rebuilt from S3.
+
+### Verifying it, because it fails silently
+
+A missing cache mount does not throw an error anywhere — ClickHouse just gets
+slower and the root disk fills up days later. So the role proves it directly by
+running a probe pod on a server node:
+
+```yaml
+spec:
+  nodeName: ip-10-20-x-x.ec2.internal     # note: nodeName, not nodeSelector
+  containers:
+    - image: <ecr>/clickhouse-server:26.2.1.525
+      command: ["sh", "-c", "df -h /nvme/disk && mount | grep ' /nvme/disk '"]
+  volumes:
+    - name: nvme
+      hostPath: {path: /nvme/disk, type: Directory}
+```
+
+Two deliberate choices there:
+
+- **`.spec.nodeName` bypasses the scheduler entirely**, so the pod lands on a
+  tainted node without needing any toleration. That is a genuinely useful trick
+  for probing tainted nodes.
+- It runs the **`clickhouse-server` image**, because in an airgapped cluster
+  that is an image we *know* is in ECR. Reaching for `busybox` would fail —
+  there is no Docker Hub here.
+
+`hostPath: {type: Directory}` means the pod stays `Pending` if the directory
+does not exist, rather than kubelet quietly creating an empty one — so a failed
+user-data script shows up as a failed check instead of a working-looking mount
+on the root volume.
+
+If that check fails, the log is on the node:
+
+```bash
+aws ssm start-session --target <instance-id> --profile sa
+sudo cat /var/log/clickhouse-nvme-setup.log
+```
+
+which works because the node role carries `AmazonSSMManagedInstanceCore` — no
+SSH key, no bastion, no inbound security group rule. That policy is not in the
+tutorial; it is there so you can inspect a node that refuses to join.
+
+## Why the node groups have no names
+
+None of the three sets `NodegroupName`. Beyond the shared-account
+name-collision reasoning from Step 4, there is a specific mechanical reason:
+
+**Changing an instance type forces CloudFormation to replace a node group**,
+and it cannot create the replacement while a same-named one still exists. An
+explicit name turns every resize into a failed update. With generated names,
+CFN creates the new group, moves on, and deletes the old one.
+
+Find them by label instead:
+
+```bash
+kubectl get nodes -L clickhouseGroup
+```
+
+## One node group across three AZs, not three groups
+
+Each group spans all three private subnets, so EKS spreads its nodes across
+AZs. The tutorial suggests one node group *per AZ* instead. That only matters
+once cluster-autoscaler is involved: the autoscaler cannot tell which AZ a
+pending pod's EBS volume is pinned to, so it may grow a group in the wrong AZ
+and never satisfy the pod. We are not running the autoscaler, so one group per
+workload is simpler and behaves identically.
+
+## The trap we actually hit: the AMI type enum
+
+Our first run failed, and it is a good example of a failure that costs money
+and time for a trivial reason. The tutorial writes the AMI types as:
+
+```
+AL2023_x86_64      /  AL2023_ARM_64
+```
+
+Those are not the API's values. The real enum is:
+
+```
+AL2023_x86_64_STANDARD    AL2023_ARM_64_STANDARD
+AL2023_x86_64_NVIDIA      AL2023_ARM_64_NVIDIA
+AL2023_x86_64_NEURON
+```
+
+`aws cloudformation validate-template` passes either way — it does not know
+what EKS accepts. The failure only shows up when the node group resource is
+created, several minutes in, *after* the IAM role and both launch templates
+have already been built:
+
+```
+KeeperNodeGroup  CREATE_FAILED  "AMI type AL2023_ARM_64 is not valid"
+```
+
+CloudFormation then rolls the whole stack back and leaves it in
+`ROLLBACK_COMPLETE`, which cannot be updated — so the fix also needs the
+opt-in husk cleanup from Step 4:
+
+```bash
+ansible-playbook deploy.yml --tags nodes -e clear_failed_stack=true
+```
+
+The general lesson: enum values in prose documentation are worth checking
+against the API before a long-running create. Where to look:
+
+```bash
+aws eks create-nodegroup help | grep -oE 'AL2023_[A-Za-z0-9_]+' | sort -u
+```
+
+## What exists now
+
+```
+$ kubectl get nodes -L clickhouseGroup -L node.kubernetes.io/instance-type -L topology.kubernetes.io/zone
+NAME                            STATUS  VERSION              CLICKHOUSEGROUP  INSTANCE-TYPE  ZONE
+ip-10-20-52-145.ec2.internal    Ready   v1.36.3-eks-cb19647  server-arm64     m7gd.2xlarge   us-east-1a
+ip-10-20-102-15.ec2.internal    Ready   v1.36.3-eks-cb19647  server-arm64     m7gd.2xlarge   us-east-1b
+ip-10-20-167-37.ec2.internal    Ready   v1.36.3-eks-cb19647  server-arm64     m7gd.2xlarge   us-east-1c
+ip-10-20-61-232.ec2.internal    Ready   v1.36.3-eks-cb19647  keeper-arm64     m7g.xlarge     us-east-1a
+ip-10-20-80-106.ec2.internal    Ready   v1.36.3-eks-cb19647  keeper-arm64     m7g.xlarge     us-east-1b
+ip-10-20-142-145.ec2.internal   Ready   v1.36.3-eks-cb19647  keeper-arm64     m7g.xlarge     us-east-1c
+ip-10-20-106-4.ec2.internal     Ready   v1.36.3-eks-cb19647                   m7i.xlarge     us-east-1b
+ip-10-20-148-38.ec2.internal    Ready   v1.36.3-eks-cb19647                   m7i.xlarge     us-east-1c
+```
+
+Three nodes per group, one per AZ, labels carrying the `-arm64` suffix, and
+the two operator nodes deliberately unlabelled.
+
+Taints landed as intended — note keeper carries two and server one:
+
+```
+GROUP          TAINTS
+server-arm64   clickhouse.com/do-not-schedule
+keeper-arm64   clickhouse.com/do-not-schedule,clickhouse.com/arch
+<none>         <none>
+```
+
+The NVMe cache is real, not a directory on the root volume:
+
+```
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1    442G  3.2G  439G   1% /nvme/disk
+/dev/nvme1n1 /nvme/disk xfs rw,seclabel,noatime,inode64,logbufs=8,logbsize=32k,noquota 0 0
+```
+
+442 GiB of local SSD per server node, versus the 20 GiB root disk it would
+otherwise have silently used.
+
+### The sizing argument, confirmed by the cluster itself
+
+The claim above was that allocatable CPU is less than vCPU count. The nodes
+now say so directly:
+
+```
+m7g.xlarge   (4 vCPU)  ->  cpu=3920m   mem=15031500Ki
+m7gd.2xlarge (8 vCPU)  ->  cpu=7910m   mem=31231064Ki
+```
+
+`3920m < 4000m`. A server pod requesting exactly `4` CPU would not fit on a
+4-vCPU node — which is precisely why the server group is `2xlarge` and not
+`xlarge`. This is the single most useful number to check whenever a pod is
+inexplicably `Pending`:
+
+```bash
+kubectl describe node <name> | grep -A8 'Allocatable:'
+```
+
+### CoreDNS moved, which proves the taints work
+
+Before this step CoreDNS was `Pending` with nowhere to go. It is now running —
+and specifically on an **operator** node:
+
+```
+kube-system  coredns-b8b6dd877-8qzdz  Running  ip-10-20-148-38.ec2.internal   <- operator node
+kube-system  coredns-b8b6dd877-lsvzr  Running  ip-10-20-148-38.ec2.internal   <- operator node
+kube-system  aws-node-*     (8 pods)  Running  every node, tainted included
+kube-system  kube-proxy-*   (8 pods)  Running  every node, tainted included
+```
+
+That is the whole taint design visible in one output. CoreDNS is an ordinary
+Deployment with no tolerations, so it can only land on the untainted operator
+group. `aws-node` (the VPC CNI) and `kube-proxy` are DaemonSets that tolerate
+everything, so they run on the tainted database nodes too — which they must,
+or those nodes would have no pod networking at all.
+
+## Checkpoint
+
+- [x] Three node groups: keeper (3), server (3), operator (2) — all `Ready`
+- [x] One node per AZ per group across us-east-1a/b/c
+- [x] Labels `keeper-arm64` / `server-arm64`; operator unlabelled
+- [x] Taints applied; CoreDNS confirmed scheduling only on the operator group
+- [x] Instance-store NVMe striped and mounted at `/nvme/disk` (442 GiB/node)
+- [x] Node role carries worker, CNI, ECR-read and SSM policies
+- [x] Role idempotent (`changed=0` on re-run)
+- [x] Running cost ~$2.32/hr (~$56/day), vs ~$12.18/hr at tutorial sizes
+- [ ] Step 6: S3 bucket + IRSA roles
+
+**Teardown for the expensive part only**, leaving the cluster and VPC intact:
+
+```bash
+ansible-playbook deploy.yml --tags nodes -e nodegroups_state=absent
+```
+
+That drops the bill back to ~$3.50/day. Re-running `--tags nodes` rebuilds the
+nodes in about five minutes, so there is no reason to leave them running
+overnight while working through this guide.

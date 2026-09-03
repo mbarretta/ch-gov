@@ -58,7 +58,9 @@
     state: "{{ vpc_state | default('present') }}"
     region: "{{ aws.target_region }}"
     profile: "{{ aws.target_profile }}"
-    template: "{{ role_path }}/files/vpc.yaml"
+    # template_body, not template: the `template` param is deprecated and
+    # scheduled for removal from amazon.aws.
+    template_body: "{{ lookup('file', role_path ~ '/files/vpc.yaml') }}"
     template_parameters:
       EnvironmentName: "{{ infrastructure.environment_name }}"
       VpcCidr: "{{ infrastructure.vpc_cidr }}"

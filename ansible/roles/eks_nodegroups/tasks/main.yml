@@ -1,0 +1,308 @@
+---
+# Step 5: managed node groups -- the first step that runs real compute, and
+# by far the most expensive one. Takes 5-10 minutes.
+#
+# Three groups, because the three workloads want different things:
+#   keeper    small, odd-numbered, latency-sensitive quorum
+#   server    large, NVMe-backed, the actual database
+#   operator  ordinary nodes for the operator and cluster add-ons
+#
+# Teardown:  ansible-playbook deploy.yml --tags nodes -e nodegroups_state=absent
+
+- name: Look up the VPC stack outputs
+  # Read from CloudFormation rather than from facts set by the vpc role, so
+  # this role also works when run alone with --tags nodes.
+  amazon.aws.cloudformation_info:
+    stack_name: "{{ infrastructure.environment_name }}-vpc"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  register: _ng_vpc_info
+  check_mode: false
+
+- name: Extract the private subnets
+  ansible.builtin.set_fact:
+    _ng_subnets: >-
+      {{ _ng_vpc_info.cloudformation[infrastructure.environment_name + '-vpc']
+         .stack_outputs.PrivateSubnetIds }}
+
+- name: Require the cluster to be ACTIVE before adding nodes
+  # A node group created against a cluster that is still CREATING fails in a
+  # way that leaves the stack rolled back, which then blocks the next run.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - eks
+      - describe-cluster
+      - --name={{ infrastructure.eks_cluster_name }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=cluster.status
+      - --output=text
+  register: _ng_cluster_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if the cluster is missing or not ready
+  ansible.builtin.assert:
+    that: _ng_cluster_status.stdout | trim == 'ACTIVE'
+    fail_msg: >-
+      Cluster {{ infrastructure.eks_cluster_name }} is
+      '{{ _ng_cluster_status.stdout | trim | default('absent', true) }}', not ACTIVE.
+      Run: ansible-playbook deploy.yml --tags eks
+
+- name: Announce what this will cost
+  vars:
+    _price: "{{ pricing.instance_hourly_usd }}"
+    _keeper_hr: "{{ (_price[infrastructure.keeper.instance_type] | default(0) | float)
+                    * (infrastructure.keeper.node_count | int) }}"
+    _server_hr: "{{ (_price[infrastructure.server.instance_type] | default(0) | float)
+                    * (infrastructure.server.min_nodes | int) }}"
+    _operator_hr: "{{ (_price[infrastructure.operator.instance_type] | default(0) | float)
+                      * (infrastructure.operator.min_nodes | int) }}"
+    _compute_hr: "{{ (_keeper_hr | float) + (_server_hr | float) + (_operator_hr | float) }}"
+    _total_hr: "{{ (_compute_hr | float)
+                   + (pricing.eks_control_plane_hourly_usd | float)
+                   + (pricing.nat_gateway_hourly_usd | float
+                      * (1 if infrastructure.nat_mode == 'single' else 3)) }}"
+  ansible.builtin.debug:
+    msg:
+      - "build:    {{ 'FIPS (x86_64)' if fips else 'standard (arm64)' }}  ami: {{ node_ami_type }}"
+      - "keeper:   {{ infrastructure.keeper.node_count }} x {{ infrastructure.keeper.instance_type }}
+         = ${{ '%.2f' | format(_keeper_hr | float) }}/hr"
+      - "server:   {{ infrastructure.server.min_nodes }} x {{ infrastructure.server.instance_type }}
+         = ${{ '%.2f' | format(_server_hr | float) }}/hr  (max {{ infrastructure.server.max_nodes }})"
+      - "operator: {{ infrastructure.operator.min_nodes }} x {{ infrastructure.operator.instance_type }}
+         = ${{ '%.2f' | format(_operator_hr | float) }}/hr  (max {{ infrastructure.operator.max_nodes }})"
+      - "compute subtotal: ${{ '%.2f' | format(_compute_hr | float) }}/hr"
+      - "with control plane + NAT: ${{ '%.2f' | format(_total_hr | float) }}/hr
+         (~${{ '%.0f' | format(_total_hr | float * 24) }}/day)"
+      - "teardown: ansible-playbook deploy.yml --tags nodes -e nodegroups_state=absent"
+
+# Same shared-account caution as the cluster stack: a first CREATE that fails
+# leaves a ROLLBACK_COMPLETE husk holding nothing but blocking the name. We
+# report it and delete only when explicitly told to, because this account is
+# shared and the husk may be a colleague's in-progress debugging.
+- name: Check for a stack stuck in ROLLBACK_COMPLETE
+  ansible.builtin.command:
+    argv:
+      - aws
+      - cloudformation
+      - describe-stacks
+      - --stack-name={{ infrastructure.environment_name }}-nodegroups
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=Stacks[0].StackStatus
+      - --output=text
+  register: _ng_stack_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse to proceed past a rolled-back stack unless told to clear it
+  ansible.builtin.assert:
+    that: clear_failed_stack | default(false) | bool
+    fail_msg: >-
+      Stack {{ infrastructure.environment_name }}-nodegroups is in
+      ROLLBACK_COMPLETE and cannot be updated. This is a SHARED account, so it
+      is not deleted automatically. Confirm it is yours, then re-run with
+      -e clear_failed_stack=true
+  when: _ng_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
+
+- name: Delete the rolled-back stack (explicitly requested)
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-nodegroups"
+    state: absent
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  when:
+    - _ng_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
+    - clear_failed_stack | default(false) | bool
+
+- name: Deploy the node group stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-nodegroups"
+    state: "{{ nodegroups_state | default('present') }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    # template_body, not template: the `template` param is deprecated and
+    # scheduled for removal from amazon.aws.
+    template_body: "{{ lookup('file', role_path ~ '/files/eks-nodegroups.yaml') }}"
+    template_parameters:
+      EksClusterName: "{{ infrastructure.eks_cluster_name }}"
+      SubnetIds: "{{ _ng_subnets }}"
+      NodeAmiType: "{{ node_ami_type }}"
+      LabelSuffix: "{{ node_label_suffix }}"
+      KeeperInstanceType: "{{ infrastructure.keeper.instance_type }}"
+      KeeperNodeCount: "{{ infrastructure.keeper.node_count }}"
+      ServerInstanceType: "{{ infrastructure.server.instance_type }}"
+      ServerMinNodes: "{{ infrastructure.server.min_nodes }}"
+      ServerMaxNodes: "{{ infrastructure.server.max_nodes }}"
+      OperatorInstanceType: "{{ infrastructure.operator.instance_type }}"
+      OperatorMinNodes: "{{ infrastructure.operator.min_nodes }}"
+      OperatorMaxNodes: "{{ infrastructure.operator.max_nodes }}"
+      BootDiskSize: "{{ infrastructure.node_boot_disk_gb }}"
+    capabilities:
+      - CAPABILITY_IAM
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _ng_stack
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (nodegroups_state | default('present')) == 'absent'
+
+# --- verification ---------------------------------------------------------
+# Wrapped in a block so --check skips the whole thing. Under --check no
+# stack is created, so waiting for nodes to appear would spin for five
+# minutes and then fail on a cluster that was never changed.
+- name: Verify the nodes joined and are configured as intended
+  when: not ansible_check_mode
+  block:
+
+  - name: Wait for every node to report Ready
+    # CloudFormation returns once the node groups are ACTIVE, which happens a
+    # little before the kubelets finish registering.
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - nodes
+        - --no-headers
+    environment:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+    register: _ng_nodes
+    changed_when: false
+    check_mode: false
+    vars:
+      _expected: "{{ (infrastructure.keeper.node_count | int)
+                     + (infrastructure.server.min_nodes | int)
+                     + (infrastructure.operator.min_nodes | int) }}"
+    retries: 30
+    delay: 10
+    until:
+      - _ng_nodes.rc == 0
+      # "NotReady" does not match, because the character before Ready is a
+      # letter rather than whitespace.
+      - (_ng_nodes.stdout_lines | select('search', '\\sReady\\s') | list | length) == (_expected | int)
+
+  - name: Show the nodes with their group labels
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - nodes
+        - -L=clickhouseGroup
+        - -L=node.kubernetes.io/instance-type
+        - -L=topology.kubernetes.io/zone
+    environment:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+    register: _ng_node_table
+    changed_when: false
+    check_mode: false
+
+  - name: Report
+    ansible.builtin.debug:
+      msg: "{{ _ng_node_table.stdout_lines }}"
+
+  - name: Confirm the taints landed where they should
+    # Worth checking explicitly: a missing taint lets ordinary pods onto the
+    # database nodes, and a taint the operator does not tolerate leaves
+    # ClickHouse pods Pending forever. Both fail silently much later.
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - nodes
+        - -o=custom-columns=GROUP:.metadata.labels.clickhouseGroup,TAINTS:.spec.taints[*].key
+    environment:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+    register: _ng_taints
+    changed_when: false
+    check_mode: false
+
+  - name: Show taints per group
+    ansible.builtin.debug:
+      msg: "{{ _ng_taints.stdout_lines }}"
+
+  # --- prove the NVMe cache disk is actually mounted -------------------------
+  # The launch template's user data is the one piece of this step we wrote
+  # ourselves, and its failure mode is silent: ClickHouse would simply put its
+  # cache on the 20 GiB root volume and fill it. So check it directly.
+  #
+  # The probe pod sets .spec.nodeName, which bypasses the scheduler entirely --
+  # that is why it lands on a tainted node without needing any toleration. It
+  # runs the clickhouse-server image because in an airgapped cluster that is a
+  # container image we know is present in ECR.
+
+  - name: Pick one server node to probe
+    ansible.builtin.command:
+      argv:
+        - kubectl
+        - get
+        - nodes
+        - -l=clickhouseGroup=server{{ node_label_suffix }}
+        - -o=jsonpath={.items[0].metadata.name}
+    environment:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+    register: _ng_probe
+    changed_when: false
+    check_mode: false
+
+  - name: Record the probe target
+    ansible.builtin.set_fact:
+      _ng_probe_node: "{{ _ng_probe.stdout | trim }}"
+
+  - name: Run the NVMe probe pod
+    ansible.builtin.shell:
+      cmd: |
+        set -euo pipefail
+        kubectl delete pod nvme-probe --ignore-not-found --wait >/dev/null
+        kubectl apply -f - >/dev/null <<'EOF'
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: nvme-probe
+        spec:
+          nodeName: {{ _ng_probe_node }}
+          restartPolicy: Never
+          containers:
+            - name: probe
+              image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
+              # /proc/self/mounts rather than the `mount` command: we cannot
+              # assume which utilities the ClickHouse image ships.
+              command: ["sh", "-c", "df -h /nvme/disk; grep ' /nvme/disk ' /proc/self/mounts"]
+              volumeMounts:
+                - {name: nvme, mountPath: /nvme/disk}
+          volumes:
+            - name: nvme
+              hostPath: {path: /nvme/disk, type: Directory}
+        EOF
+        kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/nvme-probe --timeout=180s >/dev/null
+        kubectl logs pod/nvme-probe
+        kubectl delete pod nvme-probe --wait >/dev/null
+      executable: /bin/bash
+    environment:
+      KUBECONFIG: "{{ kubeconfig_path }}"
+    register: _ng_nvme
+    changed_when: false
+    check_mode: false
+    failed_when: false
+
+  - name: Confirm /nvme/disk is a real instance-store filesystem
+    ansible.builtin.assert:
+      that:
+        - _ng_nvme.rc == 0
+        - _ng_nvme.stdout is search('/dev/(nvme|md)')
+      fail_msg: >-
+        /nvme/disk on {{ _ng_probe_node }} is not backed by instance-store NVMe.
+        The launch template user data did not complete. Inspect it with:
+          aws ssm start-session --target <instance-id> --profile {{ aws.target_profile }}
+          sudo cat /var/log/clickhouse-nvme-setup.log
+        Output was: {{ _ng_nvme.stdout | default('') }} {{ _ng_nvme.stderr | default('') }}
+      success_msg: "/nvme/disk is mounted from instance-store NVMe on {{ _ng_probe_node }}"
+
+  - name: Show the probe output
+    ansible.builtin.debug:
+      msg: "{{ _ng_nvme.stdout_lines }}"

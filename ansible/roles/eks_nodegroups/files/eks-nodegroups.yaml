@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- managed node groups for keeper, server and
+  operator workloads, plus the shared node IAM role and launch templates.
+  Separate from the cluster stack so nodes can be resized or destroyed
+  without touching the control plane.
+
+Parameters:
+  EksClusterName:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets. Nodes must not have public IPs.
+
+  NodeAmiType:
+    Type: String
+    AllowedValues: [AL2023_ARM_64_STANDARD, AL2023_x86_64_STANDARD]
+    Description: >-
+      AMI family for the keeper and server groups. The standard build runs
+      ARM64 (Graviton); the FIPS build must be x86_64, because FIPS-validated
+      crypto is not available on ARM64.
+  LabelSuffix:
+    Type: String
+    Default: ''
+    AllowedValues: ['', '-arm64']
+    Description: >-
+      Appended to the clickhouseGroup node label on ARM64 builds, per the
+      ClickHouse tutorial. The Helm chart's nodeSelector stays
+      `clickhouseGroup: server` regardless -- the operator adds the suffix
+      itself. Do not "correct" that apparent mismatch.
+
+  KeeperInstanceType:
+    Type: String
+  KeeperNodeCount:
+    Type: Number
+    Description: Always 3. Keeper needs an odd quorum.
+
+  ServerInstanceType:
+    Type: String
+    Description: >-
+      Must be a "d" family member (m7gd, m6id, m5d...). The trailing d means
+      local NVMe SSD, which the ClickHouse server pods use as their read
+      cache. A type without it leaves the cache on the root EBS volume.
+  ServerMinNodes:
+    Type: Number
+  ServerMaxNodes:
+    Type: Number
+
+  OperatorInstanceType:
+    Type: String
+  OperatorMinNodes:
+    Type: Number
+  OperatorMaxNodes:
+    Type: Number
+
+  BootDiskSize:
+    Type: Number
+    Default: 20
+    Description: >-
+      GiB of root EBS per node -- OS and container images only. ClickHouse
+      data lives on separate EBS volumes the Helm chart provisions, and the
+      cache lives on instance-store NVMe.
+
+Conditions:
+  # Drives which taints the keeper group gets. Needed as a real Condition
+  # because CloudFormation cannot compute a list from a string at will.
+  IsArm: !Equals [!Ref NodeAmiType, AL2023_ARM_64_STANDARD]
+
+Resources:
+  # =========================================================================
+  # Node IAM role -- shared by all three groups
+  # =========================================================================
+  # Every EC2 node assumes this. Deliberately NO RoleName: an explicit name
+  # collides with leftovers from other attempts in this shared account, and
+  # CloudFormation reports such a collision only as "Validation failed with
+  # 1 error(s)", naming neither the resource nor the reason.
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Lets the kubelet register with the cluster and describe its own
+        # instance. Without it, nodes never reach Ready.
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        # The VPC CNI runs as a DaemonSet using the node's credentials to
+        # attach ENIs and hand out VPC IPs to pods.
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        # Pulls the ClickHouse images from your own ECR. ReadOnly is what the
+        # tutorial specifies; AmazonEC2ContainerRegistryPullOnly is a tighter
+        # modern alternative if you want least privilege.
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        # Not required by the tutorial. It buys you `aws ssm start-session`
+        # onto a node with no SSH key, no bastion and no inbound rule --
+        # which is how you inspect a node that will not join.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+  # =========================================================================
+  # Launch templates
+  # =========================================================================
+  # Both templates deliberately omit ImageId and InstanceType. EKS fills the
+  # AMI in from the node group's AmiType, and the instance type from its
+  # InstanceTypes -- and because ImageId is absent, EKS also merges its own
+  # nodeadm bootstrap into the user data below rather than replacing it.
+  BaseLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref BootDiskSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          # IMDSv2 only -- token-authenticated, which defeats the SSRF class
+          # of attack that made IMDSv1 notorious.
+          HttpTokens: required
+          # A hop limit of 1 stops at the host and would cut pods off from
+          # IMDS entirely. The tutorial states nodes require IMDS for
+          # authentication, so allow the one extra hop into the pod network.
+          # If you later move every workload to IRSA, drop this to 1.
+          HttpPutResponseHopLimit: 2
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - {Key: Project, Value: clickhouse-private}
+
+  ServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref BootDiskSize
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - {Key: Project, Value: clickhouse-private}
+        # MIME multipart, not a bare script: AL2023 nodes are configured by
+        # nodeadm through a MIME document, and EKS appends its own part to
+        # ours. A bare #!/bin/bash script here would be discarded.
+        UserData:
+          Fn::Base64: |
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="//"
+
+            --//
+            Content-Type: text/x-shellscript; charset="us-ascii"
+
+            #!/usr/bin/env bash
+            # Bind the ephemeral NVMe SSD(s) to /nvme/disk, which is where the
+            # ClickHouse operator expects each server pod's local read cache.
+            set -uo pipefail
+            exec >>/var/log/clickhouse-nvme-setup.log 2>&1
+            echo "=== $(date -Is) nvme setup starting ==="
+
+            MOUNT=/nvme/disk
+
+            # On Nitro, EBS volumes appear as NVMe too, so selecting by
+            # /dev/nvme* would happily reformat the root disk. The model
+            # string is the only safe discriminator: ephemeral instance
+            # store reports "Amazon EC2 NVMe Instance Storage".
+            devs=()
+            while read -r name; do
+              devs+=("/dev/$name")
+            done < <(lsblk -dn -o NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}')
+
+            if [ "${#devs[@]}" -eq 0 ]; then
+              echo "no instance-store NVMe present; leaving cache on the root volume"
+              exit 0
+            fi
+
+            target="${devs[0]}"
+            if [ "${#devs[@]}" -gt 1 ]; then
+              # Larger "d" instances expose several devices; stripe them so
+              # the cache sees the aggregate size and throughput. RAID0 has
+              # no redundancy, which is correct for a rebuildable cache.
+              command -v mdadm >/dev/null 2>&1 || dnf install -y mdadm
+              mdadm --create /dev/md0 --level=0 --name=nvmecache \
+                --raid-devices="${#devs[@]}" "${devs[@]}"
+              target=/dev/md0
+            fi
+
+            # Format only when there is no filesystem yet, so re-running this
+            # script does not throw away a warm cache.
+            blkid "$target" >/dev/null 2>&1 || mkfs.xfs -f "$target"
+
+            mkdir -p "$MOUNT"
+            uuid="$(blkid -s UUID -o value "$target")"
+            grep -q " $MOUNT " /etc/fstab \
+              || echo "UUID=$uuid $MOUNT xfs defaults,noatime,nofail 0 2" >>/etc/fstab
+            mount -a
+
+            # The cache is hostPath-mounted into pods that do not run as
+            # root. This node is dedicated to ClickHouse by taint, so a
+            # sticky world-writable cache directory is a better trade than
+            # hardcoding whichever uid the image happens to use.
+            chmod 1777 "$MOUNT"
+            echo "=== mounted $target at $MOUNT ==="
+            df -h "$MOUNT"
+            --//--
+
+  # =========================================================================
+  # Node groups
+  # =========================================================================
+  # None of the three sets NodegroupName. Changing an instance type forces
+  # CloudFormation to REPLACE a node group, and it cannot create the
+  # replacement while a same-named one still exists -- an explicit name turns
+  # every resize into a failed update. Find them by label instead:
+  #   kubectl get nodes -L clickhouseGroup
+  #
+  # Each group spans all three private subnets, so EKS spreads nodes across
+  # AZs. The tutorial suggests one node group per AZ instead; that only
+  # matters once cluster-autoscaler is involved, because the autoscaler
+  # cannot know which AZ a pending pod's EBS volume is pinned to.
+
+  KeeperNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksClusterName
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Ref SubnetIds
+      AmiType: !Ref NodeAmiType
+      InstanceTypes: [!Ref KeeperInstanceType]
+      CapacityType: ON_DEMAND
+      LaunchTemplate:
+        Id: !Ref BaseLaunchTemplate
+        Version: !GetAtt BaseLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: !Ref KeeperNodeCount
+        DesiredSize: !Ref KeeperNodeCount
+        MaxSize: !Ref KeeperNodeCount
+      Labels:
+        clickhouseGroup: !Sub 'keeper${LabelSuffix}'
+      Taints: !If
+        - IsArm
+        # do-not-schedule keeps everything that is not a ClickHouse pod off
+        # these dedicated nodes; the operator adds the matching toleration
+        # itself, which is why the chart ships `tolerations: []`.
+        - - {Key: clickhouse.com/do-not-schedule, Value: 'true', Effect: NO_SCHEDULE}
+          # Keeps x86-only images off Graviton nodes, where they would fail
+          # to start with an exec-format error.
+          - {Key: clickhouse.com/arch, Value: arm64, Effect: NO_SCHEDULE}
+        - - {Key: clickhouse.com/do-not-schedule, Value: 'true', Effect: NO_SCHEDULE}
+      Tags:
+        Project: clickhouse-private
+        Role: keeper
+
+  ServerNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksClusterName
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Ref SubnetIds
+      AmiType: !Ref NodeAmiType
+      InstanceTypes: [!Ref ServerInstanceType]
+      CapacityType: ON_DEMAND
+      LaunchTemplate:
+        Id: !Ref ServerLaunchTemplate
+        Version: !GetAtt ServerLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: !Ref ServerMinNodes
+        DesiredSize: !Ref ServerMinNodes
+        MaxSize: !Ref ServerMaxNodes
+      Labels:
+        clickhouseGroup: !Sub 'server${LabelSuffix}'
+      # Note the asymmetry with keeper: the tutorial puts the arch taint on
+      # keeper only. Adding one the operator does not tolerate would leave
+      # server pods Pending forever, so we follow the tutorial exactly.
+      Taints:
+        - {Key: clickhouse.com/do-not-schedule, Value: 'true', Effect: NO_SCHEDULE}
+      Tags:
+        Project: clickhouse-private
+        Role: server
+
+  # Runs the operator itself plus the cluster add-ons (CoreDNS, EBS CSI
+  # controller, metrics). Untainted and unlabelled on purpose -- it is the
+  # only place ordinary pods can land once the other two groups are tainted.
+  # x86_64 in both builds, which is what the tutorial specifies.
+  OperatorNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksClusterName
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Ref SubnetIds
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes: [!Ref OperatorInstanceType]
+      CapacityType: ON_DEMAND
+      LaunchTemplate:
+        Id: !Ref BaseLaunchTemplate
+        Version: !GetAtt BaseLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: !Ref OperatorMinNodes
+        DesiredSize: !Ref OperatorMinNodes
+        MaxSize: !Ref OperatorMaxNodes
+      Tags:
+        Project: clickhouse-private
+        Role: operator
+
+Outputs:
+  NodeRoleArn:
+    Description: Shared node instance role. Step 6 grants it S3 access.
+    Value: !GetAtt NodeRole.Arn
+  KeeperNodeGroupName:
+    Value: !Ref KeeperNodeGroup
+  ServerNodeGroupName:
+    Value: !Ref ServerNodeGroup
+  OperatorNodeGroupName:
+    Value: !Ref OperatorNodeGroup
