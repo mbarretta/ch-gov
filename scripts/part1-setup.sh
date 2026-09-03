@@ -17,12 +17,15 @@
 #   ./part1-setup.sh --check      verify only; change nothing (safe to re-run)
 #
 set -euo pipefail
+# Resolve an absolute path to this script BEFORE cd'ing, so --help can still
+# read its own header comment afterwards.
+_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./lib/common.sh
 
 CHECK_ONLY=0
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
-[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { sed -n '2,26p' "$0" | sed 's/^#\s\?//'; exit 0; }
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$_SELF"; exit 0; }
 
 # ===========================================================================
 step "1/6  Required CLI tools"

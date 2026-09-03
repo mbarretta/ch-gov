@@ -256,7 +256,74 @@ match what actually exists in the source ECR today, unlike the training doc. Our
 Ansible lives in `ansible/` and follows that tutorial. See
 `docs/part-2-image-sync.md`.
 
-## 6. Checkpoint
+## 6. Running the playbook: `scripts/play.sh`
+
+Every step in Parts 2 and 3 is shown as a bare `ansible-playbook` command,
+because that is what you would type in a normal interactive shell. In practice
+use the wrapper:
+
+```bash
+scripts/play.sh --tags nodes                              # a step
+scripts/play.sh --check --tags storage                    # dry run
+scripts/play.sh --tags nodes -e nodegroups_state=absent   # teardown
+scripts/play.sh --help
+```
+
+It is equivalent to `source scripts/env.sh && cd ansible && ansible-playbook
+deploy.yml ...`, and exists because three things are easy to get wrong:
+
+**1. The environment has to point into the repo.** `AWS_CONFIG_FILE` and
+`KUBECONFIG` must be the project-local ones. Forgetting them gives you either
+`The config profile (sa) could not be found` or — much worse — a run against
+whatever cluster your personal `~/.kube/config` happens to name.
+
+**2. `ansible-playbook` must run from `ansible/`.** `ansible.cfg` is resolved
+relative to the current directory, and it is what supplies the inventory and
+`roles_path`. Run from the repo root and Ansible silently uses different
+settings.
+
+**3. Ansible refuses to start on non-blocking pipes.**
+
+```
+ERROR: Ansible requires blocking IO on stdin/stdout/stderr.
+Non-blocking file handles detected: <stdout>, <stderr>
+```
+
+This has nothing to do with your command. Some parent processes — CI runners,
+some editor terminals, agent harnesses — hand their child non-blocking
+descriptors, and Ansible checks for that and bails. It is confusing precisely
+because the same command works when you type it into a normal terminal.
+
+The obvious workaround is to pipe through `cat`, which restores blocking IO:
+
+```bash
+ansible-playbook deploy.yml --tags nodes </dev/null 2>&1 | cat
+```
+
+That works, but it costs you the TTY, and with it coloured output and the
+correct terminal width. The wrapper instead clears the `O_NONBLOCK` flag on
+the three descriptors and then `exec`s, fixing the actual cause and leaving
+the terminal attached:
+
+```python
+for fd in (0, 1, 2):
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    if flags & os.O_NONBLOCK:
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+os.execvp("ansible-playbook", [...])
+```
+
+It also checks your credentials before doing anything:
+
+```
+[fail] not authenticated -- run: aws sso login --profile sa
+```
+
+SSO tokens last hours, not days. Without that check an expired token shows up
+partway into a run as an unrelated-looking module failure — sometimes after
+something has already been created.
+
+## 7. Checkpoint
 
 Verified working:
 
@@ -265,11 +332,17 @@ Verified working:
 - [x] `sa` profile authenticates via SSO
 - [x] `private-us` assumes the pull role
 - [x] Source ECR reachable; real image versions enumerated
-- [x] Python venv with boto3 for Ansible's AWS modules
+- [x] Python venv (3.12+) with boto3 and kubernetes for Ansible's modules
 - [x] Deployment automation — we write our own (`ansible/`)
 
 Re-verify any time with:
 
 ```bash
 ./scripts/part1-setup.sh --check
+```
+
+And run every step through the wrapper:
+
+```bash
+scripts/play.sh --help
 ```
