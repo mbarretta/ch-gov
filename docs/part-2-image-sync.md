@@ -541,7 +541,7 @@ nothing until something scales — only `min_nodes` is running.
 The knobs are in `group_vars/all.yml` under `infrastructure`, and the VPC role
 re-validates any instance type you choose against the AZs before use.
 
-## Labels: the `-arm64` suffix that looks like a bug
+## Labels: the `-arm64` suffix that looks like a bug — and is one
 
 The tutorial says to label ARM64 node groups:
 
@@ -557,26 +557,31 @@ server.podPolicy.nodeSelector:
   clickhouseGroup: server          # no suffix
 ```
 
-This looks like a mismatch that would leave every pod unschedulable. It is
-not. The chart's own comment settles it:
+The chart's own comment says this is intended:
 
 > **This value must match the node labels of the server node group** excluding
 > the `-arm64` suffix, if using arm64.
 
-The operator appends the suffix itself. So: **label the nodes with the suffix,
-leave the chart without it, and do not "fix" either side.** `group_vars`
-derives the suffix from the `fips` switch (`node_label_suffix`), since the FIPS
-build is x86 and takes no suffix.
+and its README explains the mechanism: the
+`clickhouse-server-configuration-webhook` appends `-arm64` to the selector at
+admission time when the CR is labelled `arm64-preferred`. **Step 8 disables
+webhooks**, on the tutorial's own instruction, and nothing else appends it.
+The first Step 9 run proved this directly — every Keeper pod Pending, with the
+scheduler's reason and the pod's actual selector:
 
-> **Caveat, found while building Step 9.** The cluster chart's README credits
-> the suffix to the `clickhouse-server-configuration-webhook`, which Step 8
-> switches off (`webhooks.enabled=false`, per the tutorial). The chart still
-> labels the CR `clickhouse.com/arm64-preferred: "true"`, which is presumably
-> what the operator reads instead — the tutorial labels nodes `*-arm64`, keeps
-> the selector bare, and disables webhooks, so it has to work without them.
-> The Step 9 role does not take this on faith: if server or Keeper pods stay
-> Pending, it prints the scheduler's own reason (`didn't match Pod's node
-> affinity/selector`) before failing. See Part 4.
+```
+0/8 nodes are available: 8 node(s) didn't match Pod's node affinity/selector.
+nodeSelector: {"clickhouseGroup":"keeper"}      # nodes say keeper-arm64
+```
+
+So the tutorial's Step 5 and Step 9, followed literally with webhooks off,
+produce a cluster that cannot schedule. The resolution here: **keep the node
+labels as the tutorial has them, and put the suffix in the chart's selector**
+(`clickhouseGroup: keeper{{ node_label_suffix }}`). `group_vars` derives the
+suffix from the `fips` switch, since the FIPS build is x86 and takes no
+suffix, and the Step 9 role uses that same variable — so the two sides cannot
+drift. An earlier version of this section said the operator appends the suffix
+itself; it does not.
 
 ## Taints, and a deliberate asymmetry
 
