@@ -1,0 +1,474 @@
+---
+# Step 14: a database and a least-privilege user for Langfuse inside
+# ClickHouse Private.
+#
+# Langfuse (Step 15) keeps its traces, observations and scores in ClickHouse.
+# Rather than hand it the admin account, this role creates a database of its
+# own and a user that holds exactly the grants Langfuse documents for an
+# external ClickHouse, scoped to that database plus the system tables its
+# migrations and health checks read.
+#
+# Every statement runs through `kubectl exec -i` in one server pod, the way
+# Step 11 does: the admin password travels on stdin, never on argv. The user
+# is created `IDENTIFIED WITH sha256_hash`, so the SQL carries the sha256 of
+# the Langfuse password and the password itself only ever exists in state/
+# (where Step 15 reads it into a Kubernetes Secret) and in Langfuse's pods.
+#
+# No `ON CLUSTER` anywhere: the user directory is replicated through Keeper,
+# so a user created on one replica exists on all of them.
+#
+# Idempotency: system.users does not expose password hashes (auth_params is
+# `{}` for password-based methods), so "is the stored hash still ours?" is
+# answered by authenticating as the Langfuse user with the password from
+# state/. Auth succeeds: nothing to do. Auth fails: ALTER USER to the current
+# hash. Every exec prints created/exists/updated markers and changed_when keys
+# off them, so a second run reports changed=0.
+#
+# --check runs the (idempotent) SQL for real, as Step 11 does; there is no
+# way to dry-run a DDL statement through kubectl exec.
+#
+# Cost: nothing. A database in ClickHouse Private is metadata in Keeper.
+#
+# Teardown: ansible-playbook deploy.yml --tags lf-db -e langfuse_db_state=absent
+#   This is the "purge Langfuse data" switch: DROP DATABASE ... SYNC and DROP
+#   USER. Step 15's teardown (lf-app) deliberately leaves the database alone,
+#   so an operator can remove the app and keep the traces, or the reverse.
+
+- name: Name the pieces
+  ansible.builtin.set_fact:
+    _lf_db: "{{ langfuse.clickhouse_database }}"
+    _lf_user: "{{ langfuse.clickhouse_user }}"
+    # The in-cluster Service in front of every server replica; Langfuse itself
+    # connects here (Step 15), so this is the path worth proving.
+    _lf_host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc"
+    # Same plumbing as clickhouse_verify: `kubectl exec -i` forwards stdin into
+    # the container, so the password goes that way and not via `environment:`
+    # (which only reaches the local kubectl) or argv (visible to `ps`). The
+    # container is c-<cluster>-server; the pod label says clickhouse-server.
+    _lf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
+    # $0 = user, $1 = query; the password is the first line of stdin. The
+    # client gets /dev/null as stdin afterwards -- an open stdin on an INSERT
+    # is treated as external data (see clickhouse_verify for the error).
+    _lf_sh: 'IFS= read -r pw; exec clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null'
+    # $0 = user, $1 = host, $2 = attempts; the user's password is the first
+    # line of stdin. SELECT 1 over HTTP 8123, the port Langfuse's client uses.
+    # The password rides in a header on wget's argv inside the container, the
+    # same exposure as clickhouse-client's --password in _lf_sh; the kubectl
+    # argv on this machine carries nothing. Retries are here rather than in
+    # `until:` so the task can be `failed_when: false` and the assert after it
+    # can explain the failure (an exhausted `until:` fails regardless).
+    _lf_http_sh: |
+      IFS= read -r pw
+      i=1
+      while ! wget -qO- --timeout=10 --header="X-ClickHouse-User: $0" --header="X-ClickHouse-Key: $pw" "http://$1:8123/?query=SELECT%201"; do
+        [ "$i" -ge "$2" ] && exit 1
+        i=$((i+1))
+        sleep 5
+      done
+
+- name: Preconditions and inputs (skipped on teardown)
+  # Nothing here applies when purging, and the Ready wait would turn a purge
+  # against a half-down cluster into a five-minute stall.
+  when: (langfuse_db_state | default('present')) != 'absent'
+  block:
+    - name: Wait for every server pod to be Ready
+      # The wait from clickhouse_cluster, shortened: Step 9 already waited for
+      # first boot, so this only bridges a restart. Zero matching pods fails
+      # immediately ("no matching resources found"), which is what we want.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --namespace={{ clickhouse.namespace }}
+          - --for=condition=Ready
+          - --timeout=300s
+          - pod
+          - --selector=app.kubernetes.io/name=clickhouse-server
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_ready
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if the cluster is not up
+      ansible.builtin.assert:
+        that: _lf_ready.rc == 0
+        fail_msg: >-
+          No Ready ClickHouse server pod in {{ clickhouse.namespace }}
+          ({{ _lf_ready.stderr | default('') | trim }}). Run --tags cluster first,
+          or --tags nodes if the node groups are down.
+
+    - name: List the running server pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - --field-selector=status.phase=Running
+          - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_pods
+      changed_when: false
+      check_mode: false
+
+    - name: Pick a server pod
+      # Any one will do: DDL and grants replicate through Keeper.
+      ansible.builtin.set_fact:
+        _lf_pod: "{{ _lf_pods.stdout_lines | first }}"
+
+    - name: Read the admin password
+      ansible.builtin.set_fact:
+        _lf_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Ensure the state directory exists
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate (or reuse) the Langfuse ClickHouse password
+      # The password lookup writes the file on first use and reads it back on
+      # every run after, so the hash below is stable across runs. 32
+      # alphanumerics, as for the admin password.
+      ansible.builtin.set_fact:
+        _lf_pw: "{{ lookup('ansible.builtin.password', langfuse_state_files.clickhouse_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Tighten permissions on the password file
+      ansible.builtin.file:
+        path: "{{ langfuse_state_files.clickhouse_password_file }}"
+        mode: "0600"
+
+    - name: Hash the password
+      # ClickHouse stores sha256(password) for sha256_password users and
+      # accepts the hex directly with IDENTIFIED WITH sha256_hash, so the
+      # plaintext never enters a query (and so never system.query_log).
+      ansible.builtin.set_fact:
+        _lf_pw_hash: "{{ _lf_pw | hash('sha256') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- teardown ---------------------------------------------------------------
+# The "purge Langfuse data" switch. DROP DATABASE ... SYNC waits for every
+# replica to drop the tables before returning; the S3 parts go with them.
+
+- name: Teardown (langfuse_db_state=absent)
+  when: (langfuse_db_state | default('present')) == 'absent'
+  block:
+    - name: Find a running server pod to purge through
+      # Own precondition, gentler than the install's: no pod means the
+      # cluster is gone or going, and the database went with it.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - --field-selector=status.phase=Running
+          - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_td_pods
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Note when there is nothing to purge
+      ansible.builtin.debug:
+        msg: "no Running ClickHouse server pod in {{ clickhouse.namespace }}: the {{ _lf_db }} database and the {{ _lf_user }} user live inside the cluster and go away with it -- nothing to do"
+      when: _lf_td_pods.stdout_lines | default([]) | length == 0
+
+    - name: Stop here when there is nothing to purge
+      ansible.builtin.meta: end_play
+      when: _lf_td_pods.stdout_lines | default([]) | length == 0
+
+    - name: Read the admin password
+      ansible.builtin.set_fact:
+        _lf_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Count what is there to drop
+      # So the DROP below can report changed=0 when a previous purge already
+      # ran.
+      ansible.builtin.command:
+        argv: "{{ _lf_exec + [_lf_td_pods.stdout_lines | first, '--', 'sh', '-c', _lf_sh, clickhouse.admin_username, _q] }}"
+        stdin: "{{ _lf_admin_pw }}\n"
+      vars:
+        _q: "SELECT (SELECT count() FROM system.databases WHERE name = '{{ _lf_db }}') + (SELECT count() FROM system.users WHERE name = '{{ _lf_user }}') FORMAT TSV"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_td_before
+      changed_when: false
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Drop the Langfuse database and user
+      ansible.builtin.command:
+        argv: "{{ _lf_exec + [_lf_td_pods.stdout_lines | first, '--', 'sh', '-c', _lf_sh, clickhouse.admin_username, _q] }}"
+        stdin: "{{ _lf_admin_pw }}\n"
+      vars:
+        _q: "DROP DATABASE IF EXISTS {{ _lf_db }} SYNC; DROP USER IF EXISTS {{ _lf_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: (_lf_td_before.stdout | trim | int) > 0
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Teardown summary
+      ansible.builtin.debug:
+        msg:
+          - "purge Langfuse data: database {{ _lf_db }} dropped on every replica (SYNC) and user {{ _lf_user }} removed"
+          - "the Langfuse app (Step 15) is not touched by this switch -- remove it with --tags lf-app -e langfuse_state=absent"
+          - "{{ langfuse_state_files.clickhouse_password_file | realpath }} is kept; the next --tags lf-db reuses it, so Step 15's Secret stays valid"
+
+    - name: Stop here when tearing down
+      ansible.builtin.meta: end_play
+
+# --- the user -----------------------------------------------------------------
+
+- name: Read the user's entry in system.users
+  # auth_type and auth_params for the report. The hash is not in there (see
+  # the header), so the "is it still ours?" test is the HTTP probe below.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  vars:
+    _q: "SELECT auth_type, auth_params FROM system.users WHERE name = '{{ _lf_user }}' FORMAT TSV"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_user_row
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Remember whether the user already existed
+  ansible.builtin.set_fact:
+    _lf_user_existed: "{{ (_lf_user_row.stdout | trim) != '' }}"
+    _lf_user_auth: "{{ _lf_user_row.stdout | trim | replace('\t', ' / ') | default('(no such user)', true) }}"
+
+- name: Check whether the stored hash is still ours
+  # One attempt, as the Langfuse user, with the password from state/. A
+  # failure here is the normal outcome when the password file was regenerated
+  # or the user predates this role; it is what triggers the ALTER USER.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_http_sh, _lf_user, _lf_host, '1'] }}"
+    stdin: "{{ _lf_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_auth_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+  when: _lf_user_existed | bool
+
+- name: Decide whether the hash needs rotating
+  ansible.builtin.set_fact:
+    _lf_rotate: "{{ (_lf_user_existed | bool) and not ((_lf_auth_before.rc | default(1)) == 0 and (_lf_auth_before.stdout | default('') | trim) == '1') }}"
+
+- name: Create the database and the user
+  # $0 = admin user, $1 = database, $2 = user, $3 = sha256 hex, $4 = rotate|keep.
+  # The checks run server-side so the markers say what actually happened.
+  # Names are plain identifiers from group_vars, hence unquoted in the SQL.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_ensure_sh, clickhouse.admin_username, _lf_db, _lf_user, _lf_pw_hash, ('rotate' if _lf_rotate | bool else 'keep')] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  vars:
+    _lf_ensure_sh: |
+      set -eu
+      IFS= read -r pw
+      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      if [ "$(ch "SELECT count() FROM system.databases WHERE name = '$1'")" = 1 ]; then
+        echo "database: exists"
+      else
+        ch "CREATE DATABASE IF NOT EXISTS $1"
+        echo "database: created"
+      fi
+      if [ "$(ch "SELECT count() FROM system.users WHERE name = '$2'")" = 1 ]; then
+        if [ "$4" = rotate ]; then
+          ch "ALTER USER $2 IDENTIFIED WITH sha256_hash BY '$3'"
+          echo "user: updated"
+        else
+          echo "user: exists"
+        fi
+      else
+        ch "CREATE USER IF NOT EXISTS $2 IDENTIFIED WITH sha256_hash BY '$3'"
+        echo "user: created"
+      fi
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_ensure
+  changed_when: "'created' in _lf_ensure.stdout or 'updated' in _lf_ensure.stdout"
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- the grants ---------------------------------------------------------------
+
+- name: Grant the privilege set Langfuse documents
+  # Langfuse's list for an external ClickHouse, scoped to its database: read
+  # and write the data, run its own migrations (create/drop tables and views,
+  # alter columns and indexes), watch parts and mutations for its health
+  # checks and query_log for query stats. GRANT is idempotent, so the marker
+  # comes from comparing SHOW GRANTS before and after.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_grant_sh, clickhouse.admin_username, _lf_user, _lf_grant_sql] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  vars:
+    _lf_grant_sql: |
+      GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON {{ _lf_db }}.* TO {{ _lf_user }};
+      GRANT CREATE, DROP TABLE, DROP VIEW, ALTER ADD COLUMN, ALTER MODIFY COLUMN, ALTER ADD INDEX, ALTER DROP INDEX, ALTER MATERIALIZE INDEX, ALTER VIEW MODIFY QUERY ON {{ _lf_db }}.* TO {{ _lf_user }};
+      GRANT SELECT(database, table, name, partition, partition_id, active, rows) ON system.parts TO {{ _lf_user }};
+      GRANT SELECT(database, table, is_done) ON system.mutations TO {{ _lf_user }};
+      GRANT SELECT(database, name, engine) ON system.tables TO {{ _lf_user }};
+      GRANT SELECT ON system.processes TO {{ _lf_user }};
+      GRANT SELECT ON system.query_log* TO {{ _lf_user }};
+      GRANT READ ON REMOTE TO {{ _lf_user }};
+    # $0 = admin user, $1 = user, $2 = the GRANT statements.
+    _lf_grant_sh: |
+      set -eu
+      IFS= read -r pw
+      ch() { clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null; }
+      before=$(ch "SHOW GRANTS FOR $1")
+      ch "$2"
+      after=$(ch "SHOW GRANTS FOR $1")
+      if [ "$before" = "$after" ]; then echo "grants: unchanged"; else echo "grants: updated"; fi
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_grants_apply
+  changed_when: "'grants: updated' in _lf_grants_apply.stdout"
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Try to grant CLUSTER
+  # In Langfuse's list for clustered deployments, but `default` does not hold
+  # CLUSTER on ClickHouse Private (verified live), so this will likely be
+  # refused. Not fatal: Step 15 reads the outcome recorded below together with
+  # on_cluster_queries_require_cluster_grant and decides
+  # clickhouse.cluster.enabled for the chart. DDL replicates through the
+  # Shared database engine regardless, so nothing is lost either way.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_cluster_sh, clickhouse.admin_username, _lf_user] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  vars:
+    # $0 = admin user, $1 = user. No set -e: the refused branch must report,
+    # not abort.
+    _lf_cluster_sh: |
+      set -u
+      IFS= read -r pw
+      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      before=$(ch "SHOW GRANTS FOR $1")
+      if err=$(ch "GRANT CLUSTER ON *.* TO $1" 2>&1); then
+        after=$(ch "SHOW GRANTS FOR $1")
+        if [ "$before" = "$after" ]; then echo "cluster: already granted"; else echo "cluster: granted"; fi
+      else
+        echo "cluster: refused"
+        printf '%s\n' "$err" | head -c 400
+      fi
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_cluster
+  changed_when: "'cluster: granted' in (_lf_cluster.stdout | default(''))"
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Record whether the user holds CLUSTER
+  ansible.builtin.set_fact:
+    _lf_cluster_granted: "{{ (_lf_cluster.rc | default(1)) == 0 and (('cluster: granted' in _lf_cluster.stdout) or ('cluster: already granted' in _lf_cluster.stdout)) }}"
+    _lf_cluster_note: "{{ (_lf_cluster.stdout_lines | default(['cluster: exec failed (rc ' ~ (_lf_cluster.rc | default('?')) ~ ')'], true)) | join(' ') }}"
+
+# --- prove it -----------------------------------------------------------------
+
+- name: Read the grants back
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_sh, clickhouse.admin_username, 'SHOW GRANTS FOR ' ~ _lf_user] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_grants
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: The grants must cover the documented set
+  # SHOW GRANTS folds everything on one target into one line, in ClickHouse's
+  # own order, so this checks privileges and columns by name on the line for
+  # each target rather than comparing whole statements.
+  ansible.builtin.assert:
+    that:
+      - _lf_db_line is search('\\bSELECT\\b')
+      - _lf_db_line is search('\\bINSERT\\b')
+      - _lf_db_line is search('ALTER UPDATE')
+      - _lf_db_line is search('ALTER DELETE')
+      - _lf_db_line is search('\\bCREATE\\b')
+      - _lf_db_line is search('DROP TABLE')
+      - _lf_db_line is search('DROP VIEW')
+      - _lf_db_line is search('ALTER ADD COLUMN')
+      - _lf_db_line is search('ALTER MODIFY COLUMN')
+      - _lf_db_line is search('ALTER ADD INDEX')
+      - _lf_db_line is search('ALTER DROP INDEX')
+      - _lf_db_line is search('ALTER MATERIALIZE INDEX')
+      - _lf_db_line is search('ALTER VIEW MODIFY QUERY')
+      - _lf_parts_line is search('\\bdatabase\\b') and _lf_parts_line is search('\\btable\\b') and _lf_parts_line is search('\\bname\\b')
+      - _lf_parts_line is search('\\bpartition\\b') and _lf_parts_line is search('\\bpartition_id\\b') and _lf_parts_line is search('\\bactive\\b') and _lf_parts_line is search('\\brows\\b')
+      - _lf_mutations_line is search('\\bdatabase\\b') and _lf_mutations_line is search('\\btable\\b') and _lf_mutations_line is search('\\bis_done\\b')
+      - _lf_tables_line is search('\\bdatabase\\b') and _lf_tables_line is search('\\bname\\b') and _lf_tables_line is search('\\bengine\\b')
+      - _lf_grants.stdout is search('GRANT SELECT ON system\\.processes TO')
+      - _lf_grants.stdout is search('GRANT SELECT ON system\\.query_log\\* TO')
+      - _lf_grants.stdout is search('GRANT READ ON REMOTE TO')
+    fail_msg: "SHOW GRANTS FOR {{ _lf_user }} is missing part of the documented set: {{ _lf_grants.stdout_lines }}"
+  vars:
+    _lf_db_line: "{{ _lf_grants.stdout_lines | select('search', ' ON ' ~ _lf_db ~ '\\.\\* TO ') | join(' ') }}"
+    _lf_parts_line: "{{ _lf_grants.stdout_lines | select('search', ' ON system\\.parts TO ') | join(' ') }}"
+    _lf_mutations_line: "{{ _lf_grants.stdout_lines | select('search', ' ON system\\.mutations TO ') | join(' ') }}"
+    _lf_tables_line: "{{ _lf_grants.stdout_lines | select('search', ' ON system\\.tables TO ') | join(' ') }}"
+
+- name: Connect as the Langfuse user over HTTP
+  # The path Langfuse takes: user + password over 8123 through the server-any
+  # Service, from inside the cluster. A few attempts, because a hash rotated a
+  # moment ago reaches the other replicas through Keeper with a small lag.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_pod, '--', 'sh', '-c', _lf_http_sh, _lf_user, _lf_host, '6'] }}"
+    stdin: "{{ _lf_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_auth
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: SELECT 1 as the Langfuse user must succeed
+  ansible.builtin.assert:
+    that:
+      - _lf_auth.rc == 0
+      - (_lf_auth.stdout | trim) == '1'
+    fail_msg: >-
+      SELECT 1 as {{ _lf_user }} over http://{{ _lf_host }}:8123 from {{ _lf_pod }}
+      failed after 6 attempts (wget rc {{ _lf_auth.rc }}). ClickHouse answers 516
+      to a wrong password, and the stored hash {{ 'was just rotated to' if _lf_rotate | bool else 'already matched' }}
+      the sha256 of {{ langfuse_state_files.clickhouse_password_file | realpath }} -- so check that the
+      server-any Service resolves inside the cluster, then re-run with -e show_secrets=true.
+
+# --- report -------------------------------------------------------------------
+
+- name: Grants held by the Langfuse user
+  ansible.builtin.debug:
+    msg: "{{ _lf_grants.stdout_lines }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "database:  {{ _lf_db }} -- {{ 'created' if 'database: created' in _lf_ensure.stdout else 'already existed' }}"
+      - "user:      {{ _lf_user }} -- {{ 'created' if 'user: created' in _lf_ensure.stdout else ('existed, hash rotated to match the password file' if 'user: updated' in _lf_ensure.stdout else 'existed, hash already matched the password file') }}"
+      - "before:    system.users auth_type / auth_params = {{ _lf_user_auth }}"
+      - "grants:    {{ 'updated' if 'grants: updated' in _lf_grants_apply.stdout else 'unchanged' }} ({{ _lf_grants.stdout_lines | length }} GRANT lines, listed above)"
+      - "cluster:   {{ _lf_cluster_note }}{{ '' if _lf_cluster_granted | bool else ' -- Step 15 decides clickhouse.cluster.enabled from this and on_cluster_queries_require_cluster_grant' }}"
+      - "verified:  SELECT 1 as {{ _lf_user }} over http://{{ _lf_host }}:8123 from {{ _lf_pod }}"
+      - "password:  {{ langfuse_state_files.clickhouse_password_file | realpath }} (Step 15 puts it in Secret langfuse-clickhouse)"
+      - "teardown:  ansible-playbook deploy.yml --tags lf-db -e langfuse_db_state=absent  (purges Langfuse data: DROP DATABASE {{ _lf_db }} SYNC, DROP USER {{ _lf_user }})"
