@@ -1,0 +1,596 @@
+---
+# Step 15: Langfuse itself -- the web and worker Deployments, plus an
+# in-cluster PostgreSQL and Valkey on Chainguard images, all pulled from our
+# ECR. Traces go to the ClickHouse Private cluster from Step 9 as the
+# `langfuse` user Step 14 created; events, exports and media go to the Step 13
+# bucket through IRSA on the chart's ServiceAccount. No access keys anywhere.
+#
+# Optional: deploy.yml runs this role only when langfuse.enabled is true (or
+# on teardown). Steps 13 and 14 must have run first -- this role reads the
+# IRSA role ARN from the Step 13 stack and the ClickHouse password Step 14
+# wrote to state/.
+#
+# Order matters here more than in the other roles. NEXTAUTH_URL is baked into
+# the web pods and NextAuth redirects the browser to it after login, so it
+# must equal the address people type -- which means the load balancer is
+# created and its hostname known BEFORE the Helm release. The Secrets the
+# chart references by name must exist before the release, too.
+#
+# Exposure follows Step 12: langfuse.load_balancer.type none|internal|public,
+# realised as a second NLB Service (langfuse-lb) in front of the web pods.
+# Plain HTTP; no domain, no TLS.
+#
+# Cost: no new instances (everything lands on the operator node group);
+# ~$0.02/hr for the NLB plus EBS pennies for the two small volumes.
+#
+# Secrets are hidden from the output. Re-run with -e show_secrets=true to see
+# the Secret objects and the password-carrying execs when something fails.
+#
+# Teardown: ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent
+#   Removes the NLB Service, the release and the namespace (with its PVCs).
+#   The ClickHouse database and user are NOT touched -- that is Step 14's
+#   teardown (--tags lf-db -e langfuse_db_state=absent), the "purge Langfuse
+#   data" switch.
+
+- name: Preconditions and inputs (skipped on teardown)
+  # Everything the install needs to know or check. None of it applies when
+  # removing Langfuse -- and checking it would make teardown impossible after
+  # the ClickHouse cluster or the Step 13 stack are already gone.
+  when: (langfuse_state | default('present')) != 'absent'
+  block:
+    # --- exposure --------------------------------------------------------------
+
+    - name: Validate the load balancer type
+      ansible.builtin.assert:
+        that: langfuse.load_balancer.type in ['none', 'internal', 'public']
+        fail_msg: "langfuse.load_balancer.type must be none, internal or public (got '{{ langfuse.load_balancer.type }}')"
+
+    - name: Decide whether the load balancer Service should exist
+      ansible.builtin.set_fact:
+        _lf_present: "{{ langfuse.load_balancer.type != 'none' }}"
+
+    - name: Resolve who may connect
+      # The cloud controller turns loadBalancerSourceRanges into ingress rules on
+      # the node security group, one per NodePort. Leave it empty and it writes
+      # 0.0.0.0/0 -- for an internal NLB that is moot (private address), for a
+      # public one it is the open internet. So it is never left empty here.
+      ansible.builtin.set_fact:
+        _lf_sources: >-
+          {{ langfuse.load_balancer.allowed_cidrs
+             if langfuse.load_balancer.allowed_cidrs | length > 0
+             else ([infrastructure.vpc_cidr] if langfuse.load_balancer.type == 'internal' else []) }}
+
+    - name: A public load balancer needs an explicit allow list
+      ansible.builtin.assert:
+        that:
+          - _lf_sources | length > 0
+          - "'0.0.0.0/0' not in _lf_sources or (allow_open_internet | default(false) | bool)"
+        fail_msg: >-
+          langfuse.load_balancer.type is 'public' but allowed_cidrs is
+          {{ 'empty' if _lf_sources | length == 0 else 'the whole internet' }}.
+          Set allowed_cidrs to the CIDRs that should reach Langfuse
+          (your office/VPN egress, e.g. "203.0.113.7/32"). To really open port
+          {{ langfuse.load_balancer.port }} to everyone, add -e allow_open_internet=true
+          -- and note this is plain HTTP: TLS is not configured in this deployment.
+      when: langfuse.load_balancer.type == 'public'
+
+    # --- inputs from earlier steps ---------------------------------------------
+
+    - name: Look for the ClickHouse password Step 14 generated
+      ansible.builtin.stat:
+        path: "{{ langfuse_state_files.clickhouse_password_file }}"
+      register: _lf_ch_pw_file
+      check_mode: false
+
+    - name: Fail clearly if Step 14 has not run
+      ansible.builtin.assert:
+        that: _lf_ch_pw_file.stat.exists
+        fail_msg: "{{ langfuse_state_files.clickhouse_password_file }} is missing. Run: ansible-playbook deploy.yml --tags lf-db"
+
+    - name: Look up the IRSA role ARN from the Step 13 stack
+      # Read from CloudFormation rather than a fact set by the langfuse_storage
+      # role, so this works when run alone with --tags lf-app.
+      amazon.aws.cloudformation_info:
+        stack_name: "{{ infrastructure.environment_name }}-langfuse-irsa"
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _lf_irsa_info
+      check_mode: false
+
+    - name: Fail clearly if Step 13 has not run
+      ansible.builtin.assert:
+        that: (infrastructure.environment_name ~ '-langfuse-irsa') in _lf_irsa_info.cloudformation
+        fail_msg: "No CloudFormation stack {{ infrastructure.environment_name }}-langfuse-irsa. Run: ansible-playbook deploy.yml --tags lf-storage"
+
+    - name: Extract the role ARN
+      ansible.builtin.set_fact:
+        _lf_s3_role_arn: >-
+          {{ _lf_irsa_info.cloudformation[infrastructure.environment_name ~ '-langfuse-irsa']
+             .stack_outputs.LangfuseS3RoleArn }}
+
+    - name: Read the ClickHouse passwords
+      # The langfuse user's, for the Secret the chart reads; the admin's, for
+      # the grants check below.
+      ansible.builtin.set_fact:
+        _lf_ch_pw: "{{ lookup('ansible.builtin.file', langfuse_state_files.clickhouse_password_file) }}"
+        _lf_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    # --- generated secrets -----------------------------------------------------
+
+    - name: Ensure the state directory exists
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate (or reuse) the application secrets
+      # The password lookup writes the file on first use and reads it back on
+      # every run after, so the Secrets below converge and helm sees no change.
+      # ENCRYPTION_KEY must be 64 hex characters (256 bits). The API keys are
+      # pk-lf-/sk-lf- plus 32 hex, the shape Langfuse generates itself; the
+      # lookup (not the uuid filter, which changes every run) makes the hex.
+      # hexdigits includes A-F, so the values are lower-cased; the prefix is
+      # stripped before it is re-added because the files below are rewritten
+      # with the prefixed key and read back by the lookup on the next run.
+      ansible.builtin.set_fact:
+        _lf_nextauth_secret: "{{ lookup('ansible.builtin.password', langfuse_state_files.nextauth_secret_file ~ ' length=32 chars=ascii_letters,digits') }}"
+        _lf_salt: "{{ lookup('ansible.builtin.password', langfuse_state_files.salt_file ~ ' length=32 chars=ascii_letters,digits') }}"
+        _lf_encryption_key: "{{ lookup('ansible.builtin.password', langfuse_state_files.encryption_key_file ~ ' length=64 chars=hexdigits') | lower }}"
+        _lf_init_pw: "{{ lookup('ansible.builtin.password', langfuse_state_files.init_user_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+        _lf_public_key: "pk-lf-{{ lookup('ansible.builtin.password', langfuse_state_files.public_key_file ~ ' length=32 chars=hexdigits') | regex_replace('^pk-lf-', '') | lower }}"
+        _lf_secret_key: "sk-lf-{{ lookup('ansible.builtin.password', langfuse_state_files.secret_key_file ~ ' length=32 chars=hexdigits') | regex_replace('^sk-lf-', '') | lower }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Store the secrets exactly as Langfuse sees them, owner-readable only
+      # The lookup wrote the raw random part; rewrite each file with the value
+      # the Secrets carry (lower-cased hex, prefixed API keys) so
+      # scripts/langfuse-smoke.sh can read them verbatim. Idempotent: on the
+      # next run the lookup returns this content and the normalisation above
+      # changes nothing.
+      ansible.builtin.copy:
+        dest: "{{ item.dest }}"
+        content: "{{ item.content }}"
+        mode: "0600"
+      loop:
+        - {dest: "{{ langfuse_state_files.nextauth_secret_file }}", content: "{{ _lf_nextauth_secret }}"}
+        - {dest: "{{ langfuse_state_files.salt_file }}", content: "{{ _lf_salt }}"}
+        - {dest: "{{ langfuse_state_files.encryption_key_file }}", content: "{{ _lf_encryption_key }}"}
+        - {dest: "{{ langfuse_state_files.init_user_password_file }}", content: "{{ _lf_init_pw }}"}
+        - {dest: "{{ langfuse_state_files.public_key_file }}", content: "{{ _lf_public_key }}"}
+        - {dest: "{{ langfuse_state_files.secret_key_file }}", content: "{{ _lf_secret_key }}"}
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    # --- cluster mode ----------------------------------------------------------
+    # Langfuse runs its ClickHouse migrations ON CLUSTER `default` when
+    # CLICKHOUSE_CLUSTER_ENABLED is true (its default). That fits ClickHouse
+    # Private (cluster `default`, cloud_mode, SharedMergeTree) -- unless the
+    # server requires the CLUSTER grant for ON CLUSTER queries AND Step 14
+    # could not grant it (the admin does not hold CLUSTER, so the GRANT is
+    # attempted with failed_when: false there). In that one case the
+    # migrations would be refused, and cluster mode goes off: the Shared
+    # database engine replicates DDL anyway, so ON CLUSTER is not needed for
+    # correctness. Decided here, from the live server, and printed.
+
+    - name: List the running ClickHouse server pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - --field-selector=status.phase=Running
+          - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_server_pods
+      changed_when: false
+      check_mode: false
+
+    - name: Fail clearly if the cluster is not there
+      ansible.builtin.assert:
+        that: _lf_server_pods.stdout_lines | length > 0
+        fail_msg: "No ClickHouse server pod Running in {{ clickhouse.namespace }}. Run: ansible-playbook deploy.yml --tags cluster"
+
+    - name: Prepare the exec
+      # `kubectl exec -i`: the admin password travels on stdin, which kubectl
+      # forwards into the container -- never on argv (see clickhouse_verify
+      # for the full reasoning, including why the client gets /dev/null).
+      ansible.builtin.set_fact:
+        _lf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server", "{{ _lf_server_pods.stdout_lines[0] }}", "--", "sh", "-c"]
+        _lf_sh: 'IFS= read -r pw; exec clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null'
+        # A server setting (access_control_improvements). Which system table
+        # lists it differs between versions, so both are asked; an empty answer
+        # means the server does not report it, i.e. it is not enforced.
+        _lf_setting_sql: >-
+          SELECT value FROM system.settings WHERE name = 'on_cluster_queries_require_cluster_grant'
+          UNION ALL
+          SELECT value FROM system.server_settings WHERE name = 'on_cluster_queries_require_cluster_grant'
+          FORMAT TSV
+
+    - name: Read the grants Step 14 gave the Langfuse user
+      ansible.builtin.command:
+        argv: "{{ _lf_exec + [_lf_sh, clickhouse.admin_username, 'SHOW GRANTS FOR ' ~ langfuse.clickhouse_user ~ ' FORMAT TSV'] }}"
+        stdin: "{{ _lf_admin_pw }}\n"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_grants
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Fail clearly if Step 14 has not created the user
+      ansible.builtin.assert:
+        that: _lf_grants.rc == 0
+        fail_msg: "SHOW GRANTS FOR {{ langfuse.clickhouse_user }} failed (rc {{ _lf_grants.rc }}): {{ _lf_grants.stderr | default('') | trim }}. Run: ansible-playbook deploy.yml --tags lf-db"
+
+    - name: Ask whether ON CLUSTER queries need the CLUSTER grant
+      ansible.builtin.command:
+        argv: "{{ _lf_exec + [_lf_sh, clickhouse.admin_username, _lf_setting_sql] }}"
+        stdin: "{{ _lf_admin_pw }}\n"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_setting
+      changed_when: false
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Collect the inputs to the decision
+      ansible.builtin.set_fact:
+        _lf_has_cluster_grant: "{{ _lf_grants.stdout is search('GRANT CLUSTER ON') }}"
+        _lf_requires_cluster_grant: "{{ (_lf_setting.stdout_lines | first | default('')) | trim == '1' }}"
+        _lf_setting_value: "{{ (_lf_setting.stdout | trim) or 'not reported' }}"
+
+    - name: Decide the cluster mode
+      ansible.builtin.set_fact:
+        _lf_cluster_enabled: "{{ (_lf_has_cluster_grant | bool) or not (_lf_requires_cluster_grant | bool) }}"
+
+    - name: Report the cluster-mode decision
+      ansible.builtin.debug:
+        msg:
+          - "CLUSTER granted to {{ langfuse.clickhouse_user }}:        {{ _lf_has_cluster_grant }}"
+          - "on_cluster_queries_require_cluster_grant: {{ _lf_setting_value }}"
+          - "clickhouse.cluster.enabled:               {{ _lf_cluster_enabled }}{{ '' if _lf_cluster_enabled else '  (migrations run without ON CLUSTER; the Shared database engine replicates DDL)' }}"
+
+# --- namespace and Secrets ---------------------------------------------------
+# Created by Ansible rather than the chart: the chart references them by name
+# (existingSecret / secretKeyRef / secretRef), so they must exist before the
+# release. Written as data: with b64encode, not stringData -- with stringData
+# the server re-encodes and every apply would report a change.
+
+- name: Create the namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+
+- name: Write the application Secret (NextAuth secret, salt, encryption key)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: langfuse-app
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data:
+        nextauth-secret: "{{ _lf_nextauth_secret | b64encode }}"
+        salt: "{{ _lf_salt | b64encode }}"
+        encryption-key: "{{ _lf_encryption_key | b64encode }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Write the ClickHouse Secret (the langfuse user's password from Step 14)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: langfuse-clickhouse
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data:
+        password: "{{ _lf_ch_pw | b64encode }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Write the headless-init Secret (org, project, user, API keys)
+  # Mounted as environment via additionalEnvFrom. Langfuse reads the
+  # LANGFUSE_INIT_* variables on first boot and seeds the org, project, user
+  # and API key pair, so the demo works without clicking through sign-up.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: langfuse-init
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data:
+        LANGFUSE_INIT_ORG_ID: "{{ langfuse.init.org_id | b64encode }}"
+        LANGFUSE_INIT_ORG_NAME: "{{ langfuse.init.org_name | b64encode }}"
+        LANGFUSE_INIT_PROJECT_ID: "{{ langfuse.init.project_id | b64encode }}"
+        LANGFUSE_INIT_PROJECT_NAME: "{{ langfuse.init.project_name | b64encode }}"
+        LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "{{ _lf_public_key | b64encode }}"
+        LANGFUSE_INIT_PROJECT_SECRET_KEY: "{{ _lf_secret_key | b64encode }}"
+        LANGFUSE_INIT_USER_EMAIL: "{{ langfuse.init.user_email | b64encode }}"
+        LANGFUSE_INIT_USER_NAME: "{{ langfuse.init.user_name | b64encode }}"
+        LANGFUSE_INIT_USER_PASSWORD: "{{ _lf_init_pw | b64encode }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- the load balancer -------------------------------------------------------
+# Before the release, because NEXTAUTH_URL is derived from its hostname. Same
+# manifest shape as Step 12's Service; the selector is the chart's own web
+# selector (templates/web/service.yaml), so the Service finds the web pods
+# the moment the release creates them.
+
+- name: Create or update the load balancer Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: langfuse-lb
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+          app.kubernetes.io/part-of: langfuse
+        annotations: >-
+          {{ {
+            'service.beta.kubernetes.io/aws-load-balancer-type': 'nlb',
+            'service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled':
+              langfuse.load_balancer.cross_zone | bool | string | lower
+          } | combine(
+            {'service.beta.kubernetes.io/aws-load-balancer-internal': 'true'}
+            if langfuse.load_balancer.type == 'internal' else {}
+          ) }}
+      spec:
+        type: LoadBalancer
+        selector:
+          app.kubernetes.io/name: langfuse
+          app.kubernetes.io/instance: "{{ langfuse.release }}"
+          app: web
+        # Local: traffic reaches a node and goes to the web pod ON that node,
+        # no second hop, client IP preserved. Nodes without a web pod fail the
+        # health check and take no traffic -- expected, not a partial failure.
+        externalTrafficPolicy: Local
+        loadBalancerSourceRanges: "{{ _lf_sources }}"
+        ports:
+          - name: http
+            protocol: TCP
+            port: "{{ langfuse.load_balancer.port | int }}"
+            targetPort: 3000
+  when: _lf_present
+
+- name: Wait for the cloud controller to assign a hostname
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - service
+      - langfuse-lb
+      - --namespace={{ langfuse.namespace }}
+      - -o=jsonpath={.status.loadBalancer.ingress[0].hostname}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_lb_host
+  until: _lf_lb_host.stdout | trim | length > 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: _lf_present
+
+- name: Note the load balancer hostname
+  ansible.builtin.set_fact:
+    _lf_host: "{{ (_lf_lb_host.stdout | default('')) | trim }}"
+
+- name: Settle the address people will use
+  # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname, with the port
+  # appended only when it is not 80; else, with no load balancer,
+  # http://localhost:3000 -- what a port-forward of exactly 3000:3000 to
+  # svc/langfuse-web gives you (NextAuth redirects the browser here, so the
+  # local port cannot be anything else).
+  ansible.builtin.set_fact:
+    _lf_url: >-
+      {{ langfuse.url if langfuse.url
+         else ('http://' ~ _lf_host ~ ('' if (langfuse.load_balancer.port | int) == 80 else ':' ~ langfuse.load_balancer.port))
+         if _lf_present else 'http://localhost:3000' }}
+
+- name: Report the address
+  ansible.builtin.debug:
+    msg: "NEXTAUTH_URL: {{ _lf_url }}{{ '' if _lf_present else '  (no load balancer: kubectl port-forward -n ' ~ langfuse.namespace ~ ' svc/langfuse-web 3000:3000)' }}"
+
+# --- the release -------------------------------------------------------------
+
+- name: Log in to the ECR Helm registry
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lf_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _lf_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+
+- name: Install or upgrade Langfuse
+  # The chart from our ECR (Step 2 pushed it there). Every image below points
+  # at our registry too: the chart's defaults are docker.langfuse.com,
+  # docker.io and cgr.dev, none of which the cluster can reach.
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: "{{ langfuse.release }}"
+    chart_ref: "oci://{{ target_registry }}/helm/langfuse"
+    chart_version: "{{ versions.langfuse_chart }}"
+    release_namespace: "{{ langfuse.namespace }}"
+    # No helm wait: on the Chainguard image the subchart never creates the
+    # langfuse PostgreSQL role, so web and worker crash-loop until that role
+    # is created after the install, and helm's own wait would only time out.
+    wait: false
+    # Helm 4 applies server-side; see clickhouse_cluster for why the flag.
+    force_conflicts: true
+    values:
+      langfuse:
+        nextauth:
+          url: "{{ _lf_url }}"
+          secret:
+            secretKeyRef: {name: langfuse-app, key: nextauth-secret}
+        salt:
+          secretKeyRef: {name: langfuse-app, key: salt}
+        encryptionKey:
+          secretKeyRef: {name: langfuse-app, key: encryption-key}
+        features:
+          telemetryEnabled: "{{ langfuse.telemetry_enabled | bool }}"
+          signUpDisabled: "{{ langfuse.signup_disabled | bool }}"
+        serviceAccount:
+          create: true
+          annotations:
+            # The IRSA wiring. Pods running as the chart's ServiceAccount
+            # (named after the release; Step 13's trust policy names it) get
+            # AWS_ROLE_ARN and a projected token from this one annotation.
+            eks.amazonaws.com/role-arn: "{{ _lf_s3_role_arn }}"
+        additionalEnvFrom:
+          - secretRef: {name: langfuse-init}
+        image:
+          pullPolicy: IfNotPresent   # tags are immutable in our ECR
+        web:
+          image:
+            repository: "{{ target_registry }}/langfuse/langfuse"
+            tag: "{{ versions.langfuse_app }}"
+          replicas: "{{ langfuse.web.replicas | int }}"
+          resources:
+            limits:   {cpu: "{{ langfuse.web.cpu }}", memory: "{{ langfuse.web.memory }}"}
+            requests: {cpu: "{{ langfuse.web.cpu }}", memory: "{{ langfuse.web.memory }}"}
+        worker:
+          image:
+            repository: "{{ target_registry }}/langfuse/langfuse-worker"
+            tag: "{{ versions.langfuse_app }}"
+          replicas: "{{ langfuse.worker.replicas | int }}"
+          resources:
+            limits:   {cpu: "{{ langfuse.worker.cpu }}", memory: "{{ langfuse.worker.memory }}"}
+            requests: {cpu: "{{ langfuse.worker.cpu }}", memory: "{{ langfuse.worker.memory }}"}
+
+      # The OLAP store: ClickHouse Private from Step 9, over the pod network
+      # through the operator's server-any Service. Nothing is deployed here.
+      clickhouse:
+        deploy: false
+        host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local"
+        httpPort: 8123
+        nativePort: 9000
+        database: "{{ langfuse.clickhouse_database }}"
+        auth:
+          username: "{{ langfuse.clickhouse_user }}"
+          existingSecret: langfuse-clickhouse
+          existingSecretKey: password
+        cluster:
+          enabled: "{{ _lf_cluster_enabled | bool }}"   # decided above
+        migration:
+          ssl: false
+          autoMigrate: true
+
+      # PostgreSQL: the bundled subchart on Chainguard's image. Its postgres
+      # user is uid 70 (the subchart assumes 999), so the security contexts
+      # say so, or the volume is unwritable. The chart generates the
+      # langfuse-postgresql-auth Secret itself.
+      postgresql:
+        deploy: true
+        image:
+          registry: "{{ target_registry }}"
+          repository: chainguard/postgres
+          tag: "{{ versions.chainguard_postgres_tag }}"
+        podSecurityContext:
+          fsGroup: 70
+        securityContext:
+          runAsUser: 70
+          runAsGroup: 70
+        storage:
+          requestedSize: "{{ langfuse.postgres.disk }}"
+          className: "{{ clickhouse.storage_class }}"
+        resources:
+          limits:   {cpu: "{{ langfuse.postgres.cpu }}", memory: "{{ langfuse.postgres.memory }}"}
+          requests: {cpu: "{{ langfuse.postgres.cpu }}", memory: "{{ langfuse.postgres.memory }}"}
+
+      # Valkey (the chart calls it redis): the bundled subchart on Chainguard's
+      # -dev image, which has the /bin/sh its init container needs. uid 65532
+      # (the subchart assumes 1000). The chart generates langfuse-redis-auth.
+      redis:
+        deploy: true
+        image:
+          registry: "{{ target_registry }}"
+          repository: chainguard/valkey
+          tag: "{{ versions.chainguard_valkey_tag }}"
+        podSecurityContext:
+          fsGroup: 65532
+          runAsUser: 65532
+          runAsGroup: 65532
+        securityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+        dataStorage:
+          enabled: true
+          requestedSize: "{{ langfuse.valkey.disk }}"
+          className: "{{ clickhouse.storage_class }}"
+        resources:
+          limits:   {cpu: "{{ langfuse.valkey.cpu }}", memory: "{{ langfuse.valkey.memory }}"}
+          requests: {cpu: "{{ langfuse.valkey.cpu }}", memory: "{{ langfuse.valkey.memory }}"}
+        # The chart's default, restated because Langfuse requires it: the
+        # queue must never lose entries to eviction.
+        valkeyConfig: "maxmemory-policy noeviction"
+
+      # Blob storage: the Step 13 bucket. No keys -- with none given the chart
+      # omits the *_ACCESS_KEY* variables and the SDK uses the IRSA token.
+      s3:
+        deploy: false
+        bucket: "{{ langfuse.bucket_name }}"
+        region: "{{ aws.target_region }}"
+        forcePathStyle: false
+        eventUpload:
+          prefix: "events/"
+        batchExport:
+          enabled: true
+          prefix: "exports/"
+        mediaUpload:
+          enabled: true
+          prefix: "media/"
