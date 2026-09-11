@@ -16,122 +16,129 @@
 #   Removes the release, the namespace and Keeper's volumes. The S3 data is NOT
 #   touched -- scripts/s3-purge-cluster-data.sh deletes it if you mean it.
 
-# --- preconditions ---------------------------------------------------------
-# Each of these fails later, and more confusingly, if left unchecked: a CR
-# with no operator is silently ignored; a CR with no nodes leaves pods
-# Pending forever; a missing StorageClass surfaces as an unbound Keeper PVC.
+- name: Preconditions and inputs (skipped on teardown)
+  # Everything the install needs to know or check. None of it applies when
+  # removing the cluster -- and checking it would make teardown impossible
+  # after the node groups are already gone.
+  when: (cluster_state | default('present')) != 'absent'
+  block:
+    # --- preconditions ---------------------------------------------------------
+    # Each of these fails later, and more confusingly, if left unchecked: a CR
+    # with no operator is silently ignored; a CR with no nodes leaves pods
+    # Pending forever; a missing StorageClass surfaces as an unbound Keeper PVC.
 
-- name: Require the operator to be running
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - wait
-      - --namespace={{ clickhouse.operator_namespace }}
-      - --for=condition=Available
-      - --timeout=30s
-      - deployment
-      - --selector=app.kubernetes.io/instance=clickhouse-operator
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-  register: _cl_operator
-  changed_when: false
-  failed_when: false
-  check_mode: false
+    - name: Require the operator to be running
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --namespace={{ clickhouse.operator_namespace }}
+          - --for=condition=Available
+          - --timeout=30s
+          - deployment
+          - --selector=app.kubernetes.io/instance=clickhouse-operator
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_operator
+      changed_when: false
+      failed_when: false
+      check_mode: false
 
-- name: Fail clearly if the operator is absent or not ready
-  ansible.builtin.assert:
-    that: _cl_operator.rc == 0
-    fail_msg: >-
-      The ClickHouse operator is not Available in {{ clickhouse.operator_namespace }}.
-      If the node groups are down (the usual reason -- Step 5 is the expensive
-      one and gets torn down between sessions), run:
-      ansible-playbook deploy.yml --tags nodes. Otherwise: --tags operator.
+    - name: Fail clearly if the operator is absent or not ready
+      ansible.builtin.assert:
+        that: _cl_operator.rc == 0
+        fail_msg: >-
+          The ClickHouse operator is not Available in {{ clickhouse.operator_namespace }}.
+          If the node groups are down (the usual reason -- Step 5 is the expensive
+          one and gets torn down between sessions), run:
+          ansible-playbook deploy.yml --tags nodes. Otherwise: --tags operator.
 
-- name: Count nodes labelled for each ClickHouse group
-  # The label carries the -arm64 suffix on ARM builds (see group_vars,
-  # node_label_suffix); the chart's nodeSelector does not. That is the
-  # documented convention, and whether the operator bridges it is exactly
-  # what the scheduling check below proves.
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - get
-      - nodes
-      - --selector=clickhouseGroup={{ item }}{{ node_label_suffix }}
-      - --no-headers
-      - -o=name
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-  loop: [keeper, server]
-  register: _cl_nodes
-  changed_when: false
-  check_mode: false
+    - name: Count nodes labelled for each ClickHouse group
+      # The label carries the -arm64 suffix on ARM builds (see group_vars,
+      # node_label_suffix); the chart's nodeSelector does not. That is the
+      # documented convention, and whether the operator bridges it is exactly
+      # what the scheduling check below proves.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - --selector=clickhouseGroup={{ item }}{{ node_label_suffix }}
+          - --no-headers
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [keeper, server]
+      register: _cl_nodes
+      changed_when: false
+      check_mode: false
 
-- name: Fail clearly if the node groups are not there
-  ansible.builtin.assert:
-    that:
-      - _cl_nodes.results[0].stdout_lines | length >= clickhouse.keeper.replicas | int
-      - _cl_nodes.results[1].stdout_lines | length >= 1
-    fail_msg: >-
-      Found {{ _cl_nodes.results[0].stdout_lines | length }} keeper node(s) and
-      {{ _cl_nodes.results[1].stdout_lines | length }} server node(s) labelled
-      clickhouseGroup=<group>{{ node_label_suffix }}. Keeper needs
-      {{ clickhouse.keeper.replicas }} for a quorum. Run:
-      ansible-playbook deploy.yml --tags nodes
-    success_msg: >-
-      nodes: {{ _cl_nodes.results[0].stdout_lines | length }} keeper,
-      {{ _cl_nodes.results[1].stdout_lines | length }} server
+    - name: Fail clearly if the node groups are not there
+      ansible.builtin.assert:
+        that:
+          - _cl_nodes.results[0].stdout_lines | length >= clickhouse.keeper.replicas | int
+          - _cl_nodes.results[1].stdout_lines | length >= 1
+        fail_msg: >-
+          Found {{ _cl_nodes.results[0].stdout_lines | length }} keeper node(s) and
+          {{ _cl_nodes.results[1].stdout_lines | length }} server node(s) labelled
+          clickhouseGroup=<group>{{ node_label_suffix }}. Keeper needs
+          {{ clickhouse.keeper.replicas }} for a quorum. Run:
+          ansible-playbook deploy.yml --tags nodes
+        success_msg: >-
+          nodes: {{ _cl_nodes.results[0].stdout_lines | length }} keeper,
+          {{ _cl_nodes.results[1].stdout_lines | length }} server
 
-- name: Require the StorageClass
-  ansible.builtin.command:
-    argv: [kubectl, get, storageclass, "{{ clickhouse.storage_class }}", -o=name]
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-  register: _cl_sc
-  changed_when: false
-  failed_when: _cl_sc.rc != 0
-  check_mode: false
+    - name: Require the StorageClass
+      ansible.builtin.command:
+        argv: [kubectl, get, storageclass, "{{ clickhouse.storage_class }}", -o=name]
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_sc
+      changed_when: false
+      failed_when: _cl_sc.rc != 0
+      check_mode: false
 
-# --- inputs from earlier steps ---------------------------------------------
+    # --- inputs from earlier steps ---------------------------------------------
 
-- name: Look up the IRSA role ARN from the Step 6 stack
-  # Read from CloudFormation rather than a fact set by the storage_iam role,
-  # so this works when run alone with --tags cluster.
-  amazon.aws.cloudformation_info:
-    stack_name: "{{ infrastructure.environment_name }}-irsa"
-    region: "{{ aws.target_region }}"
-    profile: "{{ aws.target_profile }}"
-  register: _cl_irsa_info
-  check_mode: false
+    - name: Look up the IRSA role ARN from the Step 6 stack
+      # Read from CloudFormation rather than a fact set by the storage_iam role,
+      # so this works when run alone with --tags cluster.
+      amazon.aws.cloudformation_info:
+        stack_name: "{{ infrastructure.environment_name }}-irsa"
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _cl_irsa_info
+      check_mode: false
 
-- name: Extract the role ARN
-  ansible.builtin.set_fact:
-    _cl_s3_role_arn: >-
-      {{ _cl_irsa_info.cloudformation[infrastructure.environment_name + '-irsa']
-         .stack_outputs.ClickHouseS3RoleArn }}
+    - name: Extract the role ARN
+      ansible.builtin.set_fact:
+        _cl_s3_role_arn: >-
+          {{ _cl_irsa_info.cloudformation[infrastructure.environment_name + '-irsa']
+             .stack_outputs.ClickHouseS3RoleArn }}
 
-- name: Ensure the state directory exists
-  ansible.builtin.file:
-    path: "{{ state_dir }}"
-    state: directory
-    mode: "0700"
+    - name: Ensure the state directory exists
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0700"
 
-- name: Generate (or reuse) the admin and prometheus passwords
-  # The password lookup writes the file on first use and reads it back on
-  # every run after, so the hash below is stable and helm sees no change.
-  # 32 alphanumerics; no symbols, so it pastes cleanly into a shell.
-  ansible.builtin.set_fact:
-    _cl_admin_pw: "{{ lookup('ansible.builtin.password', admin_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
-    _cl_prom_pw: "{{ lookup('ansible.builtin.password', prometheus_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
-  no_log: true
+    - name: Generate (or reuse) the admin and prometheus passwords
+      # The password lookup writes the file on first use and reads it back on
+      # every run after, so the hash below is stable and helm sees no change.
+      # 32 alphanumerics; no symbols, so it pastes cleanly into a shell.
+      ansible.builtin.set_fact:
+        _cl_admin_pw: "{{ lookup('ansible.builtin.password', admin_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+        _cl_prom_pw: "{{ lookup('ansible.builtin.password', prometheus_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+      no_log: true
 
-- name: Tighten permissions on the password files
-  ansible.builtin.file:
-    path: "{{ item }}"
-    mode: "0600"
-  loop:
-    - "{{ admin_password_file }}"
-    - "{{ prometheus_password_file }}"
+    - name: Tighten permissions on the password files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0600"
+      loop:
+        - "{{ admin_password_file }}"
+        - "{{ prometheus_password_file }}"
+
 
 # --- the release -------------------------------------------------------------
 
@@ -190,7 +197,10 @@
         # base64 of the HEX sha256 digest -- not of the raw digest bytes. That
         # is what the chart's own `sha256sum | b64enc` produces from a plain
         # password, and what the operator expects.
-        hashedPassword: "{{ _cl_admin_pw | hash('sha256') | b64encode }}"
+        # `default` because on teardown the block above is skipped and these
+        # facts are unset; helm uninstall ignores the values but the module
+        # still renders them.
+        hashedPassword: "{{ _cl_admin_pw | default('') | hash('sha256') | b64encode }}"
 
       # Storage: the shared class from Step 7, created separately -- do not
       # let this release try to create it again.
@@ -202,7 +212,7 @@
         annotations:
           # The IRSA wiring. Pods running as ch-<name>-sa get AWS_ROLE_ARN and
           # a projected token from this one annotation; no key anywhere.
-          eks.amazonaws.com/role-arn: "{{ _cl_s3_role_arn }}"
+          eks.amazonaws.com/role-arn: "{{ _cl_s3_role_arn | default('') }}"
 
       server:
         image:
@@ -262,7 +272,7 @@
             # We have no Prometheus here, but the user exists either way, so
             # give it a real secret.
             create: true
-            password: "{{ _cl_prom_pw }}"
+            password: "{{ _cl_prom_pw | default('') }}"
 
       keeper:
         image:
