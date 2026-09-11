@@ -32,9 +32,10 @@ Resources:
   #   :aud must be sts.amazonaws.com, so a token minted for a different
   #        audience cannot be replayed against STS here.
   #   :sub pins the exact system:serviceaccount:<ns>:<name>. The name is the
-  #        Helm release name, because the chart derives its ServiceAccount
-  #        from it. Omit :sub and any pod in the cluster could assume this
-  #        role and read the bucket.
+  #        Helm release name: Step 15 passes it as the chart's
+  #        fullnameOverride, which the chart names its ServiceAccount after.
+  #        Omit :sub and any pod in the cluster could assume this role and
+  #        read the bucket.
   LangfuseS3Role:
     Type: AWS::IAM::Role
     Properties:

@@ -337,7 +337,9 @@ langfuse:
   # mirrored); true = up.sh runs them after Step 12.
   enabled: false
   namespace: "langfuse"
-  # The Helm release name. The chart derives the ServiceAccount name from it,
+  # The Helm release name. Step 15 passes it as the chart's fullnameOverride,
+  # so the ServiceAccount, the web and worker Deployments (<release>-web,
+  # <release>-worker) and their Services are named after it whatever it is,
   # and the IRSA trust policy (Step 13) is bound to that exact name.
   release: "langfuse"
   # Database and user created inside ClickHouse Private by Step 14. The user

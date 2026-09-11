@@ -74,12 +74,12 @@ if ((rc == 0)); then
     # role derives it: langfuse.url if set, else the NLB hostname (port
     # appended unless 80), else the fixed 3000:3000 port-forward.
     lf_var() { awk -F'"' -v key="$1" '/^langfuse:/{f=1} f && index($0, key) == 1 {print $2; exit}' "$gv"; }
-    LF_NS="$(lf_var '  namespace:')"; LF_URL="$(lf_var '  url:')"; LF_LB_TYPE="$(lf_var '    type:')"
+    LF_NS="$(lf_var '  namespace:')"; LF_RELEASE="$(lf_var '  release:')"; LF_URL="$(lf_var '  url:')"; LF_LB_TYPE="$(lf_var '    type:')"
     LF_LB_PORT="$(awk '/^langfuse:/{f=1} f && /^    port:/ {print $2; exit}' "$gv")"
     if [[ -n "$LF_URL" ]]; then
       ok "langfuse: $LF_URL   (langfuse.url from group_vars; login: state/langfuse-admin-password)"
     elif [[ "${LF_LB_TYPE:-none}" == none ]]; then
-      ok "langfuse: kubectl port-forward -n $LF_NS svc/langfuse-web 3000:3000, then http://localhost:3000"
+      ok "langfuse: kubectl port-forward -n $LF_NS svc/$LF_RELEASE-web 3000:3000, then http://localhost:3000"
     else
       host="$(KUBECONFIG="$CH_ROOT/state/kubeconfig" kubectl get service langfuse-lb -n "$LF_NS" \
                 -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"

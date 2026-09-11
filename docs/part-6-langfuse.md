@@ -69,7 +69,7 @@ Everything hangs off one key at the **end** of `ansible/group_vars/all.yml`:
 langfuse:
   enabled: false            # the switch. false = Steps 13-15 do nothing
   namespace: "langfuse"
-  release: "langfuse"       # also the ServiceAccount name the IRSA trust is bound to
+  release: "langfuse"       # the chart's fullnameOverride, so also the ServiceAccount name IRSA trusts
   clickhouse_database: "langfuse"
   clickhouse_user: "langfuse"
   bucket_name: "langfuse-{{ aws.target_account_id }}-{{ aws.target_region }}"
@@ -192,7 +192,11 @@ A smaller Step 6: one bucket, one role, one CloudFormation stack.
   (`{{ infrastructure.environment_name }}-langfuse-irsa`) holds one IAM role
   with a federated trust on the cluster's OIDC provider, restricted to
   `system:serviceaccount:langfuse:langfuse` — the namespace and the release
-  name, because the chart names its ServiceAccount after the release. The
+  name. Left alone, the chart would name its ServiceAccount (and its
+  Deployments and Services) after the release only when the release name
+  contains `langfuse`, and `<release>-langfuse` otherwise; Step 15 passes the
+  release as the chart's `fullnameOverride`, so the name is the release
+  whatever you set it to and this trust policy matches it. The
   role may `PutObject`, `GetObject`, `ListBucket` and `DeleteObject` on that
   one bucket (`DeleteObject` because Langfuse expires its own exports and
   media). The stack outputs `LangfuseS3RoleArn`, which Step 15 reads.

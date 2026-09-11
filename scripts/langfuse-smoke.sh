@@ -11,7 +11,7 @@
 #      langfuse-secret-key) and works out the Langfuse URL: langfuse.url from
 #      group_vars if set, else the langfuse-lb NLB hostname. When the load
 #      balancer type is `none`, or the NLB does not answer, it falls back to
-#      `kubectl port-forward svc/langfuse-web 3000:3000` -- the port is fixed at
+#      `kubectl port-forward svc/<release>-web 3000:3000` -- the port is fixed at
 #      3000 because NEXTAUTH_URL for that mode is http://localhost:3000.
 #   2. POSTs one trace -- a root span with a generation under it -- as
 #      OTLP/JSON to /api/public/otel/v1/traces, then polls

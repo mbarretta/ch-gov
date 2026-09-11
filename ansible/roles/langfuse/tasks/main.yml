@@ -473,10 +473,13 @@
 - name: Note the load balancer hostname and the web Service name
   ansible.builtin.set_fact:
     _lf_host: "{{ (_lf_lb_host.stdout | default('')) | trim }}"
-    # Helm's fullname for this release: the release name when it contains the
-    # chart name (langfuse), <release>-langfuse otherwise. The chart names its
-    # Deployments and Services after it.
-    _lf_fullname: "{{ langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse' }}"
+    # Helm's fullname for this release, which the chart names its Deployments,
+    # Services and ServiceAccount after. Left to itself the chart would use the
+    # release name only when it contains "langfuse" (<release>-langfuse
+    # otherwise); the fullnameOverride in the Helm values below pins it to the
+    # release, so this is the release by construction, and Step 13's IRSA
+    # trust policy and scripts/langfuse-smoke.sh can assume the same.
+    _lf_fullname: "{{ langfuse.release }}"
 
 - name: Name the chart's web Service
   # The ClusterIP Service in front of the web pods. A separate set_fact: the
@@ -488,7 +491,7 @@
   # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname, with the port
   # appended only when it is not 80; else, with no load balancer,
   # http://localhost:3000 -- what a port-forward of exactly 3000:3000 to
-  # svc/langfuse-web gives you (NextAuth redirects the browser here, so the
+  # svc/<release>-web gives you (NextAuth redirects the browser here, so the
   # local port cannot be anything else).
   ansible.builtin.set_fact:
     _lf_url: >-
@@ -546,6 +549,12 @@
     # Helm 4 applies server-side; see clickhouse_cluster for why the flag.
     force_conflicts: true
     values:
+      # Pin the chart's fullname -- the prefix of every Deployment, Service and
+      # the ServiceAccount -- to the release name. Without it the chart appends
+      # -langfuse to any release name not containing "langfuse", and the IRSA
+      # trust policy (system:serviceaccount:<ns>:<release>), _lf_fullname above
+      # and the scripts would all name objects that do not exist.
+      fullnameOverride: "{{ langfuse.release }}"
       langfuse:
         nextauth:
           url: "{{ _lf_url }}"
@@ -562,7 +571,8 @@
           create: true
           annotations:
             # The IRSA wiring. Pods running as the chart's ServiceAccount
-            # (named after the release; Step 13's trust policy names it) get
+            # (named after the release by the fullnameOverride above; Step 13's
+            # trust policy names the same thing) get
             # AWS_ROLE_ARN and a projected token from this one annotation.
             eks.amazonaws.com/role-arn: "{{ _lf_s3_role_arn }}"
         additionalEnvFrom:
