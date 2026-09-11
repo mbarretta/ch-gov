@@ -473,4 +473,5 @@ deliberate `aws s3 rm`.
 - [x] Step 11: 3 rows written on one replica, read from another, on `s3WithKeeperDiskWithCache`
 - [x] `scripts/ch-client.sh` connects from the laptop over a port-forward
 - [x] Part 2 corrected: nothing appends the `-arm64` selector suffix when webhooks are off
+- [x] Step 12, a load balancer in front of the servers — see Part 5
 - [ ] Stop the meter when done: `scripts/play.sh --tags nodes -e nodegroups_state=absent`
