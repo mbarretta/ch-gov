@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- Langfuse IRSA role. One role that the Langfuse
+  Kubernetes service account assumes directly, with no static credentials
+  anywhere, to reach the bucket holding its events, batch exports and media.
+
+# NOTE: this file is a Jinja template, not plain CloudFormation, for the same
+# reason as storage_iam/templates/irsa-roles.yaml.j2. An IRSA condition key
+# embeds the cluster's OIDC issuer in the key NAME:
+#
+#     "oidc.eks.us-east-1.amazonaws.com/id/ABC123:sub": "system:serviceaccount:..."
+#
+# CloudFormation cannot build that, because !Sub may not be used as a map key
+# ("map keys must be strings; received a map instead"). Rendering the issuer in
+# with Ansible first makes the key a literal, so the stack stays in
+# CloudFormation like every other piece of infrastructure here.
+
+Parameters:
+  BucketName:
+    Type: String
+
+Resources:
+  # =========================================================================
+  # langfuse web + worker -> S3
+  # =========================================================================
+  # This is IRSA. The trust policy says: any pod presenting a token signed by
+  # THIS cluster's OIDC issuer, whose subject is exactly this one service
+  # account, may assume this role. Nothing else can -- not another namespace,
+  # not another service account, not another cluster.
+  #
+  # Both conditions matter:
+  #   :aud must be sts.amazonaws.com, so a token minted for a different
+  #        audience cannot be replayed against STS here.
+  #   :sub pins the exact system:serviceaccount:<ns>:<name>. The name is the
+  #        Helm release name, because the chart derives its ServiceAccount
+  #        from it. Omit :sub and any pod in the cluster could assume this
+  #        role and read the bucket.
+  LangfuseS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      # No RoleName, for the same reason as every other role in this project:
+      # a collision in a shared account surfaces only as "Validation failed
+      # with 1 error(s)". Nothing depends on the name, because the service
+      # account is annotated from this stack's output in Step 15.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: "{{ _lf_oidc_provider_arn }}"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "{{ _lf_oidc_issuer_host }}:aud": "sts.amazonaws.com"
+                "{{ _lf_oidc_issuer_host }}:sub": "system:serviceaccount:{{ langfuse.namespace }}:{{ langfuse.release }}"
+      Policies:
+        - PolicyName: langfuse-s3-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to this bucket only, and to the four verbs Langfuse's
+              # blob-storage documentation requires: write and read objects,
+              # list the bucket, and delete (media removal, export retention).
+              # Unlike the ClickHouse role this is narrow in verbs too --
+              # Langfuse's S3 client is a single well-documented code path,
+              # not a database engine with a moving set of operations.
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BucketName}'
+                  - !Sub 'arn:aws:s3:::${BucketName}/*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+Outputs:
+  LangfuseS3RoleArn:
+    Description: The Langfuse chart's ServiceAccount is annotated with this in Step 15.
+    Value: !GetAtt LangfuseS3Role.Arn

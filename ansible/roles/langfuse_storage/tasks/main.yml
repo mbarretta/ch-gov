@@ -1,0 +1,168 @@
+---
+# Step 13 (optional, Langfuse): the S3 bucket Langfuse keeps its events, batch
+# exports and media in, and the IRSA role that lets its pods reach that bucket
+# with no static credentials.
+#
+# A mirror of Step 6 (storage_iam) with one role instead of two. Same cheap
+# step -- an empty bucket and an IAM role cost nothing -- and the same OIDC
+# provider from Step 4 is what makes the role assumable.
+#
+# Teardown: ansible-playbook deploy.yml --tags lf-storage -e langfuse_storage_state=absent
+#   (the bucket is deliberately NOT deleted -- see the task at the end)
+
+- name: Preconditions and inputs (skipped on teardown)
+  # The bucket is an input to the stack (its name is a template parameter) and
+  # the OIDC provider is the precondition for the role being assumable. Neither
+  # applies when removing the stack: creating a bucket during teardown would be
+  # absurd, and the OIDC lookup needs an EKS cluster that may already be gone.
+  when: (langfuse_storage_state | default('present')) != 'absent'
+  block:
+    # --- the bucket ----------------------------------------------------------
+    # Managed with the s3_bucket module rather than CloudFormation, for the
+    # same reason as the ClickHouse data bucket: a bucket holding data must
+    # outlive its stack. The module is idempotent, so an existing bucket is
+    # simply adopted.
+
+    - name: Create the Langfuse bucket
+      amazon.aws.s3_bucket:
+        name: "{{ langfuse.bucket_name }}"
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+        state: present
+        # Server-side encryption with S3-managed keys, as for the ClickHouse
+        # bucket. KMS would add a per-request cost and a second thing to get
+        # the IAM policy right on.
+        encryption: "AES256"
+        # Nothing about this bucket should ever be public. This blocks it at
+        # the bucket level, independent of any policy or ACL applied later.
+        public_access:
+          block_public_acls: true
+          block_public_policy: true
+          ignore_public_acls: true
+          restrict_public_buckets: true
+        # Versioning stays OFF. Langfuse deletes media and expired exports
+        # itself (hence s3:DeleteObject below); versioning would retain every
+        # deleted object indefinitely and quietly multiply storage cost.
+        versioning: false
+        tags:
+          Project: clickhouse-private
+          ManagedBy: ansible
+
+    - name: Report the bucket
+      ansible.builtin.debug:
+        msg:
+          - "bucket:   {{ langfuse.bucket_name }} ({{ aws.target_region }})"
+          - "prefixes: events/ exports/ media/  (set by the chart values in Step 15)"
+
+    # --- the OIDC issuer this cluster's tokens are signed by ------------------
+
+    - name: Look up the cluster's OIDC issuer
+      ansible.builtin.command:
+        argv:
+          - aws
+          - eks
+          - describe-cluster
+          - --name={{ infrastructure.eks_cluster_name }}
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+          - --query=cluster.identity.oidc.issuer
+          - --output=text
+      register: _lf_oidc_issuer
+      changed_when: false
+      check_mode: false
+
+    - name: Derive the issuer host and provider ARN
+      # The condition keys in an IRSA trust policy are named after the issuer
+      # with the scheme stripped; the provider ARN is that same host under
+      # iam::<account>:oidc-provider/.
+      ansible.builtin.set_fact:
+        _lf_oidc_issuer_host: "{{ _lf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
+        _lf_oidc_provider_arn: >-
+          arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+            _lf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
+
+    - name: Confirm the OIDC provider is registered in IAM
+      # Step 4 registers it. Without it the role below would be created happily
+      # and then fail at runtime with "Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity" -- a much later, much vaguer failure.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - iam
+          - get-open-id-connect-provider
+          - --open-id-connect-provider-arn={{ _lf_oidc_provider_arn }}
+          - --profile={{ aws.target_profile }}
+          - --query=Url
+          - --output=text
+      register: _lf_oidc_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if IRSA was never set up
+      ansible.builtin.assert:
+        that: _lf_oidc_check.rc == 0
+        fail_msg: >-
+          No IAM OIDC provider for {{ _lf_oidc_issuer_host }}. Run:
+          ansible-playbook deploy.yml --tags eks
+        success_msg: "OIDC provider present for {{ _lf_oidc_issuer_host }}"
+
+# --- absent ------------------------------------------------------------------
+# Only the role stack goes. The bucket holds Langfuse's events and media and
+# outlives the stack, exactly like the ClickHouse data bucket in Step 6.
+
+- name: Remove the Langfuse IRSA role stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-langfuse-irsa"
+    state: absent
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  when: (langfuse_storage_state | default('present')) == 'absent'
+
+- name: Report the teardown
+  ansible.builtin.debug:
+    msg:
+      - "absent: CloudFormation stack {{ infrastructure.environment_name }}-langfuse-irsa (and the role in it)"
+      - "kept:   bucket {{ langfuse.bucket_name }} -- it holds data; empty and delete it by hand if you mean it"
+  when: (langfuse_storage_state | default('present')) == 'absent'
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (langfuse_storage_state | default('present')) == 'absent'
+
+# --- the role ------------------------------------------------------------------
+
+- name: Deploy the Langfuse IRSA role stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-langfuse-irsa"
+    state: present
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    # lookup('template', ...) not lookup('file', ...): the issuer has to be
+    # baked in as a literal map key. See the comment at the top of the
+    # template for why CloudFormation cannot do this itself.
+    template_body: "{{ lookup('template', role_path ~ '/templates/langfuse-irsa.yaml.j2') }}"
+    template_parameters:
+      BucketName: "{{ langfuse.bucket_name }}"
+    capabilities:
+      - CAPABILITY_IAM
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _lf_irsa_stack
+
+- name: Record the role ARN
+  # Step 15 does not rely on this fact; it reads the stack output itself so it
+  # works when run alone with --tags lf-app. This is for the report below.
+  ansible.builtin.set_fact:
+    _lf_s3_role_arn: "{{ _lf_irsa_stack.stack_outputs.LangfuseS3RoleArn }}"
+  when: _lf_irsa_stack.stack_outputs is defined
+
+- name: Report the IRSA wiring
+  ansible.builtin.debug:
+    msg:
+      - "langfuse role: {{ _lf_s3_role_arn }}"
+      - "  assumable only by system:serviceaccount:{{ langfuse.namespace }}:{{ langfuse.release }}"
+      - "  may PutObject, GetObject, ListBucket, DeleteObject on {{ langfuse.bucket_name }} only"
+      - "note: the bucket is never deleted by teardown -- it holds data."
+  when: _lf_s3_role_arn is defined
