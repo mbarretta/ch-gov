@@ -90,14 +90,13 @@ Think of it as a restaurant kitchen.
 ```
 
 **ClickHouse server.** The database process. You run three of them for scalibility and redundency. Every one
-can take any query. They share one set of tables (the engine is called
+can take any query. They share one set of tables (the engine that makes this possible is called
 SharedMergeTree), so a row inserted through server A is visible from server B
 within a second or two.
 
-**Keeper.** A small coordination service, ClickHouse's own replacement for
+**Keeper.** A small coordination service, ClickHouse's modification of
 ZooKeeper. It holds the cluster's metadata: which parts exist, who is
-currently writing what, which replica is up. You run three so that the loss of
-one leaves a majority. It is the **only** component with a persistent disk, and
+currently writing what, which replica is up. You run three for redundancy and keep a quorum if one fails. It is the **only** component with a persistent disk, and
 that disk is tiny (10Gi here).
 
 **S3.** All table data lives in an S3 bucket. The servers are **stateless**:
