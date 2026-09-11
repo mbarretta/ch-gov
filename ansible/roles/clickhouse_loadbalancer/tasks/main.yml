@@ -1,0 +1,317 @@
+---
+# Step 12: a load balancer in front of the ClickHouse servers.
+#
+# Not in the tutorial. The cluster chart's loadBalancer.type / .hostname values
+# look like they should do this, and in this deployment they do nothing: the
+# operator writes them to the CR and creates no Service (Part 5 has the
+# experiment). So this role creates the load balancer itself, as a Service of
+# type LoadBalancer. The cloud controller that EKS runs in the control plane
+# turns that into a Network Load Balancer with instance targets -- the
+# "legacy" path, chosen deliberately: it needs no extra controller and no
+# extra images, which in an airgapped cluster is worth more than the AWS Load
+# Balancer Controller's extra features.
+#
+# Controlled by clickhouse.load_balancer.type in group_vars:
+#   none      no Service; an existing one is removed
+#   internal  private NLB in the private subnets (default; the airgap posture)
+#   public    public NLB in the public subnets; needs allowed_cidrs
+#
+# Cost: an NLB is ~$0.0225/hr plus a small per-LCU charge -- around $17/mo idle.
+#
+# Teardown: set type: none and re-run, or
+#   ansible-playbook deploy.yml --tags lb -e lb_state=absent
+# Do this BEFORE tearing down the cluster or the EKS control plane: deleting
+# the Service is what deletes the NLB and its security-group rules.
+
+- name: Validate the load balancer type
+  ansible.builtin.assert:
+    that: clickhouse.load_balancer.type in ['none', 'internal', 'public']
+    fail_msg: "clickhouse.load_balancer.type must be none, internal or public (got '{{ clickhouse.load_balancer.type }}')"
+
+- name: Decide whether the Service should exist
+  ansible.builtin.set_fact:
+    _lb_present: "{{ (lb_state | default('present')) == 'present' and clickhouse.load_balancer.type != 'none' }}"
+    _lb_name: "{{ clickhouse.cluster_name }}-lb"
+
+# --- absent ------------------------------------------------------------------
+
+- name: Remove the load balancer Service
+  # The cloud controller watches Service deletions and removes the NLB, its
+  # target groups and the node security-group rules it added. Takes ~1 minute.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Service
+    name: "{{ _lb_name }}"
+    namespace: "{{ clickhouse.namespace }}"
+    state: absent
+    wait: true
+    wait_timeout: 120
+  when: not _lb_present
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "load balancer: none. Reach the cluster with scripts/ch-client.sh (port-forward) or from inside the cluster at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:9000"
+  when: not _lb_present
+
+- name: Stop here when there is nothing to build
+  ansible.builtin.meta: end_play
+  when: not _lb_present
+
+# --- inputs ------------------------------------------------------------------
+
+- name: Read the server selector from the operator's own Service
+  # The operator labels server pods for its c-<name>-server-any Service. Reuse
+  # that selector rather than guessing label names that belong to the
+  # operator and may change between versions.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - service
+      - c-{{ clickhouse.cluster_name }}-server-any
+      - --namespace={{ clickhouse.namespace }}
+      - -o=jsonpath={.spec.selector}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lb_selector
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if the cluster is not there
+  ansible.builtin.assert:
+    that: _lb_selector.rc == 0 and _lb_selector.stdout | trim | length > 2
+    fail_msg: "No c-{{ clickhouse.cluster_name }}-server-any Service in {{ clickhouse.namespace }}. Run: ansible-playbook deploy.yml --tags cluster"
+
+- name: Resolve who may connect
+  # The cloud controller turns loadBalancerSourceRanges into ingress rules on
+  # the node security group, one per NodePort. Leave it empty and it writes
+  # 0.0.0.0/0 -- for an internal NLB that is moot (private address), for a
+  # public one it is the open internet. So it is never left empty here.
+  ansible.builtin.set_fact:
+    _lb_sources: >-
+      {{ clickhouse.load_balancer.allowed_cidrs
+         if clickhouse.load_balancer.allowed_cidrs | length > 0
+         else ([infrastructure.vpc_cidr] if clickhouse.load_balancer.type == 'internal' else []) }}
+
+- name: A public load balancer needs an explicit allow list
+  ansible.builtin.assert:
+    that:
+      - _lb_sources | length > 0
+      - "'0.0.0.0/0' not in _lb_sources or (allow_open_internet | default(false) | bool)"
+    fail_msg: >-
+      clickhouse.load_balancer.type is 'public' but allowed_cidrs is
+      {{ 'empty' if _lb_sources | length == 0 else 'the whole internet' }}.
+      Set allowed_cidrs to the CIDRs that should reach ClickHouse
+      (your office/VPN egress, e.g. "203.0.113.7/32"). To really open port
+      9000 and 8123 to everyone, add -e allow_open_internet=true -- and note
+      TLS is not configured in this deployment.
+  when: clickhouse.load_balancer.type == 'public'
+
+# --- the Service -------------------------------------------------------------
+
+- name: Create or update the load balancer Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ _lb_name }}"
+        namespace: "{{ clickhouse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+          clickhouse.com/cluster: "{{ clickhouse.cluster_name }}"
+        annotations: >-
+          {{ {
+            'service.beta.kubernetes.io/aws-load-balancer-type': 'nlb',
+            'service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled':
+              clickhouse.load_balancer.cross_zone | bool | string | lower
+          } | combine(
+            {'service.beta.kubernetes.io/aws-load-balancer-internal': 'true'}
+            if clickhouse.load_balancer.type == 'internal' else {}
+          ) }}
+      spec:
+        type: LoadBalancer
+        selector: "{{ _lb_selector.stdout | from_json }}"
+        # Local: traffic reaches a node and goes to the server pod ON that
+        # node, no second hop, client IP preserved. Nodes without a server pod
+        # fail the health check and take no traffic -- that is the point, and
+        # why the target group shows 3 healthy of 8.
+        externalTrafficPolicy: Local
+        loadBalancerSourceRanges: "{{ _lb_sources }}"
+        # targetPort defaults to port; the operator's pods listen on the
+        # standard ClickHouse ports.
+        ports: "{{ clickhouse.load_balancer.ports | map('combine', {'protocol': 'TCP'}) | list }}"
+  register: _lb_svc
+
+- name: Wait for the cloud controller to assign a hostname
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - service
+      - "{{ _lb_name }}"
+      - --namespace={{ clickhouse.namespace }}
+      - -o=jsonpath={.status.loadBalancer.ingress[0].hostname}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lb_host
+  until: _lb_host.stdout | trim | length > 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  check_mode: false
+
+- name: Find the NLB behind that hostname
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-load-balancers
+      - --query=LoadBalancers[?DNSName=='{{ _lb_host.stdout | trim }}'].LoadBalancerArn | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lb_arn
+  until: _lb_arn.stdout | trim not in ['', 'None']
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+
+- name: Wait for the NLB to be active
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-load-balancers
+      - --load-balancer-arns={{ _lb_arn.stdout | trim }}
+      - --query=LoadBalancers[0].State.Code
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lb_state
+  until: _lb_state.stdout | trim == 'active'
+  retries: 36
+  delay: 10
+  changed_when: false
+  check_mode: false
+
+- name: List the target groups (one per port)
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-groups
+      - --load-balancer-arn={{ _lb_arn.stdout | trim }}
+      - --query=TargetGroups[].TargetGroupArn
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lb_tgs
+  changed_when: false
+  check_mode: false
+
+- name: Wait for every server node to pass the health check
+  # Instance targets: all 8 nodes are registered, and only the ones running a
+  # server pod answer the health-check NodePort. "healthy == server replicas"
+  # is therefore the expected steady state, not a partial failure.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-health
+      - --target-group-arn={{ item }}
+      - --query=length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  loop: "{{ _lb_tgs.stdout.split() }}"
+  register: _lb_health
+  until: (_lb_health.stdout | trim | int) >= (clickhouse.server.replicas | int)
+  retries: 30
+  delay: 10
+  changed_when: false
+  check_mode: false
+
+# --- prove it -----------------------------------------------------------------
+# From a pod on the untainted operator nodes, using the mirrored server image
+# (multi-arch, so it runs on the x86 operator nodes) for its clickhouse-client.
+# Not from a server node: with instance targets and client-IP preservation an
+# instance cannot reach itself through the NLB (the classic NLB "hairpin").
+
+- name: Read the admin password
+  ansible.builtin.set_fact:
+    _lb_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+  no_log: true
+
+- name: Connect through the load balancer from inside the VPC
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      kubectl delete pod lb-probe --namespace={{ clickhouse.namespace }} --ignore-not-found --wait >/dev/null
+      # Password into a short-lived Secret via process substitution: never on
+      # argv, so neither `ps` here nor the pod spec carries it.
+      kubectl create secret generic lb-probe --namespace={{ clickhouse.namespace }} \
+        --from-file=password=<(printf '%s' "$LB_PW") --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      kubectl apply -f - >/dev/null <<'YAML'
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: lb-probe, namespace: {{ clickhouse.namespace }}}
+      spec:
+        restartPolicy: Never
+        affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: clickhouseGroup, operator: DoesNotExist}]}]}}}
+        containers:
+          - name: probe
+            image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
+            env:
+              - {name: LB, value: "{{ _lb_host.stdout | trim }}"}
+              - {name: CLICKHOUSE_PASSWORD, valueFrom: {secretKeyRef: {name: lb-probe, key: password}}}
+            command: ["sh", "-c"]
+            args:
+              - |
+                for i in 1 2 3 4 5 6; do
+                  clickhouse-client --host "$LB" --port 9000 --user {{ clickhouse.admin_username }} --connect_timeout 5 -q 'SELECT hostName()' 2>&1 | head -1
+                done | sort | uniq -c | sed 's/^/native 9000: /'
+                echo "http 8123:   $(wget -qO- --timeout=5 "http://$LB:8123/ping" 2>&1 | head -1)"
+      YAML
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lb-probe --namespace={{ clickhouse.namespace }} --timeout=180s >/dev/null
+      kubectl logs pod/lb-probe --namespace={{ clickhouse.namespace }}
+      kubectl delete pod lb-probe --namespace={{ clickhouse.namespace }} --wait=false >/dev/null
+      kubectl delete secret lb-probe --namespace={{ clickhouse.namespace }} --ignore-not-found >/dev/null
+    executable: /bin/bash          # process substitution
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    LB_PW: "{{ _lb_pw }}"
+  register: _lb_probe
+  # A freshly active NLB drops a share of connections for a minute or two
+  # while its zonal nodes learn the target state -- the first run saw 2 of 6
+  # time out against one zonal IP, and 24 of 24 succeed a few minutes later.
+  # So: retry until a run has no timeouts, rather than failing on the first.
+  until: _lb_probe.rc == 0 and 'Timeout' not in _lb_probe.stdout
+  retries: 8
+  delay: 20
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: The probe must have reached a server through the NLB
+  ansible.builtin.assert:
+    that: "_lb_probe.stdout is search('native 9000: +[0-9]+ c-' ~ clickhouse.cluster_name ~ '-server')"
+    fail_msg: "{{ _lb_probe.stdout_lines }}"
+    success_msg: "{{ _lb_probe.stdout_lines }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "type:      {{ clickhouse.load_balancer.type }} NLB, {{ 'private' if clickhouse.load_balancer.type == 'internal' else 'public' }} address, cross-zone {{ 'on' if clickhouse.load_balancer.cross_zone else 'off' }}"
+      - "endpoint:  {{ _lb_host.stdout | trim }}"
+      - "ports:     {{ clickhouse.load_balancer.ports | map(attribute='port') | join(', ') }}"
+      - "allowed:   {{ _lb_sources | join(', ') }}"
+      - "healthy:   {{ _lb_health.results | map(attribute='stdout') | map('trim') | join('/') }} targets per port (one per server node; other nodes fail the health check by design)"
+      - "connect:   clickhouse-client --host {{ _lb_host.stdout | trim }} --port 9000 --user {{ clickhouse.admin_username }} --password \"$(cat {{ admin_password_file | realpath }})\""
+      - "           scripts/ch-client.sh --lb   (same, from this repo){{ '' if clickhouse.load_balancer.type == 'public' else '  -- from inside the VPC or over VPN/peering; the address is private' }}"
+      - "teardown:  ansible-playbook deploy.yml --tags lb -e lb_state=absent  (before removing the cluster or EKS)"

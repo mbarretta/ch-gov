@@ -4,11 +4,16 @@
 #
 #   scripts/ch-client.sh                       # interactive session
 #   scripts/ch-client.sh -q "SELECT version()" # one query, any client flags
+#   scripts/ch-client.sh --lb [-q ...]         # via the Step 12 load balancer
 #
-# Does what the tutorial's Step 11 does by hand: port-forward the first server
-# pod's native port (9000) to localhost, connect with the admin user, and tear
-# the forward down on exit. The password is read from state/ (written by the
-# clickhouse_cluster role) and passed via the environment, not on argv.
+# Default: does what the tutorial's Step 11 does by hand -- port-forward the
+# first server pod's native port (9000) to localhost, connect with the admin
+# user, and tear the forward down on exit. With --lb it connects straight to
+# the NLB hostname instead (no port-forward), which works from anywhere the
+# NLB's address is reachable: the internet for type `public`, the VPC or a
+# VPN/peering into it for `internal`. The password is read from state/
+# (written by the clickhouse_cluster role) and passed via the environment,
+# not on argv.
 #
 # Needs `clickhouse-client` or `clickhouse` locally: brew install clickhouse
 #
@@ -32,6 +37,15 @@ LOCAL_PORT="${CH_LOCAL_PORT:-19000}"
 if have clickhouse-client; then CLIENT=(clickhouse-client)
 elif have clickhouse; then CLIENT=(clickhouse client)
 else die "clickhouse-client not installed: brew install clickhouse"; fi
+
+if [[ "${1:-}" == "--lb" ]]; then
+  shift
+  CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$gv")"
+  host="$(kubectl get service "$CLUSTER-lb" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
+  info "connecting to $host:9000 (NLB)"
+  CLICKHOUSE_PASSWORD="$(<"$PW_FILE")" exec "${CLIENT[@]}" --host "$host" --port 9000 --user "$USER_" "$@"
+fi
 
 pod="$(kubectl get pods -n "$NS" -l app.kubernetes.io/name=clickhouse-server \
          --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"

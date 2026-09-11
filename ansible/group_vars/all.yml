@@ -145,6 +145,38 @@ clickhouse:
     log_level: "information"
   storage_class: "gp3-encrypted"
 
+  # --- Step 12: how clients outside the cluster reach ClickHouse ---
+  # The cluster chart has loadBalancer.type / .hostname values, but in this
+  # deployment they are inert: the operator records them on the CR and creates
+  # nothing (verified -- see Part 5). So Step 12 creates the load balancer
+  # itself: a Service of type LoadBalancer that the cloud controller built
+  # into the EKS control plane turns into a Network Load Balancer. No extra
+  # controller, no extra images to mirror.
+  load_balancer:
+    # none     -> no load balancer; reach the cluster via kubectl port-forward
+    #             (scripts/ch-client.sh) or from inside the cluster only.
+    # internal -> NLB in the private subnets with a private address. Reachable
+    #             from the VPC and anything peered/VPN'd/Direct-Connected to it.
+    #             The right answer for an airgapped or regulated deployment.
+    # public   -> NLB in the public subnets with a public address. Requires
+    #             allowed_cidrs, and refuses 0.0.0.0/0 unless you also pass
+    #             -e allow_open_internet=true. Plain TCP -- TLS is not
+    #             configured in this deployment, so treat "public" as a lab
+    #             convenience, not a posture.
+    type: "internal"
+    # CIDRs allowed to connect. Becomes the Service's loadBalancerSourceRanges,
+    # which the cloud controller writes into the node security group. Empty
+    # means: the VPC CIDR for `internal` (the sensible default), and an error
+    # for `public` (there is no sensible default).
+    allowed_cidrs: []
+    ports:
+      - {name: http, port: 8123}      # HTTP interface: curl, JDBC/ODBC, BI tools
+      - {name: native, port: 9000}    # native protocol: clickhouse-client
+    # Spread traffic across all three AZs' targets regardless of which AZ the
+    # request arrived in. Costs a little inter-AZ transfer; avoids a whole AZ
+    # of clients pinning one replica.
+    cross_zone: true
+
   # Derived by the chart as ch-<cluster_name>-sa. Restated here because the
   # IAM trust policy in Step 6 must name it before the chart ever runs.
   service_account: "ch-default-us-01-sa"

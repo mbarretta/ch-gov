@@ -2,7 +2,7 @@
 # ClickHouse Private on AWS EKS -- deployment playbook
 #
 # Run from the ansible/ directory:
-#   ansible-playbook deploy.yml                    # everything, Steps 1-11
+#   ansible-playbook deploy.yml                    # everything, Steps 1-12
 #   ansible-playbook deploy.yml --tags images      # just ECR setup + image sync
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
@@ -77,3 +77,7 @@
     # --- Step 11: verification -- a query, and a cross-replica round trip ---
     - role: clickhouse_verify
       tags: [k8s, verify]
+
+    # --- Step 12: load balancer (none | internal | public) -------------------
+    - role: clickhouse_loadbalancer
+      tags: [k8s, lb]
