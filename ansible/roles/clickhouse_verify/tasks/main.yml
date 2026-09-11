@@ -1,0 +1,128 @@
+---
+# Step 11: verify the cluster does database things.
+#
+# The tutorial port-forwards 9000 to a laptop and runs a query. This role
+# does the equivalent without a background process to babysit: it execs
+# clickhouse-client inside one server pod. Then it goes one step further
+# than the tutorial and proves the cluster is actually a cluster -- a table
+# created on one replica, rows inserted there, read back from a DIFFERENT
+# replica. That single round trip exercises Keeper (metadata), S3 (data) and
+# IRSA (credentials) together.
+#
+# For interactive use from your laptop, see scripts/ch-client.sh.
+#
+# Free, and leaves nothing behind: the test database is dropped at the end.
+
+- name: Read the admin password
+  ansible.builtin.set_fact:
+    _vf_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+  no_log: true
+
+- name: List the server pods
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.namespace }}
+      - --selector=app.kubernetes.io/name=clickhouse-server
+      - --field-selector=status.phase=Running
+      - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _vf_pods
+  changed_when: false
+  check_mode: false
+
+- name: Need at least two running replicas to prove replication
+  ansible.builtin.assert:
+    that: _vf_pods.stdout_lines | length >= 2
+    fail_msg: "only {{ _vf_pods.stdout_lines | length }} server pod(s) Running -- run --tags cluster first"
+
+- name: Pick two replicas
+  ansible.builtin.set_fact:
+    _vf_a: "{{ _vf_pods.stdout_lines[0] }}"
+    _vf_b: "{{ _vf_pods.stdout_lines[1] }}"
+    # The clickhouse-client inside the pod; the password goes via env, never
+    # on the argv where `ps` on the node could see it.
+    _vf_exec: ["kubectl", "exec", "--namespace={{ clickhouse.namespace }}", "-c", "clickhouse-server"]
+
+- name: Version and host, from replica A
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT version(), hostName(), getMacro(''replica'')\"'] }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    CH_USER: "{{ clickhouse.admin_username }}"
+    CH_PASSWORD: "{{ _vf_pw }}"
+  register: _vf_version
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Create a table and insert on replica A
+  # SharedMergeTree is the engine ClickHouse Private uses: parts live in S3
+  # once, and every replica sees them through Keeper. The database engine is
+  # the Shared Catalog default the chart enables, so no ON CLUSTER needed.
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --multiquery --query \"$CH_QUERY\"'] }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    CH_USER: "{{ clickhouse.admin_username }}"
+    CH_PASSWORD: "{{ _vf_pw }}"
+    CH_QUERY: |
+      CREATE DATABASE IF NOT EXISTS step11;
+      CREATE TABLE IF NOT EXISTS step11.probe (id UInt32, note String, at DateTime DEFAULT now())
+        ENGINE = SharedMergeTree ORDER BY id;
+      INSERT INTO step11.probe (id, note) VALUES (1, 'written on {{ _vf_a }}'), (2, 'via S3 + Keeper'), (3, 'read elsewhere');
+  changed_when: true
+  check_mode: false
+  no_log: true
+
+- name: Read it back from replica B
+  # Parts written by A become visible to B once Keeper propagates the
+  # metadata -- normally sub-second, retried for a minute just in case.
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT count(), max(id), hostName() FROM step11.probe FORMAT TSV\"'] }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    CH_USER: "{{ clickhouse.admin_username }}"
+    CH_PASSWORD: "{{ _vf_pw }}"
+  register: _vf_read
+  until: _vf_read.rc == 0 and (_vf_read.stdout.split('\t')[0] | int) == 3
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Where the data physically lives
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT disk_name, sum(rows) AS rows, count() AS parts FROM system.parts WHERE database = ''step11'' AND active GROUP BY disk_name FORMAT TSV\"'] }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    CH_USER: "{{ clickhouse.admin_username }}"
+    CH_PASSWORD: "{{ _vf_pw }}"
+  register: _vf_parts
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Clean up
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"DROP DATABASE IF EXISTS step11 SYNC\"'] }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    CH_USER: "{{ clickhouse.admin_username }}"
+    CH_PASSWORD: "{{ _vf_pw }}"
+  changed_when: true
+  check_mode: false
+  no_log: true
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "replica A ({{ _vf_a }}): {{ _vf_version.stdout | trim }}"
+      - "wrote 3 rows on A, read from B ({{ _vf_b }}): count/max/host = {{ _vf_read.stdout | trim }}"
+      - "active parts by disk: {{ _vf_parts.stdout_lines | join(' | ') }}"
+      - "test database dropped"
+      - "connect from your laptop: scripts/ch-client.sh"

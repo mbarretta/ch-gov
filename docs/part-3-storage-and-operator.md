@@ -30,7 +30,7 @@ role (which grants it to every pod on that node, not just ClickHouse).
 ```
 1. Pod starts with a projected service account token: a JWT signed by
    the cluster's own OIDC issuer, saying "I am
-   system:serviceaccount:clickhouse:ch-default-us-01-sa".
+   system:serviceaccount:ns-default-us-01:ch-default-us-01-sa".
 
 2. The AWS SDK inside the pod notices two env vars the kubelet injected
    (AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE) and calls
@@ -55,7 +55,7 @@ Everything above hinges on this document, so read it as two separate claims:
   "Condition": {
     "StringEquals": {
       "oidc.eks.us-east-1.amazonaws.com/id/1686...:aud": "sts.amazonaws.com",
-      "oidc.eks.us-east-1.amazonaws.com/id/1686...:sub": "system:serviceaccount:clickhouse:ch-default-us-01-sa"
+      "oidc.eks.us-east-1.amazonaws.com/id/1686...:sub": "system:serviceaccount:ns-default-us-01:ch-default-us-01-sa"
     }
   }
 }
@@ -69,6 +69,13 @@ Everything above hinges on this document, so read it as two separate claims:
 - **`:sub`** — the exact service account, namespace included. **This is the
   condition that does the real work.** Leave it out and *any* pod in the
   cluster can assume the role and read your database's storage.
+
+  Because the namespace is part of this string, the namespace is not a free
+  choice you make later at `helm install` time — it is fixed here, in IAM.
+  This step was first built with namespace `clickhouse`; Part 4 changed it to
+  `ns-default-us-01` (the convention the chart, the tutorial and the preflight
+  checks all assume) and re-ran this step to rewrite the trust policy. Nothing
+  else had to change, which is the point of keeping it in one variable.
 
 Note the shape of those condition keys: the issuer URL is part of the key
 *name*, not the value. That detail causes a problem below.
@@ -491,7 +498,7 @@ running. Still ~**$2.32/hr**, unchanged from the end of Step 5.
 ## Checkpoint
 
 - [x] S3 bucket, encrypted, public access blocked, versioning off, no lifecycle rules
-- [x] IRSA role for `clickhouse:ch-default-us-01-sa`, scoped to that one service account
+- [x] IRSA role for `ns-default-us-01:ch-default-us-01-sa`, scoped to that one service account
 - [x] IRSA role for `kube-system:ebs-csi-controller-sa`
 - [x] VolumeSnapshot CRDs vendored at v8.6.0 and applied server-side
 - [x] EBS CSI driver as an EKS managed add-on, service account verified annotated
@@ -500,7 +507,7 @@ running. Still ~**$2.32/hr**, unchanged from the end of Step 5.
 - [x] Operator running, 12 CRDs registered
 - [x] Every operator container pulls from your ECR — asserted, not assumed
 - [x] All three roles idempotent (`changed=0` on re-run)
-- [ ] Step 9: deploy a ClickHouseCluster
+- [ ] Step 9: deploy a ClickHouseCluster — see Part 4
 
 ## What Step 9 will need
 
@@ -510,7 +517,7 @@ here that Step 9 has to line up with:
 | Value | Setting |
 |---|---|
 | `default-us-01` | release name / cluster name (chart schema: `^[a-z]+-[a-z]{2}-[0-9]{2}$`) |
-| `clickhouse` | namespace |
+| `ns-default-us-01` | namespace — `ns-` + cluster name, the convention the preflight chart assumes |
 | `ch-default-us-01-sa` | service account, annotated with the S3 role ARN |
 | `clickhouse-private-<YOUR_ACCOUNT_ID>-us-east-1` | bucket |
 | `ch-s3-4f6a1d2e-...` | key prefix |

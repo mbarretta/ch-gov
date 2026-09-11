@@ -1,0 +1,143 @@
+---
+# Step 10: preflight checks.
+#
+# ClickHouse ships a Troubleshoot (troubleshoot.sh) Preflight spec as a Helm
+# chart. The chart is only a template: `helm template` renders a Preflight
+# YAML, and the `kubectl preflight` plugin then runs it -- collecting cluster
+# state, exec'ing two small scripts inside a server pod, and grading the
+# result against ~30 analyzers.
+#
+# It runs AFTER the cluster exists (Step 9) because half the analyzers look at
+# the live ClickHouseCluster, the Keeper StatefulSet and the cache disk of a
+# running server pod. Running it earlier reports those as failures.
+#
+# Free. Nothing is installed in the cluster; the plugin reads and execs.
+#
+# Nothing to tear down.
+
+- name: Require the kubectl preflight plugin
+  # Installed by scripts/part1-setup.sh via krew. Not a container image, so
+  # it does not need mirroring -- it runs on your laptop.
+  ansible.builtin.command:
+    argv: [kubectl, preflight, version]
+  register: _pf_plugin
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if the plugin is missing
+  ansible.builtin.assert:
+    that: _pf_plugin.rc == 0
+    fail_msg: >-
+      `kubectl preflight` is not on PATH. Install it:
+      brew install krew && kubectl krew install preflight
+      -- and make sure ~/.krew/bin is on PATH (scripts/lib/common.sh adds it).
+      Or re-run scripts/part1-setup.sh.
+    success_msg: "kubectl preflight {{ _pf_plugin.stdout_lines | first | default('') }}"
+
+- name: Ensure the preflight directory exists
+  ansible.builtin.file:
+    path: "{{ preflight_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Log in to the ECR Helm registry
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _pf_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _pf_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Render the Preflight spec from the chart
+  # `helm template`, not `helm install`: this chart produces a
+  # troubleshoot.sh/v1beta2 Preflight document, which is input to the plugin,
+  # not something the API server should ever see.
+  ansible.builtin.command:
+    argv:
+      - helm
+      - template
+      - clickhouse-preflight
+      - oci://{{ target_registry }}/helm/preflight-check
+      - --version={{ versions.preflight_chart }}
+      - --set-json=preflight.clickhouseClusterName="{{ clickhouse.cluster_name }}"
+      # Explicit even though it equals the chart's derived default
+      # (ns-<clusterName>): if the namespace convention ever changes in
+      # group_vars, this keeps the analysis pointed at the right place.
+      - --set-json=preflight.namespace="{{ clickhouse.namespace }}"
+      - --set-json=preflight.checks.operator.namespace="{{ clickhouse.operator_namespace }}"
+      - --set-json=preflight.checks.prerequisites.storageClassName="{{ clickhouse.storage_class }}"
+  register: _pf_render
+  changed_when: false
+  check_mode: false
+
+- name: Write the rendered spec
+  ansible.builtin.copy:
+    content: "{{ _pf_render.stdout }}"
+    dest: "{{ preflight_dir }}/preflight.yaml"
+    mode: "0600"
+
+- name: Run the preflight checks
+  # --interactive=false prints a plain report instead of the TUI, and sets the
+  # exit code by outcome: 0 all pass, 4 warnings only, 3 at least one fail
+  # (1 means the run itself broke). We read the code rather than parsing text.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - preflight
+      - --interactive=false
+      - --format=human
+      - "{{ preflight_dir }}/preflight.yaml"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _pf_run
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Save the report
+  ansible.builtin.copy:
+    content: "{{ _pf_run.stdout }}\n{{ _pf_run.stderr }}"
+    dest: "{{ preflight_dir }}/report.txt"
+    mode: "0600"
+
+- name: Preflight report
+  ansible.builtin.debug:
+    msg: "{{ _pf_run.stdout_lines }}"
+
+- name: Summarise
+  vars:
+    _verdict: >-
+      {{ {0: 'PASS -- no warnings', 4: 'PASS with warnings', 3: 'FAIL -- at least one check failed'}
+         [_pf_run.rc] | default('plugin error (rc=' ~ _pf_run.rc ~ ')') }}
+  ansible.builtin.debug:
+    msg:
+      - "preflight: {{ _verdict }}"
+      - "spec:      {{ preflight_dir | realpath }}/preflight.yaml"
+      - "report:    {{ preflight_dir | realpath }}/report.txt"
+
+- name: Fail on a failed check or a broken run
+  # Warnings (rc 4) pass on purpose: the Part 4 doc lists the ones this chart
+  # version raises against its own base configuration.
+  ansible.builtin.assert:
+    that: _pf_run.rc in [0, 4]
+    fail_msg: "preflight reported failures (rc={{ _pf_run.rc }}). Read the report above; each FAIL names a fix."

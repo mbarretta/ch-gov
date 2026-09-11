@@ -568,6 +568,16 @@ leave the chart without it, and do not "fix" either side.** `group_vars`
 derives the suffix from the `fips` switch (`node_label_suffix`), since the FIPS
 build is x86 and takes no suffix.
 
+> **Caveat, found while building Step 9.** The cluster chart's README credits
+> the suffix to the `clickhouse-server-configuration-webhook`, which Step 8
+> switches off (`webhooks.enabled=false`, per the tutorial). The chart still
+> labels the CR `clickhouse.com/arm64-preferred: "true"`, which is presumably
+> what the operator reads instead — the tutorial labels nodes `*-arm64`, keeps
+> the selector bare, and disables webhooks, so it has to work without them.
+> The Step 9 role does not take this on faith: if server or Keeper pods stay
+> Pending, it prints the scheduler's own reason (`didn't match Pod's node
+> affinity/selector`) before failing. See Part 4.
+
 ## Taints, and a deliberate asymmetry
 
 | Group | Taints |

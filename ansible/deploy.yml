@@ -2,7 +2,7 @@
 # ClickHouse Private on AWS EKS -- deployment playbook
 #
 # Run from the ansible/ directory:
-#   ansible-playbook deploy.yml                    # everything implemented so far
+#   ansible-playbook deploy.yml                    # everything, Steps 1-11
 #   ansible-playbook deploy.yml --tags images      # just ECR setup + image sync
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
@@ -66,5 +66,14 @@
     - role: clickhouse_operator
       tags: [k8s, operator]
 
-    # --- Steps 9-11: cluster, preflight checks, verification ---------------
-    # Not implemented yet.
+    # --- Step 9: the ClickHouseCluster itself ------------------------------
+    - role: clickhouse_cluster
+      tags: [k8s, cluster]
+
+    # --- Step 10: preflight checks (needs the kubectl preflight plugin) -----
+    - role: clickhouse_preflight
+      tags: [k8s, preflight]
+
+    # --- Step 11: verification -- a query, and a cross-replica round trip ---
+    - role: clickhouse_verify
+      tags: [k8s, verify]

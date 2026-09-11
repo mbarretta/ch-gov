@@ -1,0 +1,578 @@
+---
+# Step 9: deploy a ClickHouseCluster.
+#
+# Everything before this was scaffolding. This role installs the
+# onprem-clickhouse-cluster chart, which renders ONE Kubernetes object that
+# matters -- a ClickHouseCluster custom resource -- plus the service account
+# it runs as and a ResourceQuota pinning the namespace to a single cluster.
+# The operator from Step 8 sees the CR and builds the Keeper StatefulSet,
+# one StatefulSet per server replica, their Services and config.
+#
+# Cost: nothing new. The pods land on the node groups Step 5 already pays for.
+# Keeper gets three small EBS volumes; servers are stateless (data in S3,
+# metadata in Keeper) and get no volume at all.
+#
+# Teardown: ansible-playbook deploy.yml --tags cluster -e cluster_state=absent
+#   Removes the release, the namespace and Keeper's volumes. The S3 data under
+#   clickhouse.s3_key_prefix is NOT touched -- delete it by hand if you mean it.
+
+# --- preconditions ---------------------------------------------------------
+# Each of these fails later, and more confusingly, if left unchecked: a CR
+# with no operator is silently ignored; a CR with no nodes leaves pods
+# Pending forever; a missing StorageClass surfaces as an unbound Keeper PVC.
+
+- name: Require the operator to be running
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace={{ clickhouse.operator_namespace }}
+      - --for=condition=Available
+      - --timeout=30s
+      - deployment
+      - --selector=app.kubernetes.io/instance=clickhouse-operator
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_operator
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if the operator is absent or not ready
+  ansible.builtin.assert:
+    that: _cl_operator.rc == 0
+    fail_msg: >-
+      The ClickHouse operator is not Available in {{ clickhouse.operator_namespace }}.
+      If the node groups are down (the usual reason -- Step 5 is the expensive
+      one and gets torn down between sessions), run:
+      ansible-playbook deploy.yml --tags nodes. Otherwise: --tags operator.
+
+- name: Count nodes labelled for each ClickHouse group
+  # The label carries the -arm64 suffix on ARM builds (see group_vars,
+  # node_label_suffix); the chart's nodeSelector does not. That is the
+  # documented convention, and whether the operator bridges it is exactly
+  # what the scheduling check below proves.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - nodes
+      - --selector=clickhouseGroup={{ item }}{{ node_label_suffix }}
+      - --no-headers
+      - -o=name
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  loop: [keeper, server]
+  register: _cl_nodes
+  changed_when: false
+  check_mode: false
+
+- name: Fail clearly if the node groups are not there
+  ansible.builtin.assert:
+    that:
+      - _cl_nodes.results[0].stdout_lines | length >= clickhouse.keeper.replicas | int
+      - _cl_nodes.results[1].stdout_lines | length >= 1
+    fail_msg: >-
+      Found {{ _cl_nodes.results[0].stdout_lines | length }} keeper node(s) and
+      {{ _cl_nodes.results[1].stdout_lines | length }} server node(s) labelled
+      clickhouseGroup=<group>{{ node_label_suffix }}. Keeper needs
+      {{ clickhouse.keeper.replicas }} for a quorum. Run:
+      ansible-playbook deploy.yml --tags nodes
+    success_msg: >-
+      nodes: {{ _cl_nodes.results[0].stdout_lines | length }} keeper,
+      {{ _cl_nodes.results[1].stdout_lines | length }} server
+
+- name: Require the StorageClass
+  ansible.builtin.command:
+    argv: [kubectl, get, storageclass, "{{ clickhouse.storage_class }}", -o=name]
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_sc
+  changed_when: false
+  failed_when: _cl_sc.rc != 0
+  check_mode: false
+
+# --- inputs from earlier steps ---------------------------------------------
+
+- name: Look up the IRSA role ARN from the Step 6 stack
+  # Read from CloudFormation rather than a fact set by the storage_iam role,
+  # so this works when run alone with --tags cluster.
+  amazon.aws.cloudformation_info:
+    stack_name: "{{ infrastructure.environment_name }}-irsa"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  register: _cl_irsa_info
+  check_mode: false
+
+- name: Extract the role ARN
+  ansible.builtin.set_fact:
+    _cl_s3_role_arn: >-
+      {{ _cl_irsa_info.cloudformation[infrastructure.environment_name + '-irsa']
+         .stack_outputs.ClickHouseS3RoleArn }}
+
+- name: Ensure the state directory exists
+  ansible.builtin.file:
+    path: "{{ state_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Generate (or reuse) the admin and prometheus passwords
+  # The password lookup writes the file on first use and reads it back on
+  # every run after, so the hash below is stable and helm sees no change.
+  # 32 alphanumerics; no symbols, so it pastes cleanly into a shell.
+  ansible.builtin.set_fact:
+    _cl_admin_pw: "{{ lookup('ansible.builtin.password', admin_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+    _cl_prom_pw: "{{ lookup('ansible.builtin.password', prometheus_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+  no_log: true
+
+- name: Tighten permissions on the password files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0600"
+  loop:
+    - "{{ admin_password_file }}"
+    - "{{ prometheus_password_file }}"
+
+# --- the release -------------------------------------------------------------
+
+- name: Log in to the ECR Helm registry
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _cl_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _cl_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+
+- name: Install the ClickHouse cluster
+  # Release name == cluster name. The chart derives everything from it: the
+  # CR is c-<name>, the service account ch-<name>-sa, the Keeper StatefulSet
+  # c-<name>-keeper. The IRSA trust policy from Step 6 names that service
+  # account, so the name is not free to change.
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: "{{ clickhouse.cluster_name }}"
+    chart_ref: "oci://{{ target_registry }}/helm/onprem-clickhouse-cluster"
+    chart_version: "{{ versions.cluster_chart }}"
+    release_namespace: "{{ clickhouse.namespace }}"
+    create_namespace: true
+    release_state: "{{ cluster_state | default('present') }}"
+    wait: false           # we wait on the operator's objects below, with diagnostics
+    values:
+      account:
+        username: "{{ clickhouse.admin_username }}"
+        # base64 of the HEX sha256 digest -- not of the raw digest bytes. That
+        # is what the chart's own `sha256sum | b64enc` produces from a plain
+        # password, and what the operator expects.
+        hashedPassword: "{{ _cl_admin_pw | hash('sha256') | b64encode }}"
+
+      # Storage: the shared class from Step 7, created separately -- do not
+      # let this release try to create it again.
+      storageClass:
+        create: false
+
+      serviceAccount:
+        create: true
+        annotations:
+          # The IRSA wiring. Pods running as ch-<name>-sa get AWS_ROLE_ARN and
+          # a projected token from this one annotation; no key anywhere.
+          eks.amazonaws.com/role-arn: "{{ _cl_s3_role_arn }}"
+
+      server:
+        image:
+          # Point at YOUR registry, and pin the tag we mirrored in Step 2. The
+          # chart would otherwise use its own pinned tag, which happens to
+          # match today but is not something to rely on -- and it cannot know
+          # about the -fips suffix.
+          repository: "{{ target_registry }}/clickhouse-server"
+          tag: "{{ versions.server }}{{ fips_suffix }}"
+        replicaCount: "{{ clickhouse.server.replicas | int }}"
+        # ARM build: adds the clickhouse.com/arch=arm64 toleration matching
+        # the taint Step 5 puts on Graviton keeper nodes, and labels the CR
+        # arm64-preferred. FIPS is x86 throughout, so false there.
+        arm64: "{{ not fips }}"
+        podPolicy:
+          nodeSelector:
+            clickhouseGroup: server
+          resources:
+            limits:   {cpu: "{{ clickhouse.server.cpu }}", memory: "{{ clickhouse.server.memory }}"}
+            requests: {cpu: "{{ clickhouse.server.cpu }}", memory: "{{ clickhouse.server.memory }}"}
+        # Step 5 taints the server and keeper node groups
+        # clickhouse.com/do-not-schedule=true:NoSchedule so nothing else lands
+        # on them. The chart ships tolerations: [] and its README says to add
+        # the matching toleration here -- so we do, for both server and keeper.
+        # If the operator also injects one, this is a harmless duplicate.
+        tolerations:
+          - {key: clickhouse.com/do-not-schedule, operator: Exists, effect: NoSchedule}
+        ssdCacheConfiguration:
+          # Read cache on the node's local NVMe. The chart converts this to
+          # bytesPerGiRAM using the memory limit above. See group_vars for
+          # why 300Gi.
+          cacheDiskSize: "{{ clickhouse.server.cache_disk_size }}"
+        storage:
+          storageClassName: "{{ clickhouse.storage_class }}"
+          s3:
+            bucketName: "{{ clickhouse.bucket_name }}"
+            keyPrefix: "{{ clickhouse.s3_key_prefix }}"
+            # BOTH must be set. The chart's AWS defaults are us-west-2 for
+            # each; deploy without these and ClickHouse tries to put your data
+            # in the wrong region, and the IRSA role (scoped to one bucket ARN,
+            # which is region-agnostic) would even let it try.
+            region: "{{ aws.target_region }}"
+            endpoint: "https://s3.{{ aws.target_region }}.amazonaws.com"
+        loggerConfig:
+          loggerLevel: "{{ clickhouse.server.log_level }}"
+        prometheus:
+          user:
+            # Created by default with an EMPTY password unless one is given.
+            # We have no Prometheus here, but the user exists either way, so
+            # give it a real secret.
+            create: true
+            password: "{{ _cl_prom_pw }}"
+
+      keeper:
+        image:
+          repository: "{{ target_registry }}/clickhouse-keeper"
+          tag: "{{ versions.keeper }}{{ fips_suffix }}"
+        replicaCount: "{{ clickhouse.keeper.replicas | int }}"
+        arm64: "{{ not fips }}"
+        podPolicy:
+          nodeSelector:
+            clickhouseGroup: keeper
+          resources:
+            limits:   {cpu: "{{ clickhouse.keeper.cpu }}", memory: "{{ clickhouse.keeper.memory }}"}
+            requests: {cpu: "{{ clickhouse.keeper.cpu }}", memory: "{{ clickhouse.keeper.memory }}"}
+        tolerations:
+          - {key: clickhouse.com/do-not-schedule, operator: Exists, effect: NoSchedule}
+        storage:
+          storageClassName: "{{ clickhouse.storage_class }}"
+          resources:
+            requests: "{{ clickhouse.keeper.disk }}"
+        loggerConfig:
+          loggerLevel: "{{ clickhouse.keeper.log_level }}"
+  register: _cl_release
+  no_log: true            # the values carry both password hashes
+
+- name: Report the release
+  ansible.builtin.debug:
+    msg: "release {{ clickhouse.cluster_name }} in {{ clickhouse.namespace }}: {{ _cl_release.status.status | default(cluster_state | default('present')) }}"
+
+# --- teardown ---------------------------------------------------------------
+# helm uninstall removes the CR; the operator then deletes the StatefulSets.
+# The Keeper PVCs survive that (StatefulSet semantics), and so does the
+# namespace. Removing the namespace takes the PVCs with it, and the
+# StorageClass's Delete reclaim policy takes the EBS volumes. S3 is untouched.
+
+- name: Wait for the operator to remove the cluster's pods
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace={{ clickhouse.namespace }}
+      - --for=delete
+      - --timeout=600s
+      - pod
+      - --all
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (cluster_state | default('present')) == 'absent'
+
+- name: Delete the namespace (and with it Keeper's volumes)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Namespace
+    name: "{{ clickhouse.namespace }}"
+    state: absent
+    wait: true
+    wait_timeout: 300
+  when: (cluster_state | default('present')) == 'absent'
+
+- name: Teardown summary
+  ansible.builtin.debug:
+    msg:
+      - "cluster removed. S3 data remains at s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }}/"
+      - "delete it only on purpose: aws s3 rm s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }} --recursive --profile {{ aws.target_profile }}"
+  when: (cluster_state | default('present')) == 'absent'
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (cluster_state | default('present')) == 'absent'
+
+# --- wait for the operator to build it, with diagnostics on failure ---------
+# The operator works in order: Keeper first (servers cannot start without a
+# quorum to talk to), then one StatefulSet per server replica. Each wait has
+# a rescue that dumps the pods and the scheduler's reasons, because the
+# failure modes here -- nodeSelector mismatch, a taint without its toleration,
+# an image that cannot be pulled -- all look identical from the outside: a
+# pod that is Pending and a `kubectl wait` that times out.
+
+- name: Wait for Keeper, then the servers
+  block:
+    - name: Wait for the ClickHouseCluster resource to be accepted
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - clickhousecluster
+          - c-{{ clickhouse.cluster_name }}
+          - --namespace={{ clickhouse.namespace }}
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_cr
+      until: _cl_cr.rc == 0
+      retries: 12
+      delay: 5
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for the Keeper StatefulSet to appear
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - statefulset
+          - c-{{ clickhouse.cluster_name }}-keeper
+          - --namespace={{ clickhouse.namespace }}
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_keeper_sts
+      until: _cl_keeper_sts.rc == 0
+      retries: 36
+      delay: 5
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for the Keeper quorum ({{ clickhouse.keeper.replicas }} replicas Ready)
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - statefulset/c-{{ clickhouse.cluster_name }}-keeper
+          - --namespace={{ clickhouse.namespace }}
+          - --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for the server pods to exist
+      # One StatefulSet per replica (multi-StatefulSet mode), each with a
+      # generated suffix -- so select pods by label, never by guessed name.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_server_pods
+      until: _cl_server_pods.stdout_lines | length >= clickhouse.server.replicas | int
+      retries: 60
+      delay: 5
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for every server pod to be Ready
+      # Image pull (~1 GB per architecture), then ClickHouse start-up against
+      # S3 and Keeper. 15 minutes is generous on purpose; a rescue is worse.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --namespace={{ clickhouse.namespace }}
+          - --for=condition=Ready
+          - --timeout=900s
+          - pod
+          - --selector=app.kubernetes.io/name=clickhouse-server
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      check_mode: false
+
+  rescue:
+    - name: Show every pod in the namespace
+      ansible.builtin.command:
+        argv: [kubectl, get, pods, "--namespace={{ clickhouse.namespace }}", -o=wide]
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_rescue_pods
+      changed_when: false
+      check_mode: false
+
+    - name: Show the scheduler's and kubelet's reasons
+      # Warning events carry the actual cause: "0/8 nodes are available:
+      # 3 node(s) didn't match Pod's node affinity/selector, 3 node(s) had
+      # untolerated taint ..." or "Failed to pull image ...".
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - events
+          - --namespace={{ clickhouse.namespace }}
+          - --field-selector=type=Warning
+          - --sort-by=.lastTimestamp
+          - -o=custom-columns=LAST:.lastTimestamp,OBJECT:.involvedObject.name,REASON:.reason,MESSAGE:.message
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_rescue_events
+      changed_when: false
+      check_mode: false
+
+    - name: Show the operator's recent log
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - --namespace={{ clickhouse.operator_namespace }}
+          - --selector=app.kubernetes.io/instance=clickhouse-operator
+          - --container=manager
+          - --tail=40
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_rescue_oplog
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The cluster did not come up
+      ansible.builtin.fail:
+        msg:
+          - "--- pods ---"
+          - "{{ _cl_rescue_pods.stdout_lines }}"
+          - "--- warning events (newest last) ---"
+          - "{{ _cl_rescue_events.stdout_lines | default([]) }}"
+          - "--- operator log tail ---"
+          - "{{ _cl_rescue_oplog.stdout_lines | default([]) }}"
+          - "The release is still installed; fix the cause and re-run --tags cluster, or tear down with -e cluster_state=absent."
+
+# --- verification ----------------------------------------------------------
+
+- name: Confirm every container pulls from your ECR
+  # Same assertion as Step 8, and it matters more here: the operator
+  # generates init containers whose registry comes from
+  # IMAGE_REGISTRY_BASE_PATH, not from any chart value you set in this role.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.namespace }}
+      - -o=jsonpath={range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_images
+  changed_when: false
+  check_mode: false
+
+- name: Assert no container pulls from outside your registry
+  ansible.builtin.assert:
+    that: _cl_images.stdout_lines | reject('search', '^' ~ target_registry) | list | length == 0
+    fail_msg: >-
+      These containers do not come from {{ target_registry }}:
+      {{ _cl_images.stdout_lines | reject('search', '^' ~ target_registry) | unique | list | join(', ') }}
+    success_msg: >-
+      all {{ _cl_images.stdout_lines | length }} containers (init included) pull from {{ target_registry }}
+
+- name: Confirm IRSA reached the server pods
+  # The kubelet injects these two env vars when the pod's service account is
+  # annotated. If they are missing, the pod has no AWS identity and the first
+  # S3 write fails with AccessDenied deep inside ClickHouse's logs.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.namespace }}
+      - --selector=app.kubernetes.io/name=clickhouse-server
+      - -o=jsonpath={range .items[*]}{.metadata.name}{" sa="}{.spec.serviceAccountName}{" role="}{range .spec.containers[?(@.name=="clickhouse-server")].env[?(@.name=="AWS_ROLE_ARN")]}{.value}{end}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_irsa
+  changed_when: false
+  check_mode: false
+
+- name: Assert the service account and role are the ones Step 6 trusts
+  ansible.builtin.assert:
+    that:
+      - _cl_irsa.stdout_lines | select('search', 'sa=' ~ clickhouse.service_account ~ ' ') | list | length == clickhouse.server.replicas | int
+      - _cl_irsa.stdout_lines | select('search', 'role=' ~ _cl_s3_role_arn) | list | length == clickhouse.server.replicas | int
+    fail_msg: "IRSA wiring is off: {{ _cl_irsa.stdout_lines }}"
+    success_msg: "{{ clickhouse.server.replicas }} server pods run as {{ clickhouse.service_account }} with AWS_ROLE_ARN={{ _cl_s3_role_arn | regex_replace('^.*/', '') }}"
+
+- name: Confirm data is landing in S3 under the key prefix
+  # The definitive end-to-end proof: the servers wrote to the bucket, which
+  # means the IRSA token was minted, exchanged and accepted. On a fresh
+  # cluster this is metadata and system tables, and it appears within a
+  # minute of the servers becoming Ready.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3api
+      - list-objects-v2
+      - --bucket={{ clickhouse.bucket_name }}
+      - --prefix={{ clickhouse.s3_key_prefix }}/
+      - --max-items=1
+      - --query=KeyCount
+      - --output=text
+      - --profile={{ aws.target_profile }}
+  register: _cl_s3
+  until: (_cl_s3.stdout | trim | default('0', true) | int) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  check_mode: false
+
+- name: Show what the operator built
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods,statefulsets,services,pvc
+      - --namespace={{ clickhouse.namespace }}
+      - -o=wide
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_objects
+  changed_when: false
+  check_mode: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "cluster:   c-{{ clickhouse.cluster_name }} in {{ clickhouse.namespace }}"
+      - "server:    {{ clickhouse.server.replicas }} x {{ versions.server }}{{ fips_suffix }}  ({{ clickhouse.server.cpu }} CPU / {{ clickhouse.server.memory }}, cache {{ clickhouse.server.cache_disk_size }})"
+      - "keeper:    {{ clickhouse.keeper.replicas }} x {{ versions.keeper }}{{ fips_suffix }}  ({{ clickhouse.keeper.cpu }} CPU / {{ clickhouse.keeper.memory }}, {{ clickhouse.keeper.disk }} EBS each)"
+      - "s3:        s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }}/  -- objects present"
+      - "admin:     user '{{ clickhouse.admin_username }}', password in {{ admin_password_file | realpath }}"
+      - "next:      --tags preflight (Step 10), then --tags verify (Step 11)"
+
+- name: Objects
+  ansible.builtin.debug:
+    msg: "{{ _cl_objects.stdout_lines }}"

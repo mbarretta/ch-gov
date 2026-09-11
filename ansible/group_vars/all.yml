@@ -96,7 +96,7 @@ pricing:
   nat_gateway_hourly_usd: 0.045
 
 # ---------------------------------------------------------------------------
-# ClickHouse cluster identity (Steps 6-9)
+# ClickHouse cluster identity and sizing (Steps 6-11)
 # ---------------------------------------------------------------------------
 clickhouse:
   # The cluster name is constrained by the chart's own schema to
@@ -104,8 +104,46 @@ clickhouse:
   # label: the chart derives the service account name from it, and the IRSA
   # trust policy is bound to that exact service account.
   cluster_name: "default-us-01"
-  namespace: "clickhouse"
+  # ns-<cluster_name>, restated literally rather than derived (a value that
+  # refers back into its own mapping trips Ansible's recursion guard). The
+  # ns- prefix is a convention, not decoration: the chart README recommends
+  # it, the tutorial uses it, and the preflight chart assumes it by default
+  # (it analyses ns-<clickhouseClusterName> unless told otherwise). Change
+  # one, change the other. The IRSA trust policy (Step 6) is bound to this
+  # namespace, so changing it means re-running --tags storage.
+  namespace: "ns-default-us-01"
   operator_namespace: "clickhouse-operator-system"
+  # The admin user the chart creates. Its password is generated on first run
+  # and kept at admin_password_file (gitignored), never in group_vars.
+  admin_username: "default"
+
+  # --- pod sizing (Step 9) ---
+  # These are requests AND limits (the chart sets both to the same value).
+  # They have to fit the node types in `infrastructure` above with kubelet
+  # reservations taken out: m7gd.2xlarge is 8 vCPU / 32Gi, m7g.xlarge is
+  # 4 vCPU / 16Gi. Server memory is the AWS base configuration's own 16Gi
+  # rather than the chart's 8Gi default -- the node has the room, and the SSD
+  # cache is sized per Gi of RAM, so more RAM also means a bigger cache.
+  server:
+    replicas: 3
+    cpu: "4"
+    memory: "16Gi"
+    # SSD read cache on the node's local NVMe (/nvme/disk, mounted in Step 5).
+    # The disk is ~442Gi; the preflight check fails at >=80% of it, and
+    # ClickHouse can overshoot the limit briefly during merges, so leave
+    # headroom. 300Gi is ~68%.
+    cache_disk_size: "300Gi"
+    # The chart default is `trace`, which is a firehose. Servers here have no
+    # persistent volume, so logs go to stdout and the node's container log
+    # rotation -- `information` keeps that readable.
+    log_level: "information"
+  keeper:
+    replicas: 3            # always 3: quorum
+    cpu: "2"
+    memory: "4Gi"
+    disk: "10Gi"           # EBS, gp3-encrypted; Keeper's only persistent state
+    log_level: "information"
+  storage_class: "gp3-encrypted"
 
   # Derived by the chart as ch-<cluster_name>-sa. Restated here because the
   # IAM trust policy in Step 6 must name it before the chart ever runs.
@@ -196,3 +234,14 @@ skopeo_authfile: "{{ playbook_dir }}/../state/skopeo-auth.json"
 # Same reasoning as .aws/config: keep it in the project, never touch
 # ~/.kube/config, which may hold clusters unrelated to this work.
 kubeconfig_path: "{{ playbook_dir }}/../state/kubeconfig"
+
+# Generated secrets and run artefacts. Gitignored as a whole directory.
+state_dir: "{{ playbook_dir }}/../state"
+# Created by the clickhouse_cluster role on first run (32 random characters)
+# and reused thereafter, so re-runs are idempotent and the verify role can
+# log in. Losing this file does not lose the cluster: the hash is in the CR,
+# and a new password can be set with `helm upgrade`.
+admin_password_file: "{{ state_dir }}/clickhouse-admin-password"
+prometheus_password_file: "{{ state_dir }}/clickhouse-prometheus-password"
+# Where the preflight role leaves its rendered spec and last report.
+preflight_dir: "{{ state_dir }}/preflight"
