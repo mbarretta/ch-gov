@@ -30,11 +30,11 @@ You talk to it in **SQL**, over two doors:
 
 ## 2. What "ClickHouse Private" and "Government" mean
 
-ClickHouse Inc. sells the same engine three ways:
+ClickHouse Inc. sells the same engine in a few different ways:
 
 - **Open source.** You download it, you run it, you are on your own.
 - **ClickHouse Cloud.** They run it in their AWS/GCP/Azure account. You get a URL.
-- **ClickHouse Private.** They give you the Cloud software, and **you run it in
+- **ClickHouse Private.** They give you the core Cloud software, and **you run it in
   your own cloud account**, on your own Kubernetes cluster, with no connection
   back to ClickHouse Inc. once installed. "Government" is the same product with
   a **FIPS-validated** cryptography build, which changes CPU architecture
@@ -60,7 +60,7 @@ yours, and the cluster only ever pulls from yours:
                                            └──────────────────────────────┘
 ```
 
-This is why the setup needs credentials for **two** AWS accounts (theirs, read
+This is why the setup needs credentials for **two** AWS accounts (ClickHouse's, read
 only, to copy from; yours, to build in) and why the first deployment step is
 copying images rather than creating servers.
 
@@ -71,25 +71,25 @@ Think of it as a restaurant kitchen.
 ```
                        ┌──────────────────────────────────────────────────┐
    clients ──► NLB ──► │  ClickHouse servers  (3 pods, one per node)      │
-   8123 / 9000         │  the cooks: parse SQL, read/write data, answer   │
+   8123 / 9000         │  The cooks: parse SQL, read/write data, answer   │
                        │  keep a hot copy of recent data on local NVMe    │
                        └───────────┬──────────────────────┬───────────────┘
                                    │ metadata, locks      │ table data
                                    ▼                      ▼
                        ┌────────────────────┐   ┌────────────────────────┐
                        │  Keeper (3 pods)   │   │  S3 bucket             │
-                       │  the order board:  │   │  the pantry: every     │
+                       │  The order board:  │   │  The pantry: every     │
                        │  who owns what,    │   │  byte of every table   │
                        │  what is current   │   │  lives here            │
                        └────────────────────┘   └────────────────────────┘
 
                        ┌──────────────────────────────────────────────────┐
-                       │  Operator (1 pod)  the manager: reads the spec   │
+                       │  Operator (1 pod)  The manager: reads the spec   │
                        │  you wrote, builds and repairs everything above  │
                        └──────────────────────────────────────────────────┘
 ```
 
-**ClickHouse server.** The database process. You run three of them. Every one
+**ClickHouse server.** The database process. You run three of them for scalibility and redundency. Every one
 can take any query. They share one set of tables (the engine is called
 SharedMergeTree), so a row inserted through server A is visible from server B
 within a second or two.
