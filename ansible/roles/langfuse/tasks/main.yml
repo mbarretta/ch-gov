@@ -476,6 +476,7 @@
     # The chart's ClusterIP Service in front of the web pods, named after
     # Helm's fullname: the release name when it contains the chart name
     # (langfuse), <release>-langfuse otherwise.
+    _lf_fullname: "{{ langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse' }}"
     _lf_web_svc: "{{ (langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse') ~ '-web' }}"
 
 - name: Settle the address people will use
@@ -774,14 +775,18 @@
       # and the pods that crash-looped before the role existed come back on
       # the kubelet's backoff (up to five minutes between restarts), so this
       # is patient. rollout status returns once the Deployment is Available.
+      # By name, not --selector: the chart puts `app: web` on the pod template
+      # only, so a label selector on the Deployments matches nothing, and
+      # `rollout status` then prints "No resources found" and exits 0 -- a
+      # wait that never waited (seen live). A missing Deployment by name is a
+      # loud "not found" instead.
       ansible.builtin.command:
         argv:
           - kubectl
           - rollout
           - status
-          - deployment
+          - deployment/{{ _lf_fullname }}-{{ item }}
           - --namespace={{ langfuse.namespace }}
-          - --selector=app.kubernetes.io/instance={{ langfuse.release }},app={{ item }}
           - --timeout=900s
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
