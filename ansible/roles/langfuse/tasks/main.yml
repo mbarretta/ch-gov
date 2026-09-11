@@ -473,11 +473,16 @@
 - name: Note the load balancer hostname and the web Service name
   ansible.builtin.set_fact:
     _lf_host: "{{ (_lf_lb_host.stdout | default('')) | trim }}"
-    # The chart's ClusterIP Service in front of the web pods, named after
-    # Helm's fullname: the release name when it contains the chart name
-    # (langfuse), <release>-langfuse otherwise.
+    # Helm's fullname for this release: the release name when it contains the
+    # chart name (langfuse), <release>-langfuse otherwise. The chart names its
+    # Deployments and Services after it.
     _lf_fullname: "{{ langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse' }}"
-    _lf_web_svc: "{{ (langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse') ~ '-web' }}"
+
+- name: Name the chart's web Service
+  # The ClusterIP Service in front of the web pods. A separate set_fact: the
+  # keys of one set_fact cannot refer to each other.
+  ansible.builtin.set_fact:
+    _lf_web_svc: "{{ _lf_fullname }}-web"
 
 - name: Settle the address people will use
   # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname, with the port
