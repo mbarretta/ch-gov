@@ -10,7 +10,8 @@
 #   4. Verifies every tool reports a usable version
 #   5. Verifies both AWS profiles authenticate
 #   6. Proves you can actually reach ClickHouse's source ECR, and reports
-#      which image versions really exist there
+#      which image versions really exist there (and names the extra public
+#      registries the optional Langfuse steps pull from)
 #
 # Usage:
 #   ./part1-setup.sh              install what's missing, then verify
@@ -237,6 +238,14 @@ else
   info "you may not have the cross-account role; contact your ClickHouse rep"
   note_problem
 fi
+# The optional Langfuse steps (langfuse.enabled: true in ansible/group_vars/
+# all.yml) widen the Step 2 image hop beyond ClickHouse's ECR: two public
+# registries, pulled anonymously, plus a Helm chart that goes into ECR as an
+# OCI artifact. No extra credentials -- but the machine running the sync must
+# be able to reach them, which an ECR-only allowlist would block.
+info "with langfuse.enabled: true, the image sync also pulls anonymously from cgr.dev (Chainguard"
+info "postgres, valkey) and docker.langfuse.com (langfuse, langfuse-worker), and helm pulls the"
+info "langfuse chart from langfuse.github.io and pushes it to ECR as oci://.../helm/langfuse"
 
 # ===========================================================================
 if ((PROBLEMS == 0)); then

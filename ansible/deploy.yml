@@ -3,12 +3,16 @@
 #
 # Run from the ansible/ directory:
 #   ansible-playbook deploy.yml                    # everything, Steps 1-12
+#                                                  #   (+13-15 when langfuse.enabled)
 #   ansible-playbook deploy.yml --tags images      # just ECR setup + image sync
+#   ansible-playbook deploy.yml --tags langfuse    # just the optional Steps 13-15
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
 #
-# Steps map to the official tutorial:
+# Steps 1-12 map to the official tutorial:
 #   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
+# Steps 13-15 are optional and off by default (langfuse.enabled in group_vars):
+# a Langfuse server on the same cluster, with ClickHouse Private as its store.
 
 - name: ClickHouse Private -- AWS EKS
   hosts: localhost
@@ -81,3 +85,27 @@
     # --- Step 12: load balancer (none | internal | public) -------------------
     - role: clickhouse_loadbalancer
       tags: [k8s, lb]
+
+    # --- Steps 13-15 (optional): Langfuse on top of ClickHouse Private ---------
+    # Steps 1-12 gate themselves (each role ends the play when its inputs say
+    # so); these three are the first with a role-level `when`, because the
+    # whole feature is a switch in group_vars and nothing about a ClickHouse-
+    # only run may change while it is off. The `or ... == 'absent'` half keeps
+    # the teardown reachable after the switch goes back to false: down.sh
+    # removes Langfuse whenever it is actually there, and that must not depend
+    # on the setting that turned it on still being set.
+
+    # --- Step 13: Langfuse S3 bucket + IRSA role -------------------------------
+    - role: langfuse_storage
+      tags: [langfuse, lf-storage]
+      when: (langfuse.enabled | bool) or (langfuse_storage_state | default('present')) == 'absent'
+
+    # --- Step 14: Langfuse database and user inside ClickHouse Private ---------
+    - role: langfuse_clickhouse
+      tags: [langfuse, lf-db]
+      when: (langfuse.enabled | bool) or (langfuse_db_state | default('present')) == 'absent'
+
+    # --- Step 15: Langfuse itself (Helm release, NLB, PostgreSQL, Valkey) ------
+    - role: langfuse
+      tags: [langfuse, lf-app]
+      when: (langfuse.enabled | bool) or (langfuse_state | default('present')) == 'absent'
