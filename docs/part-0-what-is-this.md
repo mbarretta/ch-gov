@@ -155,10 +155,25 @@ exactly. In plain terms:
 | 10 | Preflight checks | Inspection |
 | 11 | Verify | Cook one meal on A, taste it from B |
 | 12 | Load balancer | Put a sign on the door |
+| 13 (optional) | S3 bucket and IAM role for Langfuse | A second pantry, a key for a second cook |
+| 14 (optional) | A database and user for Langfuse inside ClickHouse | Give the second cook one shelf, not the whole kitchen |
+| 15 (optional) | Install Langfuse | A second restaurant next door that stores its receipts in your kitchen |
 
 Steps 1–5 are generic AWS. Steps 6–8 are preparation that only ClickHouse
 cares about. Steps 9–12 are the product itself. Only Step 5 onward costs
 meaningful money, because that is when machines start running.
+
+### Optional: Langfuse on top
+
+Steps 13–15 are off by default and add nothing when they are off. Switched
+on (`langfuse.enabled: true` in the config file), they install
+**Langfuse** — an open-source server that records what an application asked
+a language model and what it answered — on the same machines, using the
+ClickHouse cluster you just built as the place it keeps those records. It is
+the demo of "ClickHouse Government holds Langfuse's traces": one script posts
+a trace to Langfuse and reads it back out of ClickHouse. The steps, the two
+places Chainguard's images differ from the ones the Langfuse chart expects,
+the costs and the teardown rules are in **Part 6**.
 
 ## 6. How to deploy it with this project
 
@@ -242,6 +257,7 @@ If you want one step at a time, the underlying command is:
 ```bash
 scripts/play.sh --tags cluster       # any of: images vpc eks nodes storage
                                      #   prereqs operator cluster preflight verify lb
+                                     #   (+ lf-storage lf-db lf-app when Langfuse is on, see Part 6)
 ```
 
 ## 7. What exists once it is up
@@ -315,7 +331,8 @@ scripts/down.sh --all          # everything except the S3 bucket and ECR
 ```
 
 Use the script, not the console, because teardown is **not** the reverse of
-bring-up. Three things point the wrong way and the script handles them:
+bring-up. Three things point the wrong way — four with Langfuse — and the
+script handles them:
 
 - The load balancer must go before the cluster or EKS, or the NLB is
   orphaned, keeps billing, and blocks deleting the VPC.
@@ -324,6 +341,12 @@ bring-up. Three things point the wrong way and the script handles them:
   namespace hangs forever and the Keeper volumes are orphaned. `down.sh`
   refuses to start if it finds this state and tells you what to do.
 - The IAM and storage steps read the EKS cluster, so they run before it goes.
+- Langfuse (optional Steps 13–15) goes **before ClickHouse**. Its tables live
+  in the ClickHouse cluster and its two disks are EBS volumes, so removing it
+  needs the operator and the EBS driver alive — the cluster and the nodes
+  still up. `down.sh` runs it first, only when it exists, and even if you
+  have already switched `langfuse.enabled` back to `false`. Part 6 §12 has
+  the details, including the separate command that purges its data.
 
 ### Up again
 
@@ -367,8 +390,8 @@ Both run as part of `up.sh`. Both are safe any time.
 
 ### What is safe to delete by hand
 
-Nothing in the two Kubernetes namespaces, and none of the four CloudFormation
-stacks. Use the scripts. The account is shared with other people's clusters,
+Nothing in the two Kubernetes namespaces (three with Langfuse), and none of
+the four CloudFormation stacks (five with Langfuse). Use the scripts. The account is shared with other people's clusters,
 so never delete an AWS resource you cannot trace to this project's names.
 
 Two things the scripts deliberately never delete, and you must:

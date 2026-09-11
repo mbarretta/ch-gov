@@ -343,9 +343,18 @@ scripts/down.sh --nodes-only   # just the nodes -- fastest; pods go Pending, NLB
 scripts/down.sh --all          # everything except the S3 bucket and ECR images
 ```
 
+Both scripts read one more switch from `ansible/group_vars/all.yml`:
+`langfuse.enabled`. It is `false` by default and then neither script changes.
+Set it to `true` and `up.sh` appends the optional Langfuse steps
+(`lf-storage lf-db lf-app`, Steps 13–15) after `lb` and prints the Langfuse
+URL at the end, and `down.sh` puts `lf-app` first in its default plan (and
+`lf-db` and `lf-storage` in `--all`) — but only when there is a Langfuse
+release, namespace or stack to remove, and whether or not the switch is still
+`true` at teardown time. Part 6 covers the steps themselves.
+
 `down.sh` exists because teardown is **not** simply `up.sh` backwards. Three
-dependencies point the other way, and getting any of them wrong leaves
-something orphaned and billing:
+dependencies point the other way — four with Langfuse — and getting any of
+them wrong leaves something orphaned and billing:
 
 1. The load balancer Service goes **before** the cluster or EKS — deleting the
    Service is what deletes the NLB. Delete EKS first and the NLB survives it
@@ -358,6 +367,11 @@ something orphaned and billing:
    nodes, and tells you what to do instead.
 3. The prerequisites and storage teardowns read the EKS cluster and the IRSA
    stack, so they run before EKS goes — and prerequisites before storage.
+4. Langfuse (optional Steps 13–15) goes **before the ClickHouse cluster.**
+   Its tables live in that cluster and its PostgreSQL and Valkey disks are
+   EBS volumes, so removing it needs the operator and the EBS CSI driver
+   alive — the cluster and the nodes still up. The same zero-nodes refusal
+   applies to the `langfuse` namespace.
 
 Each teardown is a separate playbook run, because every role ends the play
 after its own teardown task; that is why the script loops rather than passing
