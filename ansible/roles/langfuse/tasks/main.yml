@@ -332,6 +332,12 @@
           app.kubernetes.io/managed-by: clickhouse-private-ansible
 
 - name: Write the application Secret (NextAuth secret, salt, encryption key)
+  # Not `langfuse-app`: chart 2.1.0 renders a Secret of exactly that name
+  # (templates/langfuse-app-secret.yaml, <fullname>-app) to hold whichever of
+  # these three it has to generate itself, and Helm refuses to install over an
+  # object it does not own. So this one takes the chart's own naming for
+  # credential Secrets (-auth, as in langfuse-postgresql-auth) and the chart's
+  # langfuse-app ends up empty, since every value below is provided.
   kubernetes.core.k8s:
     kubeconfig: "{{ kubeconfig_path }}"
     state: present
@@ -340,7 +346,7 @@
       apiVersion: v1
       kind: Secret
       metadata:
-        name: langfuse-app
+        name: langfuse-app-auth
         namespace: "{{ langfuse.namespace }}"
         labels:
           app.kubernetes.io/managed-by: clickhouse-private-ansible
@@ -538,11 +544,11 @@
         nextauth:
           url: "{{ _lf_url }}"
           secret:
-            secretKeyRef: {name: langfuse-app, key: nextauth-secret}
+            secretKeyRef: {name: langfuse-app-auth, key: nextauth-secret}
         salt:
-          secretKeyRef: {name: langfuse-app, key: salt}
+          secretKeyRef: {name: langfuse-app-auth, key: salt}
         encryptionKey:
-          secretKeyRef: {name: langfuse-app, key: encryption-key}
+          secretKeyRef: {name: langfuse-app-auth, key: encryption-key}
         features:
           telemetryEnabled: "{{ langfuse.telemetry_enabled | bool }}"
           signUpDisabled: "{{ langfuse.signup_disabled | bool }}"
