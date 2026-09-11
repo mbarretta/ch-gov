@@ -572,6 +572,19 @@
           resources:
             limits:   {cpu: "{{ langfuse.web.cpu }}", memory: "{{ langfuse.web.memory }}"}
             requests: {cpu: "{{ langfuse.web.cpu }}", memory: "{{ langfuse.web.memory }}"}
+          # First boot applies every ClickHouse migration before the HTTP
+          # server listens, and ON CLUSTER DDL on SharedMergeTree takes 0.2-10 s
+          # a statement here (seen live: 15 migrations in 27 s). The chart's
+          # default liveness probe (20 s, then 5 failures 10 s apart) killed the
+          # pod mid-migration, and golang-migrate left schema_migrations dirty
+          # -- every restart after that exits with "Dirty database version N".
+          # The chart has no startupProbe for web, so the liveness probe
+          # carries the grace: ~15 minutes before the first restart. Readiness
+          # (chart default) still keeps traffic off the pod until it is ready.
+          livenessProbe:
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
         worker:
           image:
             repository: "{{ target_registry }}/langfuse/langfuse-worker"
