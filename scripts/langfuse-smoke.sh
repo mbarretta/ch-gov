@@ -13,13 +13,20 @@
 #      balancer type is `none`, or the NLB does not answer, it falls back to
 #      `kubectl port-forward svc/langfuse-web 3000:3000` -- the port is fixed at
 #      3000 because NEXTAUTH_URL for that mode is http://localhost:3000.
-#   2. POSTs one trace-create and one generation-create event to
-#      /api/public/ingestion, then polls GET /api/public/traces/<id> until the
-#      trace is readable (bounded retries).
+#   2. POSTs one trace -- a root span with a generation under it -- as
+#      OTLP/JSON to /api/public/otel/v1/traces, then polls
+#      GET /api/public/v2/observations?traceId=<id> until both spans are
+#      readable (bounded retries). Langfuse v4 stores everything as OpenTelemetry
+#      spans: in its default events_only mode the v3 batch ingestion types
+#      (trace-create, generation-create) and the v3 read endpoints
+#      (/api/public/traces, /api/public/observations) are refused, and
+#      /api/public/v2/observations is the read path that remains.
 #   3. Runs, through scripts/ch-client.sh -q, the two queries that show the
-#      same trace inside ClickHouse:
-#        SELECT id, name FROM langfuse.traces WHERE id = '<id>'
-#        SELECT hostName(), count() FROM langfuse.observations GROUP BY 1
+#      same trace inside ClickHouse. v4 writes to langfuse.events_core (the
+#      traces and observations tables the migrations also create stay empty
+#      in events_only mode):
+#        SELECT trace_id, span_id, name, type FROM langfuse.events_core WHERE trace_id = '<id>'
+#        SELECT hostName(), count() FROM langfuse.events_core GROUP BY 1
 #      --lb is handed to ch-client.sh so those queries go through the ClickHouse
 #      NLB instead of a pod port-forward.
 #
@@ -31,7 +38,7 @@
 # Override the URL with LANGFUSE_URL=http://... when you reach Langfuse by a
 # name this script cannot discover (a VPN alias, an SSH tunnel).
 #
-# Needs curl, jq, kubectl, uuidgen, and whatever scripts/ch-client.sh needs.
+# Needs curl, jq, kubectl, and whatever scripts/ch-client.sh needs.
 #
 set -euo pipefail
 
@@ -47,7 +54,7 @@ while (($#)); do
   esac; shift
 done
 
-for tool in curl jq kubectl uuidgen; do have "$tool" || die "$tool not installed"; done
+for tool in curl jq kubectl; do have "$tool" || die "$tool not installed"; done
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars. The
@@ -119,6 +126,7 @@ else
   fi
   kubectl port-forward -n "$LF_NS" "svc/$LF_RELEASE-web" 3000:3000 >/dev/null 2>&1 &
   PF=$!
+  disown "$PF"   # the EXIT trap kills it; without this bash announces "Terminated"
   # Wait for the forward to accept connections rather than sleeping a guess.
   for _ in $(seq 1 50); do
     (exec 3<>/dev/tcp/127.0.0.1/3000) 2>/dev/null && { exec 3>&- ; break; }
@@ -133,54 +141,69 @@ fi
 # ---- 2. post a trace and a generation, then read the trace back -------------
 step "Posting a trace"
 rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
-TRACE_ID="$(rand_hex 16)"
-GEN_ID="$(rand_hex 16)"
-NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+TRACE_ID="$(rand_hex 16)"   # an OpenTelemetry trace id: 16 bytes, 32 hex
+ROOT_ID="$(rand_hex 8)"     # span ids: 8 bytes, 16 hex
+GEN_ID="$(rand_hex 8)"
+NOW_S="$(date -u +%s)"
+START_NS="${NOW_S}000000000"
+END_NS="$((NOW_S + 1))000000000"
 RUN_TAG="smoke-$(date -u +%Y%m%d-%H%M%S)"
 
-# Two events in one batch: the trace, and a generation (an LLM call) under it.
-# Event ids are per-event idempotency keys; the trace id is what we look up.
-BODY="$TMP/batch.json"
-jq -n --arg tid "$TRACE_ID" --arg gid "$GEN_ID" --arg now "$NOW" --arg run "$RUN_TAG" \
-      --arg e1 "$(uuidgen | tr 'A-Z' 'a-z')" --arg e2 "$(uuidgen | tr 'A-Z' 'a-z')" '{
-  batch: [
-    { id: $e1, type: "trace-create", timestamp: $now,
-      body: { id: $tid, name: $run, userId: "smoke-test",
-              input: {question: "Where do these traces live?"},
-              output: {answer: "In ClickHouse Private."},
-              tags: ["smoke"], metadata: {source: "scripts/langfuse-smoke.sh"} } },
-    { id: $e2, type: "generation-create", timestamp: $now,
-      body: { id: $gid, traceId: $tid, name: "answer", model: "demo-model",
-              startTime: $now, endTime: $now,
-              input: [{role: "user", content: "Where do these traces live?"}],
-              output: {role: "assistant", content: "In ClickHouse Private."},
-              usageDetails: {input: 7, output: 5} } }
-  ] }' > "$BODY"
+# One OTLP/JSON request with two spans: the root (the trace itself, named
+# RUN_TAG) and a generation (an LLM call) under it. Langfuse reads its own
+# semantics from span attributes: langfuse.user.id, langfuse.trace.input and
+# .output on the root, langfuse.observation.type=generation plus the gen_ai.*
+# model and token counts on the child. The trace id is what we look up.
+BODY="$TMP/otlp.json"
+jq -n --arg tid "$TRACE_ID" --arg rid "$ROOT_ID" --arg gid "$GEN_ID" \
+      --arg start "$START_NS" --arg end "$END_NS" --arg run "$RUN_TAG" '{
+  resourceSpans: [{
+    resource: {attributes: [{key: "service.name", value: {stringValue: "langfuse-smoke"}}]},
+    scopeSpans: [{
+      scope: {name: "scripts/langfuse-smoke.sh"},
+      spans: [
+        { traceId: $tid, spanId: $rid, name: $run, kind: 1,
+          startTimeUnixNano: $start, endTimeUnixNano: $end,
+          attributes: [
+            {key: "langfuse.user.id",      value: {stringValue: "smoke-test"}},
+            {key: "langfuse.trace.input",  value: {stringValue: "Where do these traces live?"}},
+            {key: "langfuse.trace.output", value: {stringValue: "In ClickHouse Private."}},
+            {key: "langfuse.trace.tags",   value: {arrayValue: {values: [{stringValue: "smoke"}]}}} ] },
+        { traceId: $tid, spanId: $gid, parentSpanId: $rid, name: "answer", kind: 1,
+          startTimeUnixNano: $start, endTimeUnixNano: $end,
+          attributes: [
+            {key: "langfuse.observation.type", value: {stringValue: "generation"}},
+            {key: "gen_ai.request.model",       value: {stringValue: "demo-model"}},
+            {key: "gen_ai.usage.input_tokens",  value: {intValue: "7"}},
+            {key: "gen_ai.usage.output_tokens", value: {intValue: "5"}} ] }
+      ] }] }] }' > "$BODY"
 
-code="$(http_code --request POST --header 'Content-Type: application/json' --data "@$BODY" "$LF_URL/api/public/ingestion")"
-# The ingestion endpoint answers 207 with per-event results; 200 is accepted too.
-[[ "$code" == 207 || "$code" == 200 ]] || die "POST /api/public/ingestion returned HTTP $code: $(head -c 400 "$TMP/body" 2>/dev/null)"
-errors="$(jq -r '.errors | length' "$TMP/body" 2>/dev/null || echo '?')"
-[[ "$errors" == 0 ]] || die "ingestion rejected $errors event(s): $(jq -c '.errors' "$TMP/body")"
+code="$(http_code --request POST --header 'Content-Type: application/json' --data "@$BODY" "$LF_URL/api/public/otel/v1/traces")"
+# 200 with the queued ingestion job; anything else is the error text.
+[[ "$code" == 200 ]] || die "POST /api/public/otel/v1/traces returned HTTP $code: $(head -c 400 "$TMP/body" 2>/dev/null)"
 ok "accepted trace $TRACE_ID (name $RUN_TAG) with one generation"
 
-# Ingestion is asynchronous (web -> S3 -> worker -> ClickHouse), so poll.
-info "waiting for GET /api/public/traces/$TRACE_ID to return 200"
+# Ingestion is asynchronous (web -> S3 -> worker -> ClickHouse), so poll. The
+# v3 GET /api/public/traces/<id> is refused in events_only mode; the v2
+# observations list, filtered by trace, is the read path that remains.
+info "waiting for GET /api/public/v2/observations?traceId=$TRACE_ID to list both spans"
 for attempt in $(seq 1 30); do
-  code="$(http_code "$LF_URL/api/public/traces/$TRACE_ID")"
-  [[ "$code" == 200 ]] && break
+  code="$(http_code "$LF_URL/api/public/v2/observations?traceId=$TRACE_ID&limit=10")"
+  [[ "$code" == 200 && "$(jq -r '.data | length' "$TMP/body" 2>/dev/null || echo 0)" -ge 2 ]] && break
   ((attempt == 30)) && die "trace not readable after 30 attempts (last HTTP $code) -- check the worker: kubectl logs -n $LF_NS deploy/$LF_RELEASE-worker"
   sleep 2
 done
-ok "API returns the trace: $(jq -r '"id=\(.id) name=\(.name) observations=\(.observations | length)"' "$TMP/body")"
+ok "API returns the trace: $(jq -r '"traceId=\(.data[0].traceId) observations=\(.data | length) (\(.data | map(.type) | join(", ")))"' "$TMP/body")"
 
 # ---- 3. the same trace, straight from ClickHouse ----------------------------
+# events_core is the v4 table (one row per span); FINAL because it is a
+# ReplacingMergeTree and a re-delivered span would otherwise show twice.
 step "Reading it back from ClickHouse ($LF_DB database)"
 CH_CLIENT="$CH_ROOT/scripts/ch-client.sh"
-info "SELECT id, name FROM $LF_DB.traces WHERE id = '$TRACE_ID'"
-"$CH_CLIENT" ${CH_CLIENT_ARGS[@]+"${CH_CLIENT_ARGS[@]}"} -q "SELECT id, name FROM $LF_DB.traces WHERE id = '$TRACE_ID' FORMAT PrettyCompact"
-info "SELECT hostName(), count() FROM $LF_DB.observations GROUP BY 1"
-"$CH_CLIENT" ${CH_CLIENT_ARGS[@]+"${CH_CLIENT_ARGS[@]}"} -q "SELECT hostName(), count() FROM $LF_DB.observations GROUP BY 1 FORMAT PrettyCompact"
+info "SELECT trace_id, span_id, name, type FROM $LF_DB.events_core WHERE trace_id = '$TRACE_ID'"
+"$CH_CLIENT" ${CH_CLIENT_ARGS[@]+"${CH_CLIENT_ARGS[@]}"} -q "SELECT trace_id, span_id, name, type FROM $LF_DB.events_core FINAL WHERE trace_id = '$TRACE_ID' ORDER BY start_time FORMAT PrettyCompact"
+info "SELECT hostName(), count() FROM $LF_DB.events_core GROUP BY 1"
+"$CH_CLIENT" ${CH_CLIENT_ARGS[@]+"${CH_CLIENT_ARGS[@]}"} -q "SELECT hostName(), count() FROM $LF_DB.events_core GROUP BY 1 FORMAT PrettyCompact"
 
 step "Done"
 ok "trace $TRACE_ID went in through the API and came back out of ClickHouse Private"
