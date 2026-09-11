@@ -3,7 +3,8 @@
 #
 # Versions here track the official tutorial:
 #   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
-# All were verified present in the source ECR.
+# All were verified present in the source ECR. The optional Langfuse versions
+# (see the langfuse: block at the end) come from their own public sources.
 # ===========================================================================
 
 # Ansible modules from amazon.aws / community.aws need boto3, which brew's
@@ -94,6 +95,9 @@ pricing:
     m6id.2xlarge: 0.4746
   eks_control_plane_hourly_usd: 0.10
   nat_gateway_hourly_usd: 0.045
+  # Langfuse (optional Steps 13-15) adds no instances: it runs on the operator
+  # node group already priced above. Its own cost is a second NLB (~$0.02/hr)
+  # plus pennies of EBS (two small PVCs) and S3.
 
 # ---------------------------------------------------------------------------
 # ClickHouse cluster identity and sizing (Steps 6-11)
@@ -197,6 +201,14 @@ versions:
   operator_chart: "1.20441.1"        # helm chart version (no "main-" prefix)
   cluster_chart: "1.8.7"
   preflight_chart: "1.38.4"
+  # --- Langfuse (optional Steps 13-15; see the langfuse: block at the end) ---
+  langfuse_chart: "2.1.0"            # helm chart from langfuse/langfuse-k8s
+  langfuse_app: "4.25.0"             # web and worker image tag
+  # Chainguard's free tier publishes only `latest`, so the ECR tag claims only the
+  # major we verified (PG 18.6 / Valkey 9.1.2 on 2026-09-11) and the sync freezes
+  # whatever digest `latest` resolves to on first copy. Bump the tag to re-mirror.
+  chainguard_postgres_tag: "pg18-cg"        # source cgr.dev/chainguard/postgres:latest
+  chainguard_valkey_tag:   "valkey9-cg-dev" # source cgr.dev/chainguard/valkey:latest-dev (needs the shell)
 
 # ---------------------------------------------------------------------------
 # Derived values -- do not edit; change `fips` or `versions` instead.
@@ -259,8 +271,26 @@ helm_charts:
   - repo: helm/preflight-check
     tag: "{{ versions.preflight_chart }}"
 
+# Langfuse (optional Steps 13-15). Mirrored only when langfuse.enabled is true;
+# the switch lives in the langfuse: block at the end of this file. The Langfuse
+# images pull anonymously from docker.langfuse.com. The Chainguard images are
+# pulled from the floating source_tag and pushed under our own frozen tag, so
+# ECR's immutable tags pin the digest (see the note in versions).
+langfuse_images:
+  - {repo: langfuse/langfuse,        tag: "{{ versions.langfuse_app }}", source: "docker.langfuse.com"}
+  - {repo: langfuse/langfuse-worker, tag: "{{ versions.langfuse_app }}", source: "docker.langfuse.com"}
+  - {repo: chainguard/postgres, tag: "{{ versions.chainguard_postgres_tag }}", source: "cgr.dev", source_tag: "latest"}
+  - {repo: chainguard/valkey,   tag: "{{ versions.chainguard_valkey_tag }}",   source: "cgr.dev", source_tag: "latest-dev"}
+# The Langfuse chart is published from a plain Helm HTTP repository, not an OCI
+# registry, so skopeo cannot copy it. kind: helm-http routes it through
+# `helm pull` + `helm push` into the same helm/ path in ECR as the other charts.
+langfuse_charts:
+  - {repo: helm/langfuse, tag: "{{ versions.langfuse_chart }}", source: "https://langfuse.github.io/langfuse-k8s", kind: helm-http}
+
 # Everything that must exist in your ECR before images can be copied in.
-all_artifacts: "{{ container_images + helm_charts + third_party_images }}"
+# The Langfuse artifacts join the list only when the switch is on.
+all_artifacts: "{{ container_images + helm_charts + third_party_images
+                   + (langfuse_images + langfuse_charts if (langfuse.enabled | bool) else []) }}"
 
 # skopeo credentials are written here, not to ~/.config/containers, so the
 # project stays self-contained. Gitignored -- it holds real registry tokens.
@@ -280,3 +310,100 @@ admin_password_file: "{{ state_dir }}/clickhouse-admin-password"
 prometheus_password_file: "{{ state_dir }}/clickhouse-prometheus-password"
 # Where the preflight role leaves its rendered spec and last report.
 preflight_dir: "{{ state_dir }}/preflight"
+
+# Langfuse's generated secrets (Steps 14-15), kept under state/ exactly like the
+# ClickHouse admin password above: created on first run, read back afterwards.
+langfuse_state_files:
+  clickhouse_password_file: "{{ state_dir }}/langfuse-clickhouse-password"
+  nextauth_secret_file:     "{{ state_dir }}/langfuse-nextauth-secret"
+  salt_file:                "{{ state_dir }}/langfuse-salt"
+  encryption_key_file:      "{{ state_dir }}/langfuse-encryption-key"
+  init_user_password_file:  "{{ state_dir }}/langfuse-admin-password"
+  public_key_file:          "{{ state_dir }}/langfuse-public-key"
+  secret_key_file:          "{{ state_dir }}/langfuse-secret-key"
+
+# ---------------------------------------------------------------------------
+# Langfuse (optional Steps 13-15) -- an LLM tracing server that stores its
+# traces in the ClickHouse Private cluster above. Off by default; with
+# enabled: false nothing in Steps 1-12 changes.
+#
+# This block is deliberately the LAST top-level key in the file. scripts/up.sh
+# and scripts/down.sh scrape this file with first-match awk on `  namespace:`
+# and `    type:`, and those must keep hitting the clickhouse: block. Langfuse
+# scrapes use a block-scoped form (awk '/^langfuse:/{f=1} f && ...').
+# ---------------------------------------------------------------------------
+langfuse:
+  # The switch. false = Steps 13-15 do nothing (and their artifacts are not
+  # mirrored); true = up.sh runs them after Step 12.
+  enabled: false
+  namespace: "langfuse"
+  # The Helm release name. The chart derives the ServiceAccount name from it,
+  # and the IRSA trust policy (Step 13) is bound to that exact name.
+  release: "langfuse"
+  # Database and user created inside ClickHouse Private by Step 14. The user
+  # holds only the grants Langfuse documents, scoped to this database.
+  clickhouse_database: "langfuse"
+  clickhouse_user: "langfuse"
+  # Events, batch exports and media. Same naming rule as clickhouse.bucket_name
+  # (no periods). Reached through IRSA on the chart's ServiceAccount; no keys.
+  bucket_name: "langfuse-{{ aws.target_account_id }}-{{ aws.target_region }}"
+  # NEXTAUTH_URL override. Empty derives it from the load balancer hostname
+  # below (or http://localhost:3000 for type none, reached by port-forward).
+  # Set it when people reach Langfuse through a name other than the NLB's.
+  url: ""
+
+  # --- how browsers and SDKs reach Langfuse ---
+  # Same shape and rules as clickhouse.load_balancer (Step 12), realised as a
+  # second NLB Service in front of the web pods. Plain HTTP; no domain or TLS.
+  load_balancer:
+    # none | internal | public -- see clickhouse.load_balancer for what each
+    # means. public requires allowed_cidrs and refuses 0.0.0.0/0 unless you
+    # also pass -e allow_open_internet=true.
+    type: "internal"
+    # Empty means the VPC CIDR for `internal` and an error for `public`.
+    allowed_cidrs: []
+    # NLB listener port; the target is always the web pod's 3000. Anything
+    # other than 80 is appended to the derived NEXTAUTH_URL.
+    port: 80
+    cross_zone: true
+
+  # --- pod sizing ---
+  # Requests AND limits. Everything runs on the operator node group, which has
+  # the headroom for these defaults (verified against the live nodes).
+  web:
+    replicas: 1
+    cpu: "2"
+    memory: "4Gi"
+  worker:
+    replicas: 1
+    cpu: "2"
+    memory: "4Gi"
+  # PostgreSQL and Valkey run in-cluster via the chart's bundled subcharts on
+  # Chainguard images (see versions). disk is an EBS volume in
+  # clickhouse.storage_class; it goes away with the namespace on teardown.
+  postgres:
+    disk: "20Gi"
+    cpu: "500m"
+    memory: "1Gi"
+  valkey:
+    disk: "8Gi"
+    cpu: "250m"
+    memory: "512Mi"
+
+  # --- headless bootstrap ---
+  # Seeds an organisation, project, user and API key pair on first boot so the
+  # demo works without clicking through sign-up. The user's password and the
+  # API keys are generated by Step 15 and land in state/ (see
+  # langfuse_state_files), never here.
+  init:
+    org_id: "demo"
+    org_name: "Demo"
+    project_id: "demo"
+    project_name: "Demo"
+    user_email: "admin@example.com"
+    user_name: "Admin"
+
+  # Airgap posture: no phone-home, and no self-service sign-up on a server
+  # that may sit on a public address.
+  telemetry_enabled: false
+  signup_disabled: true

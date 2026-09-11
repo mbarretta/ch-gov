@@ -1,8 +1,12 @@
 ---
-# Copy container images and Helm charts from ClickHouse's ECR into yours.
+# Copy container images and Helm charts from ClickHouse's ECR (and the few
+# public registries the optional pieces need) into yours.
 #
 # This is the airgap hop. skopeo talks registry-to-registry, so layers never
-# touch this machine -- no docker daemon, no multi-GB local round trip.
+# touch this machine -- no docker daemon, no multi-GB local round trip. The
+# one exception is a chart published from a plain Helm HTTP repository
+# (kind: helm-http in group_vars): skopeo has no OCI source to copy from, so
+# it is pulled with helm into state/charts/ and pushed to ECR with helm.
 #
 # `--all` copies the full multi-arch manifest list rather than only the
 # manifest matching this laptop's architecture. That matters: we run on arm64
@@ -98,6 +102,23 @@
   changed_when: false
   failed_when: false      # "not found" is an expected, meaningful answer
 
+- name: Split the results by how each artifact is mirrored
+  # Everything without a kind, and any kind other than helm-http, goes
+  # registry-to-registry with skopeo. helm-http charts have no OCI source and
+  # take the helm pull/push path at the end of this file. The `defined` guard
+  # is not decoration: rejectattr('item.kind', 'equalto', ...) raises on the
+  # entries that carry no kind at all, which is most of them.
+  ansible.builtin.set_fact:
+    _skopeo_results: >-
+      {{ (_existing.results | rejectattr('item.kind', 'defined') | list)
+         + (_existing.results | selectattr('item.kind', 'defined')
+            | rejectattr('item.kind', 'equalto', 'helm-http') | list) }}
+    _helm_http_missing: >-
+      {{ _existing.results | selectattr('item.kind', 'defined')
+         | selectattr('item.kind', 'equalto', 'helm-http')
+         | selectattr('stdout', 'defined')
+         | rejectattr('stdout', 'search', 'sha256:') | list }}
+
 - name: Copy each artifact that is not already present
   ansible.builtin.command:
     argv:
@@ -108,9 +129,13 @@
       # Most artifacts come from ClickHouse's ECR; a third-party mirror
       # entry overrides that with its own registry. skopeo needs no
       # credentials for a public source, and finds none in the authfile.
-      - "docker://{{ item.item.source | default(source_registry) }}/{{ item.item.repo }}:{{ item.item.tag }}"
+      # source_tag lets a floating upstream tag (Chainguard's `latest`) land
+      # under our own fixed tag: ECR tags are immutable and the existence
+      # check above skips present tags, so the digest is resolved once and
+      # frozen until someone bumps the tag in group_vars.
+      - "docker://{{ item.item.source | default(source_registry) }}/{{ item.item.repo }}:{{ item.item.source_tag | default(item.item.tag) }}"
       - "docker://{{ target_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
-  loop: "{{ _existing.results }}"
+  loop: "{{ _skopeo_results }}"
   loop_control:
     label: "{{ item.item.repo }}:{{ item.item.tag }}"
   when: item.rc != 0 or 'sha256:' not in (item.stdout | default(''))
@@ -121,4 +146,75 @@
     msg: >-
       {{ _copied.results | rejectattr('skipped', 'defined') | list | length }} copied,
       {{ _copied.results | selectattr('skipped', 'defined') | list | length }} already present
-      ({{ 'FIPS' if fips else 'standard' }} build)
+      ({{ 'FIPS' if fips else 'standard' }} build);
+      {{ _helm_http_missing | length }} chart(s) to push with helm
+
+# --- charts from a plain Helm HTTP repository -------------------------------
+# Only the Langfuse chart takes this path today, and only when its tag is not
+# in ECR yet. `helm pull` writes <name>-<version>.tgz (subcharts bundled, so
+# nothing else needs mirroring); `helm push` names the OCI target after the
+# chart, so helm/<name> in ECR matches the repo ecr_setup created. The login
+# block is the one clickhouse_operator uses -- same token, same discipline.
+
+- name: Request an ECR token for helm
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _helm_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+  when: _helm_http_missing | length > 0
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _helm_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+  when: _helm_http_missing | length > 0
+
+- name: Ensure the local chart directory exists
+  # Scratch space for the pulled .tgz. Under state/, so gitignored with the
+  # rest, and 0700 like the other directories this role creates there.
+  ansible.builtin.file:
+    path: "{{ state_dir }}/charts"
+    state: directory
+    mode: "0700"
+  when: _helm_http_missing | length > 0
+
+- name: Pull each missing chart from its Helm repository
+  ansible.builtin.command:
+    argv:
+      - helm
+      - pull
+      - "{{ item.item.repo | basename }}"
+      - --repo={{ item.item.source }}
+      - --version={{ item.item.tag }}
+      - --destination={{ state_dir }}/charts
+  loop: "{{ _helm_http_missing }}"
+  loop_control:
+    label: "{{ item.item.repo }}:{{ item.item.tag }}"
+  changed_when: false     # a download into scratch space; the push is the change
+
+- name: Push each pulled chart to ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - push
+      - "{{ state_dir }}/charts/{{ item.item.repo | basename }}-{{ item.item.tag }}.tgz"
+      - "oci://{{ target_registry }}/{{ item.item.repo | dirname }}"
+  loop: "{{ _helm_http_missing }}"
+  loop_control:
+    label: "{{ item.item.repo }}:{{ item.item.tag }}"
