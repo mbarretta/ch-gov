@@ -328,6 +328,41 @@ SSO tokens last hours, not days. Without that check an expired token shows up
 partway into a run as an unrelated-looking module failure — sometimes after
 something has already been created.
 
+## 6b. The two scripts you will actually use: `up.sh` and `down.sh`
+
+`play.sh --tags <step>` is the right tool while *building* a step. Day to day
+you want two verbs, and you want them to know the order so you do not have to:
+
+```bash
+scripts/up.sh                  # Steps 1-12, in order, idempotent; asks first
+scripts/up.sh --from nodes     # start at a step (e.g. after down.sh)
+scripts/up.sh --skip-images    # skip the Step 2 image hop once it has run
+
+scripts/down.sh                # stop the meter: load balancer, cluster, node groups
+scripts/down.sh --nodes-only   # just the nodes -- fastest; pods go Pending, NLB stays
+scripts/down.sh --all          # everything except the S3 bucket and ECR images
+```
+
+`down.sh` exists because teardown is **not** simply `up.sh` backwards. Three
+dependencies point the other way, and getting any of them wrong leaves
+something orphaned and billing:
+
+1. The load balancer Service goes **before** the cluster or EKS — deleting the
+   Service is what deletes the NLB. Delete EKS first and the NLB survives it
+   and then blocks the VPC stack.
+2. The ClickHouse cluster goes **while the nodes are still up.** Removing its
+   namespace needs the operator (to unwind the CR's finalizers) and the EBS
+   CSI controller (to release Keeper's volumes). With no nodes, neither is
+   running: the namespace hangs in `Terminating` and the EBS volumes are
+   orphaned. `down.sh` refuses to start if it finds the namespace with no
+   nodes, and tells you what to do instead.
+3. The prerequisites and storage teardowns read the EKS cluster and the IRSA
+   stack, so they run before EKS goes — and prerequisites before storage.
+
+Each teardown is a separate playbook run, because every role ends the play
+after its own teardown task; that is why the script loops rather than passing
+one long `--tags` list. Nothing in either script deletes S3 data.
+
 ## 7. Checkpoint
 
 Verified working:

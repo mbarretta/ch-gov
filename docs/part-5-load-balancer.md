@@ -177,17 +177,22 @@ at $0.01/GB. Setting `type: none` and re-running removes it.
 
 Deleting the Service is what deletes the NLB, its target groups and the
 security-group rules — the controller does it on the delete event. So remove
-the load balancer **before** the cluster, the node groups or the control plane:
+the load balancer **before** the cluster, the node groups or the control plane.
+Delete the EKS cluster with the Service still in it and the NLB is orphaned:
+still billing, still holding an ENI in each private subnet, and blocking the
+VPC stack's deletion.
+
+You should not have to remember that. `scripts/down.sh` does the load
+balancer first, then the cluster (while nodes are still up, so the operator
+and the CSI driver can clean up after it), then the node groups; `--all` goes
+on through operator, prerequisites, storage, EKS and VPC. Part 1 §6b has the
+full reasoning. If you are doing it by hand:
 
 ```bash
 scripts/play.sh --tags lb -e lb_state=absent     # or type: none + re-run
 scripts/play.sh --tags cluster -e cluster_state=absent
 scripts/play.sh --tags nodes -e nodegroups_state=absent
 ```
-
-Delete the EKS cluster with the Service still in it and the NLB is orphaned:
-still billing, still holding an ENI in each private subnet, and blocking the
-VPC stack's deletion.
 
 ## What a passing run reports
 
