@@ -254,6 +254,64 @@
           - "on_cluster_queries_require_cluster_grant: {{ _lf_setting_value }}"
           - "clickhouse.cluster.enabled:               {{ _lf_cluster_enabled }}{{ '' if _lf_cluster_enabled else '  (migrations run without ON CLUSTER; the Shared database engine replicates DDL)' }}"
 
+# --- teardown ---------------------------------------------------------------
+# Here, before anything is built, the way clickhouse_loadbalancer places its
+# own: with langfuse_state=absent the install flow below never runs (the facts
+# it uses were never set), and nothing here needs the ClickHouse cluster or
+# the Step 13 stack to still exist. Order matters. The load balancer Service
+# goes first -- deleting it is what deletes the NLB and its security-group
+# rules -- then the release, then the namespace, which takes the two
+# PersistentVolumeClaims and so the EBS volumes with it. The ClickHouse
+# database and user are deliberately left alone (see the header).
+
+- name: Teardown (langfuse_state=absent)
+  when: (langfuse_state | default('present')) == 'absent'
+  block:
+    - name: Remove the load balancer Service
+      # The cloud controller removes the NLB when the Service goes, and the
+      # Service stays until that finalizer clears. Takes ~1 minute.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Service
+        name: langfuse-lb
+        namespace: "{{ langfuse.namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Uninstall the release
+      # wait: returns once the release's resources are gone. The PostgreSQL
+      # StatefulSet's volume claim and the chart's generated Secrets
+      # (helm.sh/resource-policy: keep) outlive the release by design and go
+      # with the namespace below.
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: "{{ langfuse.release }}"
+        release_namespace: "{{ langfuse.namespace }}"
+        release_state: absent
+        wait: true
+
+    - name: Remove the namespace and everything left in it
+      # The PVCs go with the namespace and the EBS CSI driver releases the
+      # volumes; the namespace stays Terminating until that is done.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Namespace
+        name: "{{ langfuse.namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+
+    - name: Teardown summary
+      ansible.builtin.debug:
+        msg:
+          - "Langfuse removed: Service langfuse-lb (and its NLB), release {{ langfuse.release }}, namespace {{ langfuse.namespace }} with its PersistentVolumeClaims -- the PostgreSQL and Valkey volumes are gone"
+          - "the ClickHouse database {{ langfuse.clickhouse_database }} and user {{ langfuse.clickhouse_user }} are kept; purge them with --tags lf-db -e langfuse_db_state=absent"
+          - "the Step 13 bucket and IRSA stack are not touched (--tags lf-storage -e langfuse_storage_state=absent); the generated secrets under {{ state_dir | realpath }} are kept and reused by the next --tags lf-app"
+
+    - name: Stop here when tearing down
+      ansible.builtin.meta: end_play
+
 # --- namespace and Secrets ---------------------------------------------------
 # Created by Ansible rather than the chart: the chart references them by name
 # (existingSecret / secretKeyRef / secretRef), so they must exist before the
@@ -406,9 +464,13 @@
   check_mode: false
   when: _lf_present
 
-- name: Note the load balancer hostname
+- name: Note the load balancer hostname and the web Service name
   ansible.builtin.set_fact:
     _lf_host: "{{ (_lf_lb_host.stdout | default('')) | trim }}"
+    # The chart's ClusterIP Service in front of the web pods, named after
+    # Helm's fullname: the release name when it contains the chart name
+    # (langfuse), <release>-langfuse otherwise.
+    _lf_web_svc: "{{ (langfuse.release if 'langfuse' in langfuse.release else langfuse.release ~ '-langfuse') ~ '-web' }}"
 
 - name: Settle the address people will use
   # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname, with the port
@@ -424,7 +486,7 @@
 
 - name: Report the address
   ansible.builtin.debug:
-    msg: "NEXTAUTH_URL: {{ _lf_url }}{{ '' if _lf_present else '  (no load balancer: kubectl port-forward -n ' ~ langfuse.namespace ~ ' svc/langfuse-web 3000:3000)' }}"
+    msg: "NEXTAUTH_URL: {{ _lf_url }}{{ '' if _lf_present else '  (no load balancer: kubectl port-forward -n ' ~ langfuse.namespace ~ ' svc/' ~ _lf_web_svc ~ ' 3000:3000)' }}"
 
 # --- the release -------------------------------------------------------------
 
@@ -594,3 +656,437 @@
         mediaUpload:
           enabled: true
           prefix: "media/"
+
+# --- PostgreSQL role fix, then the waits -------------------------------------
+# The subchart ships a first-boot script that creates the `langfuse` role and
+# hands it the database. It mounts that script at /docker-entrypoint-initdb.d;
+# Chainguard's entrypoint reads /var/lib/postgres/initdb/ instead, so on this
+# image the script never runs, and web and worker crash-loop on "password
+# authentication failed" until the role exists. So: wait for PostgreSQL, do
+# what the script would have done, then wait for the rest. All of it sits in
+# one block whose rescue shows the pods, the Warning events and the web and
+# worker logs -- where the cause of a stuck rollout is actually written.
+
+- name: Wait for the data stores, repair the PostgreSQL role, wait for the app
+  block:
+    - name: Wait for the PostgreSQL and Valkey pods to exist
+      # helm returned without waiting; the StatefulSet and Deployment
+      # controllers create the pods a moment later.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ langfuse.namespace }}
+          - --selector=app.kubernetes.io/instance={{ langfuse.release }},app.kubernetes.io/name={{ item }}
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [postgresql, redis]
+      register: _lf_data_pods
+      until: _lf_data_pods.stdout_lines | length > 0
+      retries: 24
+      delay: 5
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for PostgreSQL and Valkey to be Ready
+      # Image pull, then initdb on the fresh volume (~30 s). The subcharts'
+      # readiness probes are pg_isready and valkey-cli ping, so Ready means
+      # "accepting connections".
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --namespace={{ langfuse.namespace }}
+          - --for=condition=Ready
+          - --timeout=600s
+          - pod
+          - --selector=app.kubernetes.io/instance={{ langfuse.release }},app.kubernetes.io/name={{ item }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [postgresql, redis]
+      changed_when: false
+      check_mode: false
+
+    - name: Name the data-store pods
+      # `pod/<name>`, the form kubectl exec accepts as-is.
+      ansible.builtin.set_fact:
+        _lf_pg_pod: "{{ _lf_data_pods.results[0].stdout_lines | first }}"
+        _lf_valkey_pod: "{{ _lf_data_pods.results[1].stdout_lines | first }}"
+
+    - name: Create the langfuse PostgreSQL role (what the skipped init script would have done)
+      # `kubectl exec -i`: the SQL travels on stdin. The role's password never
+      # leaves the pod: USERDB_PASSWORD is in the container's environment,
+      # wired by the subchart from the Secret langfuse-postgresql-auth the
+      # chart generated, and psql reads it with \getenv -- not from psql's
+      # argv, where `ps` in the pod would show it. The superuser password
+      # rides the same way (PGPASSWORD from POSTGRES_PASSWORD), so the
+      # connection does not depend on pg_hba trusting local sockets. A DO
+      # block cannot see psql variables, hence the session setting in
+      # between. `langfuse` is the chart's default database and role name
+      # (postgresql.auth.*), which the values above leave alone; the subchart
+      # puts the same two values in POSTGRES_DB and USERDB_USER. The marker is
+      # computed before the CREATE so it says what happened; GRANT and ALTER
+      # are idempotent and simply run every time.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - exec
+          - -i
+          - --namespace={{ langfuse.namespace }}
+          - "{{ _lf_pg_pod }}"
+          - --
+          - sh
+          - -c
+          - ': "${USERDB_PASSWORD:?not in the pod environment}"; PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -q -t -A -v ON_ERROR_STOP=1 -h localhost -U postgres -d langfuse'
+        stdin: |
+          \getenv pw USERDB_PASSWORD
+          SELECT set_config('lf.pw', :'pw', false) AS pw_set \gset
+          SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'langfuse')
+                      THEN 'role: exists' ELSE 'role: created' END;
+          DO $lf$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'langfuse') THEN
+              EXECUTE format('CREATE ROLE langfuse LOGIN PASSWORD %L', current_setting('lf.pw'));
+            END IF;
+          END
+          $lf$;
+          GRANT ALL ON DATABASE langfuse TO langfuse;
+          ALTER DATABASE langfuse OWNER TO langfuse;
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_pg_role
+      changed_when: "'role: created' in _lf_pg_role.stdout"
+      check_mode: false
+      # psql echoes a failing statement with its text -- here possibly the
+      # CREATE ROLE with the password in it.
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Wait for the web, then the worker Deployment to be available
+      # The web pods run the PostgreSQL and ClickHouse migrations on start-up,
+      # and the pods that crash-looped before the role existed come back on
+      # the kubelet's backoff (up to five minutes between restarts), so this
+      # is patient. rollout status returns once the Deployment is Available.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment
+          - --namespace={{ langfuse.namespace }}
+          - --selector=app.kubernetes.io/instance={{ langfuse.release }},app={{ item }}
+          - --timeout=900s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [web, worker]
+      changed_when: false
+      check_mode: false
+
+  rescue:
+    - name: Show every pod in the namespace
+      ansible.builtin.command:
+        argv: [kubectl, get, pods, "--namespace={{ langfuse.namespace }}", -o=wide]
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_rescue_pods
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the scheduler's and kubelet's reasons
+      # Warning events carry the actual cause: an image that cannot be
+      # pulled, a volume that will not attach, a probe that keeps failing.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - events
+          - --namespace={{ langfuse.namespace }}
+          - --field-selector=type=Warning
+          - --sort-by=.lastTimestamp
+          - -o=custom-columns=LAST:.lastTimestamp,OBJECT:.involvedObject.name,REASON:.reason,MESSAGE:.message
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _lf_rescue_events
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the web and worker logs
+      # For a crash-looping container this is the last attempt's output --
+      # the migration error or the refused login, in Langfuse's own words.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - --namespace={{ langfuse.namespace }}
+          - --selector=app.kubernetes.io/instance={{ langfuse.release }},app={{ item }}
+          - --tail=40
+          - --prefix
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [web, worker]
+      register: _lf_rescue_logs
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Langfuse did not come up
+      # Only the failed task's name and its one-line message: no_log does not
+      # censor ansible_failed_result, and the role-fix task's output can carry
+      # the password.
+      ansible.builtin.fail:
+        msg:
+          - "failed at: {{ ansible_failed_task.name }} -- {{ ansible_failed_result.msg | default('') }}"
+          - "--- pods ---"
+          - "{{ _lf_rescue_pods.stdout_lines | default([]) }}"
+          - "--- warning events (newest last) ---"
+          - "{{ _lf_rescue_events.stdout_lines | default([]) }}"
+          - "--- web log tail ---"
+          - "{{ _lf_rescue_logs.results[0].stdout_lines | default([]) }}"
+          - "--- worker log tail ---"
+          - "{{ _lf_rescue_logs.results[1].stdout_lines | default([]) }}"
+          - "The release is still installed; fix the cause and re-run --tags lf-app, or tear down with -e langfuse_state=absent."
+
+# --- prove it -----------------------------------------------------------------
+
+- name: List every container image in the namespace
+  # Init containers too: the subcharts' first-boot helpers pull images as well.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ langfuse.namespace }}
+      - -o=jsonpath={range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_images
+  changed_when: false
+  check_mode: false
+
+- name: Assert no container pulls from outside your registry
+  ansible.builtin.assert:
+    that: _lf_images.stdout_lines | reject('search', '^' ~ target_registry) | list | length == 0
+    fail_msg: >-
+      These Langfuse containers do not come from {{ target_registry }}:
+      {{ _lf_images.stdout_lines | reject('search', '^' ~ target_registry) | list | join(', ') }}.
+      Each one needs a Helm override and a mirrored image.
+    success_msg: >-
+      all {{ _lf_images.stdout_lines | length }} containers in {{ langfuse.namespace }}
+      pull from {{ target_registry }}
+
+- name: Read the PostgreSQL and Valkey versions
+  ansible.builtin.command:
+    argv: [kubectl, exec, "--namespace={{ langfuse.namespace }}", "{{ item.pod }}", --, "{{ item.binary }}", --version]
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  loop:
+    - {pod: "{{ _lf_pg_pod }}", binary: postgres}
+    - {pod: "{{ _lf_valkey_pod }}", binary: valkey-server}
+  loop_control:
+    label: "{{ item.binary }}"
+  register: _lf_versions
+  changed_when: false
+  check_mode: false
+
+- name: The data stores are the major versions the images were mirrored for
+  # "postgres (PostgreSQL) 18.6" and "Valkey server v=9.1.2 ...". The majors
+  # are the first run of digits in the mirrored tags (pg18-cg -> 18,
+  # valkey9-cg-dev -> 9), so this follows `versions`.
+  ansible.builtin.assert:
+    that:
+      - _lf_versions.results[0].stdout is search('PostgreSQL\) ' ~ (versions.chainguard_postgres_tag | regex_search('[0-9]+')) ~ '\.')
+      - _lf_versions.results[1].stdout is search('v=' ~ (versions.chainguard_valkey_tag | regex_search('[0-9]+')) ~ '\.')
+    fail_msg: "{{ _lf_versions.results | map(attribute='stdout') | map('trim') | join(' / ') }}"
+    success_msg: "{{ _lf_versions.results | map(attribute='stdout') | map('trim') | join(' / ') }}"
+
+- name: Ask ClickHouse what the migrations created
+  # The web pods ran them before they went Ready. Same exec as the
+  # cluster-mode check above, as the admin.
+  ansible.builtin.command:
+    argv: "{{ _lf_exec + [_lf_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _lf_admin_pw }}\n"
+  vars:
+    _q: "SELECT concat(name, '=', engine) FROM system.tables WHERE database = '{{ langfuse.clickhouse_database }}' ORDER BY name FORMAT TSV"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_ch_tables
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: The migrations landed, on the shared engine
+  # Langfuse declares traces, observations and scores as ReplacingMergeTree;
+  # ClickHouse Private (cloud_mode) creates every MergeTree-family table as
+  # Shared*MergeTree -- the S3-backed, Keeper-coordinated engine -- so the
+  # check is for that prefix. A plain MergeTree here would be a table on one
+  # replica's local disk that the others cannot read.
+  ansible.builtin.assert:
+    that:
+      - _lf_ch_tables.stdout_lines | length > 0
+      - _lf_ch_missing | length == 0
+      - _lf_ch_unshared | length == 0
+    fail_msg: >-
+      database {{ langfuse.clickhouse_database }}: {{ _lf_ch_tables.stdout_lines | length }} table(s);
+      {{ 'missing: ' ~ (_lf_ch_missing | join(', ')) ~ '; ' if _lf_ch_missing | length > 0 else '' }}
+      {{ 'not on a Shared*MergeTree engine: ' ~ (_lf_ch_unshared | join(', ')) if _lf_ch_unshared | length > 0 else '' }}
+    success_msg: >-
+      database {{ langfuse.clickhouse_database }}: {{ _lf_ch_tables.stdout_lines | length }} tables,
+      {{ _lf_ch_core_lines | join(', ') }}
+  vars:
+    _lf_ch_core: [traces, observations, scores]
+    _lf_ch_core_lines: "{{ _lf_ch_tables.stdout_lines | select('match', '^(' ~ (_lf_ch_core | join('|')) ~ ')=') | list }}"
+    _lf_ch_missing: "{{ _lf_ch_core | difference(_lf_ch_core_lines | map('regex_replace', '=.*$', '') | list) }}"
+    _lf_ch_unshared: "{{ _lf_ch_core_lines | reject('search', '=Shared\\w*MergeTree$') | list }}"
+
+# --- the load balancer's view (skipped when type is none) ----------------------
+# Copied from Step 12: find the NLB behind the hostname, then wait for its
+# target group to see the web pod. Instance targets: every node is registered
+# and only the ones running a web pod answer the health-check NodePort, so
+# "healthy >= web replicas" is the steady state, not a partial failure.
+
+- name: Find the NLB behind that hostname
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-load-balancers
+      - --query=LoadBalancers[?DNSName=='{{ _lf_host }}'].LoadBalancerArn | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lf_lb_arn
+  until: _lf_lb_arn.stdout | trim not in ['', 'None']
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: _lf_present
+
+- name: List the target groups (one, for the http port)
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-groups
+      - --load-balancer-arn={{ _lf_lb_arn.stdout | trim }}
+      - --query=TargetGroups[].TargetGroupArn
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lf_lb_tgs
+  changed_when: false
+  check_mode: false
+  when: _lf_present
+
+- name: Wait for the web node(s) to pass the NLB health check
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-health
+      - --target-group-arn={{ item }}
+      - --query=length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  loop: "{{ _lf_lb_tgs.stdout.split() if _lf_present else [] }}"
+  register: _lf_lb_health
+  until: (_lf_lb_health.stdout | trim | int) >= (langfuse.web.replicas | int)
+  retries: 30
+  delay: 10
+  changed_when: false
+  check_mode: false
+  when: _lf_present
+
+# --- the health check ---------------------------------------------------------
+# From a pod on the operator nodes, with the mirrored server image for its
+# wget (the same probe Step 12 uses). Through the web Service is the hard
+# check: that is Langfuse answering. Through the NLB is a soft one: with
+# externalTrafficPolicy Local a node cannot reach its own web pod through the
+# NLB (the hairpin), so the probe prefers a node without one -- preferred,
+# not required, or with a web pod on every operator node it would never
+# schedule -- and the outcome is reported rather than asserted. A fresh NLB
+# also drops connections for a minute or two, hence the retries.
+
+- name: Probe Langfuse from inside the cluster (and through the NLB when there is one)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      kubectl delete pod lf-probe --namespace={{ langfuse.namespace }} --ignore-not-found --wait >/dev/null
+      kubectl apply -f - >/dev/null <<'YAML'
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: lf-probe, namespace: {{ langfuse.namespace }}}
+      spec:
+        restartPolicy: Never
+        affinity:
+          nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: clickhouseGroup, operator: DoesNotExist}]}]}}
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector: {matchLabels: {app.kubernetes.io/instance: {{ langfuse.release }}, app: web}}
+        containers:
+          - name: probe
+            image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
+            env:
+              - {name: WEB, value: "http://{{ _lf_web_svc }}:3000"}
+              - {name: NLB, value: "{{ _lf_url if _lf_present else '' }}"}
+            command: ["sh", "-c"]
+            args:
+              - |
+                code() { c=$(wget -qS -O /dev/null --timeout=5 --tries=1 "$1" 2>&1 | awk '/^ *HTTP\//{print $2; exit}'); echo "${c:-none}"; }
+                echo "health: $(code "$WEB/api/public/health")"
+                if [ -n "$NLB" ]; then echo "nlb: $(code "$NLB/api/public/health")"; fi
+      YAML
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lf-probe --namespace={{ langfuse.namespace }} --timeout=120s >/dev/null
+      kubectl logs pod/lf-probe --namespace={{ langfuse.namespace }}
+      kubectl delete pod lf-probe --namespace={{ langfuse.namespace }} --wait=false >/dev/null
+    executable: /bin/bash          # pipefail
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _lf_probe
+  # Retried while either path is not yet answering 200; an exhausted until:
+  # does not fail here (failed_when: false), the assert below decides.
+  until: "_lf_probe.rc == 0 and 'health: 200' in _lf_probe.stdout and (not _lf_present or 'nlb: 200' in _lf_probe.stdout)"
+  retries: 6
+  delay: 20
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Langfuse must answer through its Service
+  ansible.builtin.assert:
+    that: "_lf_probe.rc == 0 and 'health: 200' in _lf_probe.stdout"
+    fail_msg: "GET http://{{ _lf_web_svc }}:3000/api/public/health did not return 200: {{ (_lf_probe.stdout_lines + _lf_probe.stderr_lines) | join(' | ') }}"
+    success_msg: "GET http://{{ _lf_web_svc }}:3000/api/public/health -> 200"
+
+- name: Note how the NLB path did
+  ansible.builtin.set_fact:
+    _lf_nlb_note: >-
+      {{ 'answers 200 from inside the VPC'
+         if 'nlb: 200' in _lf_probe.stdout
+         else 'not confirmed from inside the cluster after ' ~ (_lf_probe.attempts | default(1)) ~ ' tries ('
+              ~ (_lf_probe.stdout_lines | select('match', '^nlb:') | first | default('nlb: no answer'))
+              ~ ') -- the hairpin from a node that also runs a web pod, the NLB still settling, or a langfuse.url the pod network cannot resolve; try from your VPN or a bastion' }}
+  when: _lf_present
+
+# --- report -------------------------------------------------------------------
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "url:        {{ _lf_url }}"
+      - "exposure:   {{ ('no load balancer -- kubectl port-forward -n ' ~ langfuse.namespace ~ ' svc/' ~ _lf_web_svc ~ ' 3000:3000, then open ' ~ _lf_url)
+                        if not _lf_present else
+                        (langfuse.load_balancer.type ~ ' NLB ' ~ _lf_host ~ ', allowed from ' ~ (_lf_sources | join(', ')) ~ '; '
+                         ~ (_lf_lb_health.results | map(attribute='stdout') | map('trim') | join('/')) ~ ' healthy target(s); ' ~ _lf_nlb_note) }}"
+      - "login:      {{ langfuse.init.user_email }} -- password in {{ langfuse_state_files.init_user_password_file | realpath }}"
+      - "api keys:   {{ langfuse_state_files.public_key_file | realpath }} (public), {{ langfuse_state_files.secret_key_file | realpath }} (secret) -- project {{ langfuse.init.project_id }}"
+      - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:8123 as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"
+      - "smoke test: scripts/langfuse-smoke.sh   (posts a trace and reads it back from ClickHouse)"
+      - "teardown:   ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent   (keeps the ClickHouse data; --tags lf-db -e langfuse_db_state=absent purges it)"
