@@ -16,7 +16,7 @@
 - name: Read the admin password
   ansible.builtin.set_fact:
     _vf_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: List the server pods
   ansible.builtin.command:
@@ -43,80 +43,103 @@
   ansible.builtin.set_fact:
     _vf_a: "{{ _vf_pods.stdout_lines[0] }}"
     _vf_b: "{{ _vf_pods.stdout_lines[1] }}"
-    # The clickhouse-client inside the pod; the password goes via env, never
-    # on the argv where `ps` on the node could see it.
-    _vf_exec: ["kubectl", "exec", "--namespace={{ clickhouse.namespace }}", "-c", "clickhouse-server"]
+    # `kubectl exec -i`: the password travels on stdin, which kubectl forwards
+    # into the container. NOT via `environment:` -- that sets the environment
+    # of the local kubectl process, and kubectl exec does not carry it across
+    # (the first run failed exactly this way, with an empty password). And not
+    # on argv, where `ps` on the node would show it. The container is named
+    # c-<cluster>-server; the pod label says clickhouse-server, the container
+    # does not.
+    _vf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
+    # $0 = user, $1 = query; the password is the first line of stdin. The
+    # client then gets /dev/null as stdin: `kubectl exec -i` leaves the stream
+    # attached after the read, and clickhouse-client treats an open stdin on
+    # an INSERT as external data -- which async inserts refuse:
+    #   Code: 48. Processing async inserts with both inlined and external data
+    #   (from stdin or infile) is not supported. (NOT_IMPLEMENTED)
+    _vf_sh: 'IFS= read -r pw; exec clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null'
 
 - name: Version and host, from replica A
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT version(), hostName(), getMacro(''replica'')\"'] }}"
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'SELECT version(), hostName() FORMAT TSV'] }}"
+    stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    CH_USER: "{{ clickhouse.admin_username }}"
-    CH_PASSWORD: "{{ _vf_pw }}"
   register: _vf_version
   changed_when: false
   check_mode: false
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Start from nothing
+  # A previous run that failed part-way leaves step11 behind, and then the
+  # exact-count check below is wrong for the wrong reason. SYNC waits for the
+  # drop to complete on every replica before returning.
+  ansible.builtin.command:
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
+    stdin: "{{ _vf_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Create a table and insert on replica A
   # SharedMergeTree is the engine ClickHouse Private uses: parts live in S3
   # once, and every replica sees them through Keeper. The database engine is
   # the Shared Catalog default the chart enables, so no ON CLUSTER needed.
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --multiquery --query \"$CH_QUERY\"'] }}"
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
-    CH_USER: "{{ clickhouse.admin_username }}"
-    CH_PASSWORD: "{{ _vf_pw }}"
-    CH_QUERY: |
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _vf_pw }}\n"
+  vars:
+    _q: |
       CREATE DATABASE IF NOT EXISTS step11;
       CREATE TABLE IF NOT EXISTS step11.probe (id UInt32, note String, at DateTime DEFAULT now())
         ENGINE = SharedMergeTree ORDER BY id;
       INSERT INTO step11.probe (id, note) VALUES (1, 'written on {{ _vf_a }}'), (2, 'via S3 + Keeper'), (3, 'read elsewhere');
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
   changed_when: true
   check_mode: false
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Read it back from replica B
   # Parts written by A become visible to B once Keeper propagates the
   # metadata -- normally sub-second, retried for a minute just in case.
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT count(), max(id), hostName() FROM step11.probe FORMAT TSV\"'] }}"
+    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'SELECT count(), max(id), hostName() FROM step11.probe FORMAT TSV'] }}"
+    stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    CH_USER: "{{ clickhouse.admin_username }}"
-    CH_PASSWORD: "{{ _vf_pw }}"
   register: _vf_read
   until: _vf_read.rc == 0 and (_vf_read.stdout.split('\t')[0] | int) == 3
   retries: 12
   delay: 5
   changed_when: false
   check_mode: false
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Where the data physically lives
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"SELECT disk_name, sum(rows) AS rows, count() AS parts FROM system.parts WHERE database = ''step11'' AND active GROUP BY disk_name FORMAT TSV\"'] }}"
+    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _vf_pw }}\n"
+  vars:
+    _q: "SELECT disk_name, sum(rows) AS rows, count() AS parts FROM system.parts WHERE database = 'step11' AND active GROUP BY disk_name FORMAT TSV"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    CH_USER: "{{ clickhouse.admin_username }}"
-    CH_PASSWORD: "{{ _vf_pw }}"
   register: _vf_parts
   changed_when: false
   check_mode: false
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Clean up
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', 'clickhouse-client --user \"$CH_USER\" --password \"$CH_PASSWORD\" --query \"DROP DATABASE IF EXISTS step11 SYNC\"'] }}"
+    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
+    stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
-    CH_USER: "{{ clickhouse.admin_username }}"
-    CH_PASSWORD: "{{ _vf_pw }}"
   changed_when: true
   check_mode: false
-  no_log: true
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Report
   ansible.builtin.debug:

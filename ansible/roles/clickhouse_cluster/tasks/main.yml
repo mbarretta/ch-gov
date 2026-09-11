@@ -13,8 +13,8 @@
 # metadata in Keeper) and get no volume at all.
 #
 # Teardown: ansible-playbook deploy.yml --tags cluster -e cluster_state=absent
-#   Removes the release, the namespace and Keeper's volumes. The S3 data under
-#   clickhouse.s3_key_prefix is NOT touched -- delete it by hand if you mean it.
+#   Removes the release, the namespace and Keeper's volumes. The S3 data is NOT
+#   touched -- scripts/s3-purge-cluster-data.sh deletes it if you mean it.
 
 # --- preconditions ---------------------------------------------------------
 # Each of these fails later, and more confusingly, if left unchecked: a CR
@@ -176,6 +176,14 @@
     create_namespace: true
     release_state: "{{ cluster_state | default('present') }}"
     wait: false           # we wait on the operator's objects below, with diagnostics
+    # Helm 4 applies server-side, and the operator writes to the same CR under
+    # its own field manager ("manager"). The second `helm upgrade` then fails:
+    #   conflict with "manager" using clickhouse.com/v1: .spec.featureFlags.enableSecurePorts
+    # This is the Helm-v4-with-an-operator case, not a mistake: the chart is
+    # the source of truth for the fields it renders, so it takes them back.
+    # kubernetes.core >= 6.5 exposes the flag; older versions have no way to
+    # pass it, which is one reason Part 1 pins the collection floor.
+    force_conflicts: true
     values:
       account:
         username: "{{ clickhouse.admin_username }}"
@@ -211,7 +219,15 @@
         arm64: "{{ not fips }}"
         podPolicy:
           nodeSelector:
-            clickhouseGroup: server
+            # WITH the -arm64 suffix on ARM builds, matching the node labels
+            # from Step 5 exactly. The chart's comment says to leave the
+            # suffix off because a mutating webhook appends it -- but Step 8
+            # disables webhooks (per the tutorial), and the first run proved
+            # the operator does not do it either: every Keeper pod sat Pending
+            # with "8 node(s) didn't match Pod's node affinity/selector" and a
+            # selector of plain `keeper`. The selector has to say what the
+            # nodes say.
+            clickhouseGroup: "server{{ node_label_suffix }}"
           resources:
             limits:   {cpu: "{{ clickhouse.server.cpu }}", memory: "{{ clickhouse.server.memory }}"}
             requests: {cpu: "{{ clickhouse.server.cpu }}", memory: "{{ clickhouse.server.memory }}"}
@@ -256,7 +272,7 @@
         arm64: "{{ not fips }}"
         podPolicy:
           nodeSelector:
-            clickhouseGroup: keeper
+            clickhouseGroup: "keeper{{ node_label_suffix }}"   # see server above
           resources:
             limits:   {cpu: "{{ clickhouse.keeper.cpu }}", memory: "{{ clickhouse.keeper.memory }}"}
             requests: {cpu: "{{ clickhouse.keeper.cpu }}", memory: "{{ clickhouse.keeper.memory }}"}
@@ -269,11 +285,52 @@
         loggerConfig:
           loggerLevel: "{{ clickhouse.keeper.log_level }}"
   register: _cl_release
-  no_log: true            # the values carry both password hashes
+  # The values carry both password hashes, so the result is hidden -- which
+  # also hides the error when the install fails. Re-run with
+  # -e show_secrets=true to see it (the hashes are sha256, not the passwords).
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Report the release
   ansible.builtin.debug:
     msg: "release {{ clickhouse.cluster_name }} in {{ clickhouse.namespace }}: {{ _cl_release.status.status | default(cluster_state | default('present')) }}"
+
+- name: Find Pending pods left on a stale StatefulSet revision
+  # The operator's StatefulSets use updateStrategy OnDelete, so a changed pod
+  # template (a corrected nodeSelector, say) is NOT rolled out to existing
+  # pods. A pod that never scheduled cannot be fixed by anything but deletion,
+  # and the operator defers its own evictions until every Keeper PVC is bound
+  # -- which a Pending pod's WaitForFirstConsumer PVC never will be. That is
+  # a deadlock, so we break it: delete Pending pods whose revision hash is not
+  # the StatefulSet's current one. Running pods are never touched.
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      kubectl get pods --namespace={{ clickhouse.namespace }}
+      --field-selector=status.phase=Pending
+      -o=jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.controller-revision-hash}{" "}{.metadata.ownerReferences[0].name}{"\n"}{end}'
+      | while read -r pod rev sts; do
+          [ -n "$sts" ] || continue;
+          cur="$(kubectl get statefulset "$sts" --namespace={{ clickhouse.namespace }} -o=jsonpath='{.status.updateRevision}' 2>/dev/null)";
+          [ -n "$cur" ] && [ "$rev" != "$cur" ] && echo "$pod";
+        done
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_stale
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (cluster_state | default('present')) != 'absent'
+
+- name: Delete them so the StatefulSet recreates them from the current template
+  ansible.builtin.command:
+    argv: "{{ ['kubectl', 'delete', 'pod', '--namespace=' ~ clickhouse.namespace, '--wait=false'] + _cl_stale.stdout_lines }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: true
+  check_mode: false
+  when:
+    - (cluster_state | default('present')) != 'absent'
+    - _cl_stale.stdout_lines | default([]) | length > 0
 
 # --- teardown ---------------------------------------------------------------
 # helm uninstall removes the CR; the operator then deletes the StatefulSets.
@@ -311,8 +368,8 @@
 - name: Teardown summary
   ansible.builtin.debug:
     msg:
-      - "cluster removed. S3 data remains at s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }}/"
-      - "delete it only on purpose: aws s3 rm s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }} --recursive --profile {{ aws.target_profile }}"
+      - "cluster removed. S3 data remains in s3://{{ clickhouse.bucket_name }} under ch-s3-*/{{ clickhouse.s3_key_prefix | regex_replace('^ch-s3-', '') }}/ (sharded prefixes -- a plain `aws s3 rm` of one prefix will not find it)"
+      - "delete it only on purpose: scripts/s3-purge-cluster-data.sh"
   when: (cluster_state | default('present')) == 'absent'
 
 - name: Stop here when tearing down
@@ -366,14 +423,17 @@
       check_mode: false
 
     - name: Wait for the Keeper quorum ({{ clickhouse.keeper.replicas }} replicas Ready)
+      # Not `kubectl rollout status`: the operator creates the StatefulSet with
+      # updateStrategy OnDelete (it manages pod replacement itself), and
+      # rollout status refuses those outright. Watch the status field instead.
       ansible.builtin.command:
         argv:
           - kubectl
-          - rollout
-          - status
-          - statefulset/c-{{ clickhouse.cluster_name }}-keeper
+          - wait
           - --namespace={{ clickhouse.namespace }}
+          - --for=jsonpath={.status.readyReplicas}={{ clickhouse.keeper.replicas }}
           - --timeout=600s
+          - statefulset/c-{{ clickhouse.cluster_name }}-keeper
       environment:
         KUBECONFIG: "{{ kubeconfig_path }}"
       changed_when: false
@@ -511,7 +571,10 @@
       - pods
       - --namespace={{ clickhouse.namespace }}
       - --selector=app.kubernetes.io/name=clickhouse-server
-      - -o=jsonpath={range .items[*]}{.metadata.name}{" sa="}{.spec.serviceAccountName}{" role="}{range .spec.containers[?(@.name=="clickhouse-server")].env[?(@.name=="AWS_ROLE_ARN")]}{.value}{end}{"\n"}{end}
+      # The server container is named c-<cluster>-server, not clickhouse-server
+      # (the label says clickhouse-server; the container does not). It is the
+      # pod's only container, so index it rather than name it.
+      - -o=jsonpath={range .items[*]}{.metadata.name}{" sa="}{.spec.serviceAccountName}{" role="}{.spec.containers[0].env[?(@.name=="AWS_ROLE_ARN")].value}{"\n"}{end}
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
   register: _cl_irsa
@@ -528,18 +591,23 @@
 
 - name: Confirm data is landing in S3 under the key prefix
   # The definitive end-to-end proof: the servers wrote to the bucket, which
-  # means the IRSA token was minted, exchanged and accepted. On a fresh
-  # cluster this is metadata and system tables, and it appears within a
-  # minute of the servers becoming Ready.
+  # means the IRSA token was minted, exchanged and accepted.
+  #
+  # Where to look is not obvious. `enableKeyTemplate` (on by default) makes
+  # ClickHouse shard keys for S3 throughput: the layout is
+  #   ch-s3-<3 hex chars>/<uuid>/mergetree/...      (data parts)
+  #   ch-s3-<3 hex chars>/<uuid>/system/<pod>/...   (system tables)
+  # so nothing lives under ch-s3-<uuid>/ itself. Filter on the uuid instead.
+  # On a fresh cluster ~1,800 objects appear within a minute of Ready.
   ansible.builtin.command:
     argv:
       - aws
       - s3api
       - list-objects-v2
       - --bucket={{ clickhouse.bucket_name }}
-      - --prefix={{ clickhouse.s3_key_prefix }}/
-      - --max-items=1
-      - --query=KeyCount
+      - --prefix=ch-s3-
+      - --max-keys=1000
+      - --query=length(Contents[?contains(Key, '{{ clickhouse.s3_key_prefix | regex_replace('^ch-s3-', '') }}')] || `[]`)
       - --output=text
       - --profile={{ aws.target_profile }}
   register: _cl_s3
@@ -569,7 +637,7 @@
       - "cluster:   c-{{ clickhouse.cluster_name }} in {{ clickhouse.namespace }}"
       - "server:    {{ clickhouse.server.replicas }} x {{ versions.server }}{{ fips_suffix }}  ({{ clickhouse.server.cpu }} CPU / {{ clickhouse.server.memory }}, cache {{ clickhouse.server.cache_disk_size }})"
       - "keeper:    {{ clickhouse.keeper.replicas }} x {{ versions.keeper }}{{ fips_suffix }}  ({{ clickhouse.keeper.cpu }} CPU / {{ clickhouse.keeper.memory }}, {{ clickhouse.keeper.disk }} EBS each)"
-      - "s3:        s3://{{ clickhouse.bucket_name }}/{{ clickhouse.s3_key_prefix }}/  -- objects present"
+      - "s3:        {{ _cl_s3.stdout | trim }}+ objects in s3://{{ clickhouse.bucket_name }} under ch-s3-*/{{ clickhouse.s3_key_prefix | regex_replace('^ch-s3-', '') }}/"
       - "admin:     user '{{ clickhouse.admin_username }}', password in {{ admin_password_file | realpath }}"
       - "next:      --tags preflight (Step 10), then --tags verify (Step 11)"
 

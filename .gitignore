@@ -12,3 +12,6 @@ kubeconfig*
 # project-local python for ansible modules (recreate with part1-setup.sh)
 .venv/
 state/skopeo-auth.json
+
+# kubectl preflight writes a support bundle into its cwd; the role runs from state/ but belt and braces
+preflightbundle-*.tar.gz

@@ -107,6 +107,9 @@
       - --interactive=false
       - --format=human
       - "{{ preflight_dir }}/preflight.yaml"
+    # The plugin also writes a support bundle (preflightbundle-<ts>.tar.gz)
+    # into its cwd. Run from state/ so it lands somewhere gitignored.
+    chdir: "{{ preflight_dir }}"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
   register: _pf_run

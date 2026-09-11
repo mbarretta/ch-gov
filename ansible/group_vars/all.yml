@@ -184,9 +184,12 @@ source_registry: "{{ aws.source_ecr_account_id }}.dkr.ecr.{{ aws.source_ecr_regi
 node_ami_type: "{{ 'AL2023_x86_64_STANDARD' if fips else 'AL2023_ARM_64_STANDARD' }}"
 
 # The tutorial labels ARM64 node groups `clickhouseGroup: keeper-arm64` /
-# `server-arm64`. The cluster chart's nodeSelector nonetheless stays
-# `clickhouseGroup: keeper` / `server` -- the operator appends the suffix
-# itself. That mismatch is intentional; do not "fix" either side.
+# `server-arm64` and leaves the chart's nodeSelector at plain `keeper` /
+# `server`, relying on a mutating webhook to append the suffix. Step 8
+# disables webhooks (also per the tutorial), and the first Step 9 run proved
+# nothing else appends it: Keeper pods sat Pending with a bare selector. So
+# the clickhouse_cluster role puts the suffix in the selector itself, from
+# this same variable. Part 4 has the story.
 node_label_suffix: "{{ '' if fips else '-arm64' }}"
 
 # FIPS deployments must pull over FIPS-validated endpoints, which use a
