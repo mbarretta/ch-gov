@@ -36,7 +36,7 @@ export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 # partway into a run as an unrelated-looking module failure, sometimes after
 # something has already been created.
 if ! aws sts get-caller-identity --query Arn --output text >/dev/null 2>&1; then
-  die "not authenticated -- run: aws sso login --profile $AWS_PROFILE"
+  die "not authenticated -- run: AWS_CONFIG_FILE=$AWS_CONFIG_FILE aws sso login --profile $AWS_PROFILE"
 fi
 
 # --- playbook selection ----------------------------------------------------

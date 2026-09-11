@@ -38,7 +38,8 @@ step "1/6  Required CLI tools"
 #               this is the heart of the airgap model
 #   jq       -- parses the JSON that aws/kubectl emit
 #   python3  -- Ansible's runtime; 3.12+ (ansible-core 2.21 requires it)
-#   ansible  -- runs the 14-phase deployment playbook
+#   ansible  -- runs the deployment playbook
+#   krew     -- installs the `kubectl preflight` plugin used in Step 10
 BREW_PKGS=(awscli kubectl skopeo jq ansible)
 MISSING=()
 for t in aws kubectl skopeo jq ansible; do have "$t" || MISSING+=("$t"); done
@@ -53,6 +54,23 @@ else
   info "installing: ${BREW_PKGS[*]}"
   brew install "${BREW_PKGS[@]}" >/dev/null 2>&1 || warn "brew install reported errors; verification below is authoritative"
   ok "base tools installed"
+fi
+
+# kubectl preflight (Step 10) is a kubectl plugin from the Troubleshoot
+# project, distributed through krew rather than Homebrew. krew itself is a
+# brew formula; the plugin lands in ~/.krew/bin, which lib/common.sh puts on
+# PATH. It runs on the laptop, so nothing here needs mirroring into ECR.
+if kubectl preflight version >/dev/null 2>&1; then
+  ok "kubectl preflight present ($(kubectl preflight version 2>/dev/null | head -1))"
+elif ((CHECK_ONLY)); then
+  fail "kubectl preflight plugin missing (brew install krew && kubectl krew install preflight)"; note_problem
+else
+  have kubectl-krew || brew install krew >/dev/null 2>&1 || true
+  if kubectl krew install preflight >/dev/null 2>&1 && kubectl preflight version >/dev/null 2>&1; then
+    ok "kubectl preflight installed via krew"
+  else
+    fail "could not install kubectl preflight -- try: brew install krew && kubectl krew install preflight"; note_problem
+  fi
 fi
 
 # Presence is not enough for Python. ansible-core 2.21 declares
@@ -164,6 +182,7 @@ vrow skopeo  "$(skopeo --version 2>/dev/null | awk '{print $3}')"            "v1
 vrow jq      "$(jq --version 2>/dev/null)"                                   "any"
 vrow python3 "$(py_version)"                                                 "${PY_MIN}+"
 vrow ansible "$(ansible --version </dev/null 2>/dev/null | head -1 | tr -d '[]' | awk '{print $3}')" "2.21+ (sets py floor)"
+vrow preflight "$(kubectl preflight version 2>/dev/null | head -1 | awk '{print $NF}')"  "any (Step 10)"
 
 # ===========================================================================
 step "5/6  AWS profiles"
@@ -175,12 +194,12 @@ step "5/6  AWS profiles"
 check_profile() {
   local p="$1" desc="$2" arn
   if ! aws configure list-profiles 2>/dev/null | grep -qx "$p"; then
-    fail "profile '$p' not defined in ~/.aws/config ($desc)"; note_problem; return 1
+    fail "profile '$p' not defined in $AWS_CONFIG_FILE ($desc)"; note_problem; return 1
   fi
   if arn="$(aws sts get-caller-identity --profile "$p" --query Arn --output text 2>/dev/null)"; then
     ok "$p -> $arn"
   else
-    fail "profile '$p' will not authenticate. Run: aws sso login --profile $TARGET_PROFILE"
+    fail "profile '$p' will not authenticate. Run: AWS_CONFIG_FILE=$AWS_CONFIG_FILE aws sso login --profile $TARGET_PROFILE"
     note_problem; return 1
   fi
 }

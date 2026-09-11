@@ -29,7 +29,7 @@ if command -v aws >/dev/null 2>&1; then
   if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then
     printf 'identity: %s\n' "$arn"
   else
-    printf 'not logged in -- run: aws sso login --profile %s\n' "$AWS_PROFILE"
+    printf 'not logged in -- run: AWS_CONFIG_FILE=%s aws sso login --profile %s\n' "$AWS_CONFIG_FILE" "$AWS_PROFILE"
   fi
 fi
 unset _ch_root

@@ -98,6 +98,11 @@ brew unlink helm && brew link --overwrite --force helm@3
   `community.general`) — these teach Ansible to speak CloudFormation, EC2, and
   Kubernetes. Without them the playbook dies on its first task with
   "module not found".
+- **`kubectl preflight` plugin** (via `krew`) — the Troubleshoot-project
+  runner behind Step 10's preflight checks. It is a kubectl plugin, not a
+  Homebrew formula, so `part1-setup.sh` installs `krew` from Homebrew and the
+  plugin through it; `scripts/lib/common.sh` puts `~/.krew/bin` on `PATH`. It
+  runs on your laptop against the cluster API, so nothing needs mirroring.
 
 ---
 

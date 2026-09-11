@@ -4,6 +4,9 @@
 
 # Homebrew's bin must be on PATH even under non-login shells (cron, CI, agents).
 [[ ":$PATH:" == *":/opt/homebrew/bin:"* ]] || export PATH="/opt/homebrew/bin:$PATH"
+# krew installs kubectl plugins (we use `kubectl preflight`, Step 10) under
+# ~/.krew/bin, which nothing adds to PATH for you.
+[[ ":$PATH:" == *":$HOME/.krew/bin:"* ]] || export PATH="$HOME/.krew/bin:$PATH"
 
 # This project keeps its AWS config in-repo rather than in ~/.aws, so the whole
 # setup is portable. Point the CLI at it unless the caller already chose a file.
