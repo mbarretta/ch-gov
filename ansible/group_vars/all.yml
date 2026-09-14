@@ -383,10 +383,16 @@ langfuse:
     # --cacert state/langfuse-tls-cert.pem, a browser warning to click through,
     # the SDK's CA environment variable. Set port to 443 with it, so the URL
     # stays https://<hostname> with no port. Off by default: with false
-    # nothing here changes. Going back to false after a TLS deploy: tear down
-    # first (-e langfuse_state=absent) or remove the three aws-load-balancer-ssl-*
-    # annotations from Service langfuse-lb by hand -- a plain re-run keeps
-    # annotations it did not apply.
+    # nothing here changes. Going back to false after a TLS deploy: the clean
+    # way is to tear down first (-e langfuse_state=absent) and re-run. The
+    # by-hand route is removing the three aws-load-balancer-ssl-* annotations
+    # from Service langfuse-lb AND switching the listener back yourself:
+    #   aws elbv2 modify-listener --listener-arn <listener-arn> --protocol TCP
+    # (omit --certificates and --ssl-policy; AWS removes those TLS properties
+    # when the protocol changes to TCP). Both steps are needed: a plain re-run
+    # keeps annotations it did not apply, and the cloud controller cannot
+    # change a listener's protocol, so the listener stays TLS until you change
+    # it. docs/part-6-langfuse.md section 9 has the details.
     tls: false
     # Validity of the self-signed certificate in days. It is regenerated only
     # when missing or when the NLB hostname changes, not on expiry.
