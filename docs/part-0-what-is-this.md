@@ -173,7 +173,10 @@ ClickHouse cluster you just built as the place it keeps those records. It is
 the demo of "ClickHouse Government holds Langfuse's traces": one script posts
 a trace to Langfuse and reads it back out of ClickHouse. The steps, the two
 places Chainguard's images differ from the ones the Langfuse chart expects,
-the costs and the teardown rules are in **Part 6**.
+the costs and the teardown rules are in **Part 6**. Its web address is plain
+HTTP unless you also set `langfuse.load_balancer.tls: true`, which has its
+load balancer encrypt the connection with a certificate the deployment makes
+itself — Part 6 §9 says what that does and does not give you.
 
 ## 6. How to deploy it with this project
 
@@ -345,7 +348,7 @@ script handles them:
   in the ClickHouse cluster and its two disks are EBS volumes, so removing it
   needs the operator and the EBS driver alive — the cluster and the nodes
   still up. `down.sh` runs it first, only when it exists, and even if you
-  have already switched `langfuse.enabled` back to `false`. Part 6 §12 has
+  have already switched `langfuse.enabled` back to `false`. Part 6 §13 has
   the details, including the separate command that purges its data.
 
 ### Up again

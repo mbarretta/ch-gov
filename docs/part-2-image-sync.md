@@ -167,7 +167,12 @@ than the first are preserved as *real newlines*, which silently breaks the
 pipe — and a broken pipe makes `get-login-password`'s stdout become the task's
 stdout, dumping a live registry token into the log. We hit exactly this. The
 fix: two `command` tasks passing the token via `stdin`, which keeps it out of
-argv, out of the process table, and out of the log.
+argv, out of the process table, and out of the log. The `assert` that checks
+both logins loops over a token-free projection of their results (name,
+registry, `rc`, `stderr`) rather than the raw results, which nest the token,
+so it needs no `no_log` and nothing it can print — at any verbosity, or with
+`-e show_secrets=true` — contains the token; `show_secrets` reveals passwords
+only.
 
 **Where the skopeo credentials go.** `state/skopeo-auth.json`, not
 `~/.config/containers/auth.json`, keeping the project self-contained. It holds

@@ -384,7 +384,7 @@ langfuse:
     # the SDK's CA environment variable. Set port to 443 with it, so the URL
     # stays https://<hostname> with no port. Off by default: with false
     # nothing here changes. Going back to false after a TLS deploy: tear down
-    # first (-e langfuse_state=absent) or remove the two aws-load-balancer-ssl-*
+    # first (-e langfuse_state=absent) or remove the three aws-load-balancer-ssl-*
     # annotations from Service langfuse-lb by hand -- a plain re-run keeps
     # annotations it did not apply.
     tls: false

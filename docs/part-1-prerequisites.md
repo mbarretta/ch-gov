@@ -350,7 +350,10 @@ Set it to `true` and `up.sh` appends the optional Langfuse steps
 URL at the end, and `down.sh` puts `lf-app` first in its default plan (and
 `lf-db` and `lf-storage` in `--all`) — but only when there is a Langfuse
 release, namespace or stack to remove, and whether or not the switch is still
-`true` at teardown time. Part 6 covers the steps themselves.
+`true` at teardown time. Part 6 covers the steps themselves. A second
+Langfuse switch, `langfuse.load_balancer.tls`, has that load balancer
+terminate TLS with a self-signed certificate; neither script changes for it
+beyond the address `up.sh` prints becoming `https://` — Part 6 §9.
 
 `down.sh` exists because teardown is **not** simply `up.sh` backwards. Three
 dependencies point the other way — four with Langfuse — and getting any of

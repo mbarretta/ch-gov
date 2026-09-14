@@ -554,9 +554,10 @@
 # generated secrets and are made again only when missing or when the SAN no
 # longer names the current hostname. ACM gets the certificate by Name tag
 # (the same body maps to the same ARN and reports ok; a regenerated one is
-# re-imported under that ARN), and the Service is patched with the two
-# annotations the in-tree cloud controller reads: it rebuilds the listener as
-# TLS, the target stays plain TCP to the web pod's 3000. The openssl CLI
+# re-imported under that ARN), the Service is patched with the three ssl
+# annotations the in-tree cloud controller reads, and the listener is
+# switched to TLS by this role (the controller cannot change its protocol;
+# see below); the target stays plain TCP to the web pod's 3000. The openssl CLI
 # rather than community.crypto: the venv has no cryptography module.
 
 - name: Terminate TLS at the load balancer
