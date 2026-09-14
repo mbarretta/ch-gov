@@ -21,7 +21,9 @@ confirmed by the user before this unattended run; no user was present to
 re-confirm at the end, so the default stands. The switch was `true` only for
 the live steps below and was set back before the final commit.
 
-The eight sections follow the runbook order.
+The eight sections follow the runbook order. A second live run, on
+2026-09-14, verified TLS termination at the Langfuse NLB; it is recorded
+at the end, under [Live run 2](#live-run-2--2026-09-14-tls-at-the-langfuse-nlb).
 
 ---
 
@@ -846,3 +848,452 @@ creates), and every read, wait and probe task ran for real, as the
 | `4231909` | `refactor(langfuse): derive the web Service name from the Helm fullname fact` (from the pre-commit code review) |
 
 Plus this report, with `langfuse.enabled` back at `false`.
+
+---
+
+# Live run 2 — 2026-09-14: TLS at the Langfuse NLB
+
+**Date: 2026-09-14.** Plan `improve-langfuse-tls-hardening`, task 6: bring the
+stack up with `langfuse.enabled: true`, `langfuse.load_balancer.tls: true` and
+`port: 443`, prove https end to end, tear down. Same account, region and
+cluster as above; EKS is now 1.36 (`eks.10`, server `v1.36.2-eks-bca9cf6`),
+Langfuse chart 2.1.0 / app 4.25.0, OpenSSL 3.6.4 on the operator's PATH. The
+three values were `true` / `true` / `443` only for the live steps below and are
+committed back at their defaults (`false` / `false` / `80`); no user was
+present to confirm anything else. Outputs are quoted with secrets removed;
+the account is shared with other SAs, so resources that are not ours are
+counted but not named.
+
+One defect showed up live and is fixed in this run (§2 below): the EKS cloud
+controller cannot turn the listener it created into a TLS listener, so the
+role now does it. Everything else in the TLS design worked the first time.
+
+## 1. Up, with TLS on
+
+```bash
+scripts/up.sh --from nodes --yes        # 20 min to the failure below
+```
+
+```
+==> Bringing up: nodes storage prereqs operator cluster preflight verify lb lf-storage lf-db lf-app
+  load balancer type from group_vars: internal
+  langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~$0.02/hr for its NLB)
+```
+
+Nodes, storage, prerequisites, operator, cluster, preflight, verify, Step 12,
+Steps 13 and 14 all came up as on 2026-09-11. Step 15 created the Service,
+waited for its hostname, and the new TLS block ran:
+
+```
+TASK [langfuse : Read the openssl version] *************************************
+ok: [localhost]
+TASK [langfuse : Fail clearly if it is not OpenSSL 3+] *************************
+ok: [localhost] => { "msg": "All assertions passed" }
+TASK [langfuse : Read the SAN of the certificate already there, if any] ********
+ok: [localhost]
+TASK [langfuse : Look for the private key] *************************************
+ok: [localhost]
+TASK [langfuse : Generate the key and the self-signed certificate (missing, or naming another hostname)] ***
+changed: [localhost]
+TASK [langfuse : Keep the key owner-readable only] *****************************
+ok: [localhost]
+TASK [langfuse : Import the certificate into ACM (or find it there)] ***********
+changed: [localhost]
+TASK [langfuse : Note the certificate ARN] *************************************
+ok: [localhost]
+TASK [langfuse : Point the load balancer Service at the certificate] ***********
+changed: [localhost]
+TASK [langfuse : Settle the address people will use] ***************************
+ok: [localhost]
+TASK [langfuse : Report the address] *******************************************
+ok: [localhost] => {
+    "msg": "NEXTAUTH_URL: https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com"
+}
+```
+
+The key was written 0600 by openssl itself (the chmod task reported `ok`),
+the certificate went into ACM under `Name=clickhouse-private-langfuse-lb`,
+the Service got its two `aws-load-balancer-ssl-*` annotations and
+`NEXTAUTH_URL` came out as `https://<hostname>` with no port. The release
+installed, migrated and passed every in-cluster check. Then:
+
+```
+TASK [langfuse : Wait for the listener to terminate TLS] ***********************
+FAILED - RETRYING: ... (29 retries left).
+...
+FAILED - RETRYING: ... (0 retries left).
+fatal: [localhost]: FAILED! => {"attempts": 30, "cmd": ["aws", "elbv2", "describe-listeners",
+  "--load-balancer-arn=arn:aws:elasticloadbalancing:us-east-1:<YOUR_ACCOUNT_ID>:loadbalancer/net/ab39a131f49a44e9dbb8ac9e6887c936/5197570faae99cb6",
+  "--query=Listeners[?Port==`443`].Protocol | [0]", "--output=text", "--profile=sa", "--region=us-east-1"],
+  "rc": 0, "stdout": "TCP"}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=207  changed=19   unreachable=0    failed=1    skipped=24   rescued=0    ignored=0
+```
+
+The listener stayed `TCP` for the whole five minutes.
+
+## 2. Defect: the cloud controller cannot change a listener's protocol
+
+The Service's events said why:
+
+```
+$ kubectl get events -n langfuse --field-selector involvedObject.name=langfuse-lb
+15:30:20Z  Normal   EnsuredLoadBalancer     Ensured load balancer
+15:30:30Z  Warning  SyncLoadBalancerFailed  Error syncing load balancer: failed to ensure load balancer:
+           error creating load balancer listener: "operation error Elastic Load Balancing v2: CreateListener,
+           https response error StatusCode: 400, ... DuplicateListener: A listener already exists on this port
+           for this load balancer 'arn:...:loadbalancer/net/ab39a131f49a44e9dbb8ac9e6887c936/5197570faae99cb6'"
+15:30:36Z  Warning  SyncLoadBalancerFailed  (same)
+15:30:47Z, 15:31:08Z, 15:31:49Z, 15:33:10Z, 15:35:51Z, 15:40:52Z, 15:45:53Z  (same, exponential backoff)
+```
+
+The controller EKS runs is `kubernetes/cloud-provider-aws`. In
+`pkg/providers/v1/aws_loadbalancer.go` (`ensureLoadBalancerv2`, branch
+`release-1.36`; `master` is the same) it indexes the listeners it finds by
+**port and protocol** (`actual[port][protocol]`) and handles additions before
+deletions. After the annotation patch it wants `(443, TLS)`; that key misses
+the existing `(443, TCP)` listener, so the mapping is treated as an addition
+and `CreateListener` is called on a port that already has a listener. The
+deletion of the `TCP` listener is the next loop and is never reached. Every
+retry fails the same way, forever. `ModifyListener` — which the controller
+uses when the port-and-protocol key *does* match, for a certificate or policy
+change — is what it would need here; it just never gets there.
+
+**Fix (`ansible/roles/langfuse/tasks/main.yml`, committed as `bc0b725`).**
+After the annotation patch the role reads the listener on the TLS port and,
+unless it is already `TLS` with this certificate, calls
+`aws elbv2 modify-listener --protocol TLS --certificates CertificateArn=<arn>
+--ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06` itself. The Service patch
+now also carries `aws-load-balancer-ssl-negotiation-policy` with that same
+policy: the controller compares the listener's policy with the annotation
+(empty when absent), so naming it is what makes the controller's next sync
+find nothing to change. The `Find the NLB behind that hostname` lookup moved
+up from the verification section so the TLS block can use the ARN. With
+`tls: false` none of this runs, and the Service manifest is untouched.
+
+```bash
+scripts/play.sh --tags lf-app            # 3 min, with the fix
+```
+
+```
+TASK [langfuse : Point the load balancer Service at the certificate] ***********
+changed: [localhost]                                    # the policy annotation
+TASK [langfuse : Read the listener on the TLS port] ****************************
+ok: [localhost]
+TASK [langfuse : The controller built a listener on that port] *****************
+ok: [localhost] => { "msg": "All assertions passed" }
+TASK [langfuse : Switch the listener to TLS with the certificate (the cloud controller cannot)] ***
+changed: [localhost]
+...
+TASK [langfuse : Wait for the listener to terminate TLS] ***********************
+ok: [localhost]
+TASK [langfuse : Wait for the web node(s) to pass the NLB health check] ********
+ok: [localhost] => (item=arn:...:targetgroup/k8s-langfuse-langfuse-9f3a2d5ba2/75076df78cc3436b)
+TASK [langfuse : Langfuse must answer through its Service] *********************
+ok: [localhost] => { "msg": "GET http://langfuse-web:3000/api/public/health -> 200" }
+TASK [langfuse : Report] *******************************************************
+    "url:        https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com",
+    "exposure:   internal NLB ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com,
+                 allowed from 10.20.0.0/16; 1 healthy target(s); answers 200 from inside the VPC;
+                 TLS terminated at the NLB with a self-signed certificate -- clients trust
+                 .../state/langfuse-tls-cert.pem (curl --cacert)",
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=65   changed=2    unreachable=0    failed=0    skipped=7    rescued=0    ignored=0
+```
+
+The controller and the role do not fight. The patch fired one more controller
+sync a second before the switch (one more `DuplicateListener` at 15:46:23Z);
+its backoff retry then found `(443, TLS)` with the same certificate and
+policy:
+
+```
+15:50:53Z  Normal  EnsuringLoadBalancer  Ensuring load balancer
+15:50:54Z  Normal  EnsuredLoadBalancer   Ensured load balancer
+```
+
+and the listener was still `TLS` afterwards. The in-cluster soft probe
+retried a few times while the switch propagated and then reported `200`
+through the NLB (the `answers 200 from inside the VPC` above).
+
+## 3. What `--tags lf-app` ends with (AC1)
+
+```
+$ aws elbv2 describe-listeners --load-balancer-arn arn:...:loadbalancer/net/ab39a131f49a44e9dbb8ac9e6887c936/5197570faae99cb6 \
+    --query 'Listeners[].[Port,Protocol,SslPolicy,Certificates[0].CertificateArn]' --output text --profile sa --region us-east-1
+443	TLS	ELBSecurityPolicy-TLS13-1-2-2021-06	arn:aws:acm:us-east-1:<YOUR_ACCOUNT_ID>:certificate/fb5f3e91-df19-4a04-9e87-f75a7878d7f4
+
+$ kubectl get service langfuse-lb -n langfuse -o jsonpath='{.metadata.annotations}'     # the ssl keys
+service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:<YOUR_ACCOUNT_ID>:certificate/fb5f3e91-df19-4a04-9e87-f75a7878d7f4
+service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+service.beta.kubernetes.io/aws-load-balancer-ssl-ports: 443
+
+$ aws acm describe-certificate --certificate-arn arn:aws:acm:...:certificate/fb5f3e91-...   (Name=clickhouse-private-langfuse-lb)
+Status ISSUED, Type IMPORTED, RSA-2048 / SHA256WITHRSA, Subject CN=langfuse,
+SAN ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com, NotAfter 2028-12-17,
+InUseBy [arn:...:loadbalancer/net/ab39a131f49a44e9dbb8ac9e6887c936/5197570faae99cb6]
+
+$ openssl x509 -in state/langfuse-tls-cert.pem -noout -ext subjectAltName -subject -issuer -dates
+X509v3 Subject Alternative Name:
+    DNS:ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com
+subject=CN=langfuse
+issuer=CN=langfuse
+notBefore=Sep 14 15:30:25 2026 GMT
+notAfter=Dec 17 15:30:25 2028 GMT                    # 825 days
+
+$ ls -l state/langfuse-tls-*
+-rw-r--r--  1237 state/langfuse-tls-cert.pem
+-rw-------  1704 state/langfuse-tls-key.pem
+
+$ kubectl exec -n langfuse deploy/langfuse-web -- sh -c 'echo $NEXTAUTH_URL'
+https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com
+```
+
+## 4. https end to end (AC2)
+
+The NLB is `internal` (sources `10.20.0.0/16`), and this laptop is not in the
+VPC: both curls below time out from here (`curl: (28)`), as the 2026-09-11 run
+already found for the plain-HTTP NLB. So the client-side proof ran from
+inside the VPC, in a ClickHouse Keeper pod: it has `curl 7.81.0`, and Keeper
+nodes never carry a web pod, so there is no NLB hairpin. The (public)
+certificate was copied in over `kubectl exec` stdin.
+
+```
+$ kubectl exec -i -n ns-default-us-01 c-default-us-01-keeper-0 -- sh -c 'cat > /tmp/langfuse-ca.pem' < state/langfuse-tls-cert.pem
+$ kubectl exec -n ns-default-us-01 c-default-us-01-keeper-0 -- \
+    curl --cacert /tmp/langfuse-ca.pem --write-out '\nHTTP %{http_code}  ssl_verify_result=%{ssl_verify_result}\n' \
+    https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com/api/public/health
+{"status":"OK","version":"4.25.0"}
+HTTP 200  ssl_verify_result=0
+
+$ kubectl exec -n ns-default-us-01 c-default-us-01-keeper-0 -- \
+    curl https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com/api/public/health
+curl: (60) SSL certificate problem: self-signed certificate
+command terminated with exit code 60
+
+$ ... curl --verbose --cacert /tmp/langfuse-ca.pem ...        # the handshake
+SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256
+subject: CN=langfuse
+subjectAltName: host "ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com"
+                matched cert's "ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com"
+issuer: CN=langfuse
+SSL certificate verify ok.
+< HTTP/1.1 200 OK
+```
+
+With the CA: 200 over TLS 1.3, hostname matched against the SAN. Without it:
+curl refuses the connection — the certificate is not publicly trusted and
+nothing bypasses verification.
+
+**The smoke script**, from the laptop:
+
+```bash
+scripts/langfuse-smoke.sh
+```
+
+```
+==> Reaching Langfuse
+  load balancer (internal NLB): https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com
+  TLS: trusting the role's self-signed certificate at .../state/langfuse-tls-cert.pem
+  [warn] https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com does not answer /api/public/health from here (VPN? security group?)
+  forwarding localhost:3000 -> svc/langfuse-web:3000 in langfuse
+  [ ok ] health check passed through the port-forward
+
+==> Posting a trace
+  [ ok ] accepted trace 027c0fb2c2c7f51bc59c5801fbf88239 (name smoke-20260914-155230) with one generation
+  [ ok ] API returns the trace: traceId=027c0fb2c2c7f51bc59c5801fbf88239 observations=2 (GENERATION, SPAN)
+
+==> Reading it back from ClickHouse (langfuse database)
+   ┌─trace_id─────────────────────────┬─span_id──────────┬─name──────────────────┬─type───────┐
+1. │ 027c0fb2c2c7f51bc59c5801fbf88239 │ 3d7d25255530aded │ smoke-20260914-155230 │ SPAN       │
+2. │ 027c0fb2c2c7f51bc59c5801fbf88239 │ 4eb72e73775dadd9 │ answer                │ GENERATION │
+   └──────────────────────────────────┴──────────────────┴───────────────────────┴────────────┘
+==> Done
+  [ ok ] trace 027c0fb2c2c7f51bc59c5801fbf88239 went in through the API and came back out of ClickHouse Private
+```
+
+The script did what task 2 built: it derived the https address from `tls:
+true`, chose `--cacert state/langfuse-tls-cert.pem` for it, could not reach
+the internal NLB from off the VPC, and fell back to the plain-http
+port-forward (resetting the CA) — trace `027c0fb2c2c7f51bc59c5801fbf88239`.
+To run its https path where the NLB answers, its exact requests were replayed
+from the Keeper pod: the same OTLP/JSON body (built with the script's `jq`
+program), the credential in a `curl --config -` file on `kubectl exec` stdin
+(never in argv), `--cacert` the state certificate, then the same
+`GET /api/public/v2/observations` poll, then the same `ch-client.sh -q`
+query from the laptop:
+
+```
+trace_id=3b1410f2a21de3c7187aa1305ebd6676  name=smoke-https-20260914-155334
+
+POST https://ab39a131f49a44e9dbb8ac9e6887c936-5197570faae99cb6.elb.us-east-1.amazonaws.com/api/public/otel/v1/traces
+{"name":"otel-ingestion-job","data":{"id":"df6b4a85-611b-49a6-b392-7d6e0af300a5", ...
+ "payload":{"data":{"fileKey":"events/otel/demo/2026/09/14/15/53/8a449cb6-....json","publicKey":"pk-lf-..."},
+ "authCheck":{"validKey":true,"scope":{"projectId":"demo","accessLevel":"project","orgId":"demo"}}, ...
+HTTP 200
+
+GET https://.../api/public/v2/observations?traceId=3b1410f2a21de3c7187aa1305ebd6676&limit=10     # 2nd poll
+traceId=3b1410f2a21de3c7187aa1305ebd6676 observations=2 (SPAN, GENERATION)
+
+$ scripts/ch-client.sh -q "SELECT trace_id, span_id, name, type FROM langfuse.events_core FINAL WHERE trace_id = '3b1410f2a21de3c7187aa1305ebd6676' ORDER BY start_time FORMAT PrettyCompact"
+   ┌─trace_id─────────────────────────┬─span_id──────────┬─name────────────────────────┬─type───────┐
+1. │ 3b1410f2a21de3c7187aa1305ebd6676 │ 23f6c429e97f3406 │ answer                      │ GENERATION │
+2. │ 3b1410f2a21de3c7187aa1305ebd6676 │ 61311ee055881877 │ smoke-https-20260914-155334 │ SPAN       │
+   └──────────────────────────────────┴──────────────────┴─────────────────────────────┴────────────┘
+```
+
+Two traces, one over the tunnel and one over https through the TLS listener,
+both readable from the API and from `langfuse.events_core`.
+
+## 5. Idempotency (AC3)
+
+```bash
+scripts/play.sh --tags lf-app            # 29 s
+```
+
+```
+TASK [langfuse : Generate the key and the self-signed certificate (missing, or naming another hostname)] ***
+skipping: [localhost]                                   # SAN names the current hostname
+TASK [langfuse : Import the certificate into ACM (or find it there)] ***********
+ok: [localhost]                                         # same body, same ARN
+TASK [langfuse : Point the load balancer Service at the certificate] ***********
+ok: [localhost]
+TASK [langfuse : Switch the listener to TLS with the certificate (the cloud controller cannot)] ***
+skipping: [localhost]                                   # already TLS with this certificate
+TASK [langfuse : Wait for the listener to terminate TLS] ***********************
+ok: [localhost]
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=64   changed=0    unreachable=0    failed=0    skipped=8    rescued=0    ignored=0
+```
+
+`changed=0`, no retries anywhere: the certificate is reused, ACM reports the
+existing import, the three annotations are already there, the listener is
+already TLS.
+
+## 6. Teardown (AC4)
+
+`langfuse.enabled` set back to `false` with Langfuse still deployed
+(`tls` left `true`: the ACM deletion is gated on it, see below), then the
+default teardown:
+
+```bash
+scripts/down.sh --yes                    # 15 min
+```
+
+```
+==> Tearing down (default): lf-app lb cluster nodes
+  keeps: VPC, EKS control plane, IRSA, operator, StorageClass. ~$0.15/hr
+==> down: lf-app
+TASK [langfuse : Remove the load balancer Service] *****************************
+changed: [localhost]
+FAILED - RETRYING: [localhost]: langfuse : Delete the ACM certificate (17 retries left).
+...
+FAILED - RETRYING: [localhost]: langfuse : Delete the ACM certificate (4 retries left).
+TASK [langfuse : Delete the ACM certificate] ***********************************
+changed: [localhost]
+TASK [langfuse : Uninstall the release] ****************************************
+changed: [localhost]
+TASK [langfuse : Remove the namespace and everything left in it] ***************
+changed: [localhost]
+TASK [langfuse : Teardown summary] *********************************************
+    "... the ACM certificate clickhouse-private-langfuse-lb is deleted, the TLS key and certificate under state/
+     are kept and re-imported by the next --tags lf-app"
+localhost                  : ok=6    changed=4    unreachable=0    failed=0    skipped=22   rescued=0    ignored=0
+==> down: lb        ok=5  changed=1
+==> down: cluster   ok=8  changed=2  skipped=12
+==> down: nodes     ok=8  changed=1  skipped=2
+==> Down in 15m
+  [ ok ] load balancer, cluster and node groups removed. Rebuild: scripts/up.sh --from nodes (~15 min)
+```
+
+`lf-app` first, as before. The one new step, `Delete the ACM certificate`,
+did exactly what its bounded retry is for: the Service was gone, the NLB was
+still detaching, and ACM answered `ResourceInUseException` for fourteen
+attempts (about two and a half minutes) before the deletion went through.
+Anything other than that error would have stopped the run right there, with
+the release and namespace still in place for `down.sh` to find again.
+
+Post-teardown, from the AWS CLI and `kubectl` (the two volume ids were
+recorded from the PVs before the teardown). ACM absence the way the plan
+review asked for it — `list-certificates` does not return tags, so every ARN
+is enumerated and `list-tags-for-certificate` called on each:
+
+```
+$ aws acm list-certificates --query 'CertificateSummaryList[].CertificateArn' --output text | tr '\t' '\n' |
+    while read -r a; do printf '%s  Name=%s\n' "${a##*/}" \
+      "$(aws acm list-tags-for-certificate --certificate-arn "$a" --query 'Tags[?Key==`Name`].Value | [0]' --output text)"; done
+certificates: 11                                     # 11 before the run, 12 while Langfuse was up, 11 after
+fe6ea969-...  Name=None
+82d87c94-...  Name=None
+... (9 more, all Name=None -- other SAs' certificates, untouched)
+with Name=clickhouse-private-langfuse-lb: 0
+
+$ aws acm describe-certificate --certificate-arn arn:aws:acm:us-east-1:<YOUR_ACCOUNT_ID>:certificate/fb5f3e91-df19-4a04-9e87-f75a7878d7f4
+An error occurred (ResourceNotFoundException) when calling the DescribeCertificate operation: Could not find certificate ...
+
+namespace langfuse:                 Error from server (NotFound): namespaces "langfuse" not found
+PVCs in langfuse:                   No resources found
+PVs bound to langfuse/*:            0
+the Langfuse NLB by ARN:            LoadBalancerNotFound
+EBS vol-0955f1317a1e13cf4:          InvalidVolume.NotFound   (langfuse-redis)
+EBS vol-0ce97ddec7715143c:          InvalidVolume.NotFound   (postgres-data-langfuse-postgresql-0)
+EBS volumes tagged kubernetes.io/created-for/pvc/namespace=langfuse: 0
+NLBs tagged kubernetes.io/cluster/clickhouse-private-eks: 0   (1 NLB in the account, another team's)
+namespace ns-default-us-01:         NotFound
+nodes:                              0        node groups: (none)
+helm releases (all namespaces):     clickhouse-operator clickhouse-prerequisites
+IRSA stack clickhouse-private-langfuse-irsa: CREATE_COMPLETE   (kept by the default plan)
+state/langfuse-tls-cert.pem, state/langfuse-tls-key.pem:  kept
+```
+
+No Langfuse NLB, namespace, PVC, EBS volume or ACM certificate remained, and
+the stack is at zero nodes — the `down.sh` default posture from Part 0.
+
+**Two things to know about `tls` and teardown.** The ACM deletion runs only
+when `langfuse.load_balancer.tls` is `true` at teardown time, so flip
+`enabled` off but leave `tls` alone until Langfuse is gone (task 1's
+evaluator noted this; the run above did it that way). And the key and
+certificate under `state/` are kept like the other generated secrets: the
+next `--tags lf-app` re-imports the certificate if the new NLB gets the same
+hostname, or regenerates it for the new one (the SAN check), so nothing has
+to be cleaned up by hand.
+
+## 7. Where the stack was left, and what is committed
+
+Zero nodes, no node groups, the ClickHouse and Langfuse namespaces gone; VPC,
+EKS control plane, both IRSA stacks, operator, StorageClass, the two S3
+buckets and the ECR images kept (~$0.15/hr). `langfuse.enabled: false`,
+`langfuse.load_balancer.tls: false` and `port: 80` are the committed values
+— `ansible/group_vars/all.yml` is unchanged by this run.
+
+## Follow-ups and observations from this run
+
+- **The controller's listener bug is not ours to fix, but it is worth
+  knowing.** With the role doing the switch, the `SyncLoadBalancerFailed`
+  events from the window between the annotation patch and the switch stay in
+  the namespace's event log until they age out (one hour). They are
+  historical, not a live problem: the `EnsuredLoadBalancer` that follows is
+  the controller agreeing with the listener the role built.
+- **The internal NLB is not reachable from a laptop off the VPC**, so
+  `scripts/langfuse-smoke.sh` will always take the port-forward there. That
+  is the script working as designed (§4); to see the https path work, run it
+  from inside the VPC, or set `LANGFUSE_URL` plus `LANGFUSE_CACERT` to
+  whatever alias reaches the NLB from where you are.
+- **`--check` with `tls: true` and no key or certificate in `state/` fails**
+  at the chmod and the ACM import's file lookup, because check mode skips the
+  openssl generation (task 1's evaluator). Not exercised here; a
+  `--check` after a real run is fine.
+- `NEXTAUTH_URL` is https; anyone opening the address in a browser gets the
+  self-signed warning once and clicks through. That is the deal a self-signed
+  certificate offers: encryption, not identity.
+
+## Commits from this run
+
+| Commit | Change |
+|---|---|
+| `bc0b725` | `fix(langfuse): switch the NLB listener to TLS in the role, the cloud controller cannot change its protocol` |
+
+Plus this report, with `langfuse.enabled`, `langfuse.load_balancer.tls` and
+`port` back at their defaults.
