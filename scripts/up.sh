@@ -69,8 +69,10 @@ if ((rc == 0)); then
   [[ "${LB_TYPE:-none}" != none ]] && ok "          scripts/ch-client.sh --lb       (via the $LB_TYPE NLB, where its address is reachable)"
   if [[ "$LF_ENABLED" == true ]]; then
     # The address NEXTAUTH_URL was baked with: langfuse.url if set, else the
-    # NLB hostname via lf_url (port appended unless 80; the same rule the
-    # langfuse role uses), else the fixed 3000:3000 port-forward.
+    # NLB hostname via lf_url (https with the port appended unless it is 443
+    # when tls is true; otherwise http with the port appended unless it is 80;
+    # the same rule the langfuse role uses), else the fixed 3000:3000
+    # port-forward.
     LF_NS="$(lf_var '  namespace:')"; LF_RELEASE="$(lf_var '  release:')"; LF_URL="$(lf_var '  url:')"; LF_LB_TYPE="$(lf_var '    type:')"
     if [[ -n "$LF_URL" ]]; then
       ok "langfuse: $LF_URL   (langfuse.url from group_vars; login: state/langfuse-admin-password)"

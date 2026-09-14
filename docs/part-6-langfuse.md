@@ -591,9 +591,9 @@ between the hostname wait and the URL:
    below. Skipped when the listener is already TLS with this certificate,
    which is every re-run.
 6. **The URL settles** to `https://<hostname>` and the release is installed
-   with it as `NEXTAUTH_URL`. At the end, after the health checks,
-   `Wait for the listener to terminate TLS` reads the listener back, and is
-   what `--tags lf-app` finishes on.
+   with it as `NEXTAUTH_URL`. In the role's final verification, before the
+   NLB health-check wait and the in-cluster probe,
+   `Wait for the listener to terminate TLS` reads the listener back.
 
 **Defect 5, from the 2026-09-14 run: the cloud controller cannot change a
 listener's protocol.** The design had no step 5: annotate the Service, and

@@ -1233,7 +1233,9 @@
 - name: Wait for the listener to terminate TLS
   # The switch above is a modify-listener call that ELB applies within a few
   # seconds; this is the check that it did (and that the controller did not
-  # undo it), and it is what --tags lf-app ends on when tls is true.
+  # undo it): the first TLS-specific check in the role's final verification
+  # sequence, before the NLB health-check wait, the in-cluster probe and
+  # Report.
   ansible.builtin.command:
     argv:
       - aws
