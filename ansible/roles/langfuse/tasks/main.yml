@@ -24,7 +24,9 @@
 # certificate is imported into ACM under the Name tag
 # <environment_name>-langfuse-lb and the Service is pointed at it. The
 # certificate is its own CA: clients trust state/langfuse-tls-cert.pem
-# (curl --cacert). No domain either way.
+# (curl --cacert). No domain either way. The listener itself is switched to
+# TLS by this role, not by the cloud controller: that controller cannot change
+# the protocol of a listener it already created (see the TLS block below).
 #
 # Cost: no new instances (everything lands on the operator node group);
 # ~$0.02/hr for the NLB plus EBS pennies for the two small volumes.
@@ -56,6 +58,12 @@
       ansible.builtin.set_fact:
         _lf_present: "{{ langfuse.load_balancer.type != 'none' }}"
         _lf_tls: "{{ langfuse.load_balancer.type != 'none' and (langfuse.load_balancer.tls | bool) }}"
+        # The TLS security policy of the NLB listener: AWS's recommended
+        # default for Network Load Balancers (TLS 1.2 and 1.3, no legacy
+        # ciphers). Named explicitly, on the listener AND in the Service
+        # annotation, so the cloud controller sees the listener exactly as it
+        # would have built it and leaves it alone on every sync.
+        _lf_tls_policy: ELBSecurityPolicy-TLS13-1-2-2021-06
 
     - name: Resolve who may connect
       # The cloud controller turns loadBalancerSourceRanges into ingress rules on
@@ -519,6 +527,27 @@
   ansible.builtin.set_fact:
     _lf_web_svc: "{{ _lf_fullname }}-web"
 
+- name: Find the NLB behind that hostname
+  # Copied from Step 12. Needed here already: the TLS block below reads and
+  # switches this load balancer's listener, and the load balancer's view at
+  # the end waits on its target group.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-load-balancers
+      - --query=LoadBalancers[?DNSName=='{{ _lf_host }}'].LoadBalancerArn | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lf_lb_arn
+  until: _lf_lb_arn.stdout | trim not in ['', 'None']
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: _lf_present
+
 # --- TLS at the load balancer (skipped unless langfuse.load_balancer.tls) -----
 # Only now: the certificate must name the NLB hostname, which exists only once
 # the Service above has one. Key and certificate go to state/ like the other
@@ -614,7 +643,9 @@
       # A patch, not a second apply: the Service was applied without these
       # (the ARN did not exist yet), and a merge patch adds them without
       # touching the rest. ssl-ports names the listener to terminate on --
-      # as a string, which is all an annotation may hold.
+      # as a string, which is all an annotation may hold. These declare the
+      # state the cloud controller should want; the two tasks after this one
+      # put the listener there, because the controller cannot (see below).
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig_path }}"
         state: patched
@@ -626,6 +657,56 @@
             annotations:
               service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "{{ _lf_tls_cert_arn }}"
               service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "{{ langfuse.load_balancer.port | int | string }}"
+              service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: "{{ _lf_tls_policy }}"
+
+    - name: Read the listener on the TLS port
+      # ARN, protocol and certificate ARN of the listener the controller built
+      # for this port, tab-separated on one line ("None" when there is none).
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-listeners
+          - --load-balancer-arn={{ _lf_lb_arn.stdout | trim }}
+          - --query=Listeners[?Port==`{{ langfuse.load_balancer.port | int }}`].[ListenerArn, Protocol, Certificates[0].CertificateArn] | [0]
+          - --output=text
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+      register: _lf_listener
+      changed_when: false
+      check_mode: false
+
+    - name: The controller built a listener on that port
+      # It does so when it creates the load balancer, before it reports the
+      # hostname the wait above saw -- so an empty read is a real problem.
+      ansible.builtin.assert:
+        that: _lf_listener.stdout.split() | length == 3 and _lf_listener.stdout.split()[0] is match('^arn:')
+        fail_msg: "no listener on port {{ langfuse.load_balancer.port }} of {{ _lf_host }} (got '{{ _lf_listener.stdout | trim }}'); see: kubectl describe service langfuse-lb -n {{ langfuse.namespace }}"
+
+    - name: Switch the listener to TLS with the certificate (the cloud controller cannot)
+      # kubernetes/cloud-provider-aws (the controller EKS runs) keys the
+      # listeners it finds by port AND protocol and handles additions before
+      # deletions. On an NLB that already has a TCP listener on this port, the
+      # patch above makes it want a TLS one: it calls CreateListener, gets
+      # DuplicateListener, and never reaches the step that would delete the
+      # TCP listener -- SyncLoadBalancerFailed on every retry, forever (seen
+      # live on EKS 1.36; release-1.36 and master behave the same). Modifying
+      # the listener in place is what it would do if it could. Once it is TLS
+      # with this certificate and policy, the controller's own comparison
+      # finds nothing to change, so the two never fight. Skipped when the
+      # listener already matches, which is every re-run.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - modify-listener
+          - --listener-arn={{ _lf_listener.stdout.split()[0] }}
+          - --protocol=TLS
+          - --ssl-policy={{ _lf_tls_policy }}
+          - --certificates=CertificateArn={{ _lf_tls_cert_arn }}
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+      when: _lf_listener.stdout.split()[1:] != ['TLS', _lf_tls_cert_arn]
 
 - name: Settle the address people will use
   # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname -- https with
@@ -1126,28 +1207,11 @@
     _lf_ch_unshared: "{{ _lf_ch_core_lines | reject('search', '=Shared\\w*MergeTree$') | list }}"
 
 # --- the load balancer's view (skipped when type is none) ----------------------
-# Copied from Step 12: find the NLB behind the hostname, then wait for its
-# target group to see the web pod. Instance targets: every node is registered
-# and only the ones running a web pod answer the health-check NodePort, so
-# "healthy >= web replicas" is the steady state, not a partial failure.
-
-- name: Find the NLB behind that hostname
-  ansible.builtin.command:
-    argv:
-      - aws
-      - elbv2
-      - describe-load-balancers
-      - --query=LoadBalancers[?DNSName=='{{ _lf_host }}'].LoadBalancerArn | [0]
-      - --output=text
-      - --profile={{ aws.target_profile }}
-      - --region={{ aws.target_region }}
-  register: _lf_lb_arn
-  until: _lf_lb_arn.stdout | trim not in ['', 'None']
-  retries: 12
-  delay: 5
-  changed_when: false
-  check_mode: false
-  when: _lf_present
+# Copied from Step 12: the NLB behind the hostname was found before the TLS
+# block; now wait for its target group to see the web pod. Instance targets:
+# every node is registered and only the ones running a web pod answer the
+# health-check NodePort, so "healthy >= web replicas" is the steady state, not
+# a partial failure.
 
 - name: List the target groups (one, for the http port)
   ansible.builtin.command:
@@ -1166,8 +1230,9 @@
   when: _lf_present
 
 - name: Wait for the listener to terminate TLS
-  # The cloud controller rebuilds the listener after the annotation patch
-  # above; until it has, https to this port meets a plain TCP listener.
+  # The switch above is a modify-listener call that ELB applies within a few
+  # seconds; this is the check that it did (and that the controller did not
+  # undo it), and it is what --tags lf-app ends on when tls is true.
   ansible.builtin.command:
     argv:
       - aws
