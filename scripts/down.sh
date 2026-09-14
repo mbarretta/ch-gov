@@ -108,7 +108,12 @@ PLAN=("${kept[@]}")   # never empty: nodes is in every plan and is never dropped
 # Both namespaces hold PVC-backed pods (Keeper; Langfuse's PostgreSQL and
 # Valkey), so either would hang in Terminating with the CSI controller gone.
 if [[ "$MODE" != nodes ]]; then
-  nodes=$(kubectl get nodes -o name 2>/dev/null | wc -l | tr -d ' ')
+  # `|| die`: under set -eo pipefail a failing kubectl used to abort the script
+  # right here with no output at all. Say what usually broke instead.
+  nodes=$(kubectl get nodes -o name 2>/dev/null | wc -l | tr -d ' ') \
+    || die "kubectl cannot reach the cluster -- no kubeconfig at state/kubeconfig (scripts/up.sh writes it)," \
+           "an expired SSO token (run: AWS_CONFIG_FILE=$CH_ROOT/.aws/config aws sso login --profile $TARGET_PROFILE)," \
+           "or the EKS cluster is gone"
   ns_exists=$(kubectl get namespace "$NS" -o name 2>/dev/null || true)
   lf_ns_exists=$(kubectl get namespace "$LF_NAMESPACE" -o name 2>/dev/null || true)
   if [[ ( -n "$ns_exists" || -n "$lf_ns_exists" ) && "$nodes" -eq 0 ]]; then
