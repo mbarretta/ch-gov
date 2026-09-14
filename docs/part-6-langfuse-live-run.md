@@ -830,8 +830,10 @@ creates), and every read, wait and probe task ran for real, as the
   target registry. Pre-existing Step 1–12 code that `plan.constraints[5]`
   puts out of scope for this cycle; recorded in the plan's deferral ledger.
   The scratch log of this run was scrubbed. Fixed since by plan
-  `fix-langfuse-deferrals` (task `def-d3`): the assert now carries the
-  `show_secrets`-gated `no_log`.
+  `fix-langfuse-deferrals` (task `def-d3`): the assert gained a
+  `show_secrets`-gated `no_log`; then by plan `improve-langfuse-tls-hardening`
+  (task 4): the assert loops over a token-free `{name, registry, rc, stderr}`
+  projection, so no flag or verbosity can print the token.
 
 ## Commits from this run
 
