@@ -829,8 +829,11 @@ Two rules that follow from how the deletion is gated:
   `NEXTAUTH_URL` the role bakes in goes back to `http://`. The clean way
   back is a teardown and a re-run with `tls: false`; the by-hand route is
   removing the three `aws-load-balancer-ssl-*` annotations from Service
-  `langfuse-lb`, and given the controller limitation above, expect to put
-  the listener back yourself.
+  `langfuse-lb` AND switching the listener back yourself, because the cloud
+  controller cannot change a listener protocol (the limitation above):
+  `aws elbv2 modify-listener --listener-arn <listener-arn> --protocol TCP`,
+  with no `--certificates` or `--ssl-policy` since AWS removes those TLS
+  properties when the protocol changes to TCP.
 
 The key and certificate under `state/` are kept like every other generated
 secret: the next `--tags lf-app` re-imports the same certificate if the new
