@@ -18,7 +18,13 @@
 #
 # Exposure follows Step 12: langfuse.load_balancer.type none|internal|public,
 # realised as a second NLB Service (langfuse-lb) in front of the web pods.
-# Plain HTTP; no domain, no TLS.
+# Plain HTTP by default. With langfuse.load_balancer.tls the NLB terminates
+# TLS with a self-signed certificate this role generates once the hostname is
+# known: key and certificate land in state/ (langfuse_state_files.tls_*), the
+# certificate is imported into ACM under the Name tag
+# <environment_name>-langfuse-lb and the Service is pointed at it. The
+# certificate is its own CA: clients trust state/langfuse-tls-cert.pem
+# (curl --cacert). No domain either way.
 #
 # Cost: no new instances (everything lands on the operator node group);
 # ~$0.02/hr for the NLB plus EBS pennies for the two small volumes.
@@ -27,7 +33,8 @@
 # the Secret objects and the password-carrying execs when something fails.
 #
 # Teardown: ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent
-#   Removes the NLB Service, the release and the namespace (with its PVCs).
+#   Removes the NLB Service, the ACM certificate (with tls), the release and
+#   the namespace (with its PVCs). The key and certificate under state/ stay.
 #   The ClickHouse database and user are NOT touched -- that is Step 14's
 #   teardown (--tags lf-db -e langfuse_db_state=absent), the "purge Langfuse
 #   data" switch.
@@ -45,9 +52,10 @@
         that: langfuse.load_balancer.type in ['none', 'internal', 'public']
         fail_msg: "langfuse.load_balancer.type must be none, internal or public (got '{{ langfuse.load_balancer.type }}')"
 
-    - name: Decide whether the load balancer Service should exist
+    - name: Decide whether the load balancer Service should exist, and whether it terminates TLS
       ansible.builtin.set_fact:
         _lf_present: "{{ langfuse.load_balancer.type != 'none' }}"
+        _lf_tls: "{{ langfuse.load_balancer.type != 'none' and (langfuse.load_balancer.tls | bool) }}"
 
     - name: Resolve who may connect
       # The cloud controller turns loadBalancerSourceRanges into ingress rules on
@@ -71,7 +79,7 @@
           Set allowed_cidrs to the CIDRs that should reach Langfuse
           (your office/VPN egress, e.g. "203.0.113.7/32"). To really open port
           {{ langfuse.load_balancer.port }} to everyone, add -e allow_open_internet=true
-          -- and note this is plain HTTP: TLS is not configured in this deployment.
+          {{ '-- and note this is plain HTTP: TLS is not configured in this deployment.' if not _lf_tls else '' }}
       when: langfuse.load_balancer.type == 'public'
 
     # --- inputs from earlier steps ---------------------------------------------
@@ -260,9 +268,11 @@
 # it uses were never set), and nothing here needs the ClickHouse cluster or
 # the Step 13 stack to still exist. Order matters. The load balancer Service
 # goes first -- deleting it is what deletes the NLB and its security-group
-# rules -- then the release, then the namespace, which takes the two
-# PersistentVolumeClaims and so the EBS volumes with it. The ClickHouse
-# database and user are deliberately left alone (see the header).
+# rules -- then, with tls, the ACM certificate that NLB was using, then the
+# release, then the namespace, which takes the two PersistentVolumeClaims and
+# so the EBS volumes with it. The ClickHouse database and user are
+# deliberately left alone (see the header), and so are the key and
+# certificate under state/.
 
 - name: Teardown (langfuse_state=absent)
   when: (langfuse_state | default('present')) == 'absent'
@@ -278,6 +288,28 @@
         state: absent
         wait: true
         wait_timeout: 120
+
+    - name: Delete the ACM certificate
+      # After the Service, because ACM refuses to delete a certificate a
+      # listener still uses (ResourceInUseException) and the NLB goes a little
+      # after the Service's finalizer clears -- hence the bounded retries on
+      # exactly that error. Any other failure stops the teardown right here,
+      # before the release and the namespace go, so scripts/down.sh still sees
+      # Langfuse installed and a re-run retries the deletion. Only with tls:
+      # a plain-HTTP deployment never imported anything.
+      community.aws.acm_certificate:
+        name_tag: "{{ infrastructure.environment_name }}-langfuse-lb"
+        state: absent
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _lf_acm_del
+      until: >-
+        _lf_acm_del is not failed
+        or ('ResourceInUseException' not in (_lf_acm_del.msg | default(''))
+            and (_lf_acm_del.error.code | default('')) != 'ResourceInUseException')
+      retries: 18
+      delay: 10
+      when: langfuse.load_balancer.tls | bool
 
     - name: Uninstall the release
       # wait: returns once the release's resources are gone. The PostgreSQL
@@ -307,7 +339,7 @@
         msg:
           - "Langfuse removed: Service langfuse-lb (and its NLB), release {{ langfuse.release }}, namespace {{ langfuse.namespace }} with its PersistentVolumeClaims -- the PostgreSQL and Valkey volumes are gone"
           - "the ClickHouse database {{ langfuse.clickhouse_database }} and user {{ langfuse.clickhouse_user }} are kept; purge them with --tags lf-db -e langfuse_db_state=absent"
-          - "the Step 13 bucket and IRSA stack are not touched (--tags lf-storage -e langfuse_storage_state=absent); the generated secrets under {{ state_dir | realpath }} are kept and reused by the next --tags lf-app"
+          - "the Step 13 bucket and IRSA stack are not touched (--tags lf-storage -e langfuse_storage_state=absent); the generated secrets under {{ state_dir | realpath }} are kept and reused by the next --tags lf-app{{ '; the ACM certificate ' ~ infrastructure.environment_name ~ '-langfuse-lb is deleted, the TLS key and certificate under state/ are kept and re-imported by the next --tags lf-app' if langfuse.load_balancer.tls | bool else '' }}"
 
     - name: Stop here when tearing down
       ansible.builtin.meta: end_play
@@ -487,16 +519,127 @@
   ansible.builtin.set_fact:
     _lf_web_svc: "{{ _lf_fullname }}-web"
 
+# --- TLS at the load balancer (skipped unless langfuse.load_balancer.tls) -----
+# Only now: the certificate must name the NLB hostname, which exists only once
+# the Service above has one. Key and certificate go to state/ like the other
+# generated secrets and are made again only when missing or when the SAN no
+# longer names the current hostname. ACM gets the certificate by Name tag
+# (the same body maps to the same ARN and reports ok; a regenerated one is
+# re-imported under that ARN), and the Service is patched with the two
+# annotations the in-tree cloud controller reads: it rebuilds the listener as
+# TLS, the target stays plain TCP to the web pod's 3000. The openssl CLI
+# rather than community.crypto: the venv has no cryptography module.
+
+- name: Terminate TLS at the load balancer
+  when: _lf_tls
+  block:
+    - name: Read the openssl version
+      ansible.builtin.command:
+        argv: [openssl, version]
+      register: _lf_openssl
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if it is not OpenSSL 3+
+      # The LibreSSL at /usr/bin/openssl on macOS has no `x509 -ext` and no
+      # `-noenc`: the SAN check below would fail every run and the certificate
+      # would be regenerated -- and re-imported -- every run.
+      ansible.builtin.assert:
+        that: _lf_openssl.rc == 0 and _lf_openssl.stdout is match('OpenSSL [3-9]')
+        fail_msg: "openssl on PATH is '{{ _lf_openssl.stdout | default('') | trim }}' (rc {{ _lf_openssl.rc }}); langfuse.load_balancer.tls needs OpenSSL 3 -- brew install openssl@3 and put /opt/homebrew/bin first on PATH"
+
+    - name: Read the SAN of the certificate already there, if any
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ langfuse_state_files.tls_cert_file }}", -noout, -ext, subjectAltName]
+      register: _lf_tls_san
+      changed_when: false
+      failed_when: false      # no file, or not a certificate: regenerate
+      check_mode: false
+
+    - name: Look for the private key
+      ansible.builtin.stat:
+        path: "{{ langfuse_state_files.tls_key_file }}"
+      register: _lf_tls_key
+      check_mode: false
+
+    - name: Generate the key and the self-signed certificate (missing, or naming another hostname)
+      # One shot: a 2048-bit RSA key, unencrypted (the NLB needs it plain and
+      # ACM imports it plain), and a certificate signed by it with the NLB
+      # hostname as its only SAN. Paths only on argv; openssl writes the key
+      # 0600 itself.
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -noenc
+          - -keyout
+          - "{{ langfuse_state_files.tls_key_file }}"
+          - -out
+          - "{{ langfuse_state_files.tls_cert_file }}"
+          - -days
+          - "{{ langfuse.load_balancer.tls_cert_days | int }}"
+          - -subj
+          - /CN=langfuse
+          - -addext
+          - "subjectAltName=DNS:{{ _lf_host }}"
+      when: not _lf_tls_key.stat.exists or _lf_tls_san.rc != 0 or ('DNS:' ~ _lf_host) not in _lf_tls_san.stdout
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Keep the key owner-readable only
+      ansible.builtin.file:
+        path: "{{ langfuse_state_files.tls_key_file }}"
+        mode: "0600"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Import the certificate into ACM (or find it there)
+      community.aws.acm_certificate:
+        name_tag: "{{ infrastructure.environment_name }}-langfuse-lb"
+        certificate: "{{ lookup('ansible.builtin.file', langfuse_state_files.tls_cert_file) }}"
+        private_key: "{{ lookup('ansible.builtin.file', langfuse_state_files.tls_key_file) }}"
+        state: present
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _lf_acm
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Note the certificate ARN
+      ansible.builtin.set_fact:
+        _lf_tls_cert_arn: "{{ _lf_acm.certificate.arn }}"
+
+    - name: Point the load balancer Service at the certificate
+      # A patch, not a second apply: the Service was applied without these
+      # (the ARN did not exist yet), and a merge patch adds them without
+      # touching the rest. ssl-ports names the listener to terminate on --
+      # as a string, which is all an annotation may hold.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        kind: Service
+        name: langfuse-lb
+        namespace: "{{ langfuse.namespace }}"
+        definition:
+          metadata:
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "{{ _lf_tls_cert_arn }}"
+              service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "{{ langfuse.load_balancer.port | int | string }}"
+
 - name: Settle the address people will use
-  # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname, with the port
-  # appended only when it is not 80; else, with no load balancer,
-  # http://localhost:3000 -- what a port-forward of exactly 3000:3000 to
-  # svc/<release>-web gives you (NextAuth redirects the browser here, so the
-  # local port cannot be anything else).
+  # NEXTAUTH_URL. langfuse.url if set; else the NLB hostname -- https with
+  # tls, the port appended only when it is not the scheme's default (443 or
+  # 80); else, with no load balancer, http://localhost:3000 -- what a
+  # port-forward of exactly 3000:3000 to svc/<release>-web gives you
+  # (NextAuth redirects the browser here, so the local port cannot be
+  # anything else).
   ansible.builtin.set_fact:
     _lf_url: >-
       {{ langfuse.url if langfuse.url
-         else ('http://' ~ _lf_host ~ ('' if (langfuse.load_balancer.port | int) == 80 else ':' ~ langfuse.load_balancer.port))
+         else (('https://' ~ _lf_host ~ ('' if (langfuse.load_balancer.port | int) == 443 else ':' ~ langfuse.load_balancer.port))
+               if _lf_tls else
+               ('http://' ~ _lf_host ~ ('' if (langfuse.load_balancer.port | int) == 80 else ':' ~ langfuse.load_balancer.port)))
          if _lf_present else 'http://localhost:3000' }}
 
 - name: Report the address
@@ -1022,6 +1165,27 @@
   check_mode: false
   when: _lf_present
 
+- name: Wait for the listener to terminate TLS
+  # The cloud controller rebuilds the listener after the annotation patch
+  # above; until it has, https to this port meets a plain TCP listener.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-listeners
+      - --load-balancer-arn={{ _lf_lb_arn.stdout | trim }}
+      - --query=Listeners[?Port==`{{ langfuse.load_balancer.port | int }}`].Protocol | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _lf_lb_listener
+  until: _lf_lb_listener.stdout | trim == 'TLS'
+  retries: 30
+  delay: 10
+  changed_when: false
+  check_mode: false
+  when: _lf_tls
+
 - name: Wait for the web node(s) to pass the NLB health check
   ansible.builtin.command:
     argv:
@@ -1077,12 +1241,15 @@
             env:
               - {name: WEB, value: "http://{{ _lf_web_svc }}:3000"}
               - {name: NLB, value: "{{ _lf_url if _lf_present else '' }}"}
+              # The certificate is self-signed and the probe image has no copy
+              # of it; this soft check is about reachability, not trust.
+              - {name: NLB_WGET_OPTS, value: "{{ '--no-check-certificate' if _lf_tls else '' }}"}
             command: ["sh", "-c"]
             args:
               - |
-                code() { c=$(wget -qS -O /dev/null --timeout=5 --tries=1 "$1" 2>&1 | awk '/^ *HTTP\//{print $2; exit}'); echo "${c:-none}"; }
+                code() { c=$(wget -qS -O /dev/null --timeout=5 --tries=1 "$@" 2>&1 | awk '/^ *HTTP\//{print $2; exit}'); echo "${c:-none}"; }
                 echo "health: $(code "$WEB/api/public/health")"
-                if [ -n "$NLB" ]; then echo "nlb: $(code "$NLB/api/public/health")"; fi
+                if [ -n "$NLB" ]; then echo "nlb: $(code $NLB_WGET_OPTS "$NLB/api/public/health")"; fi
       YAML
       kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lf-probe --namespace={{ langfuse.namespace }} --timeout=120s >/dev/null
       kubectl logs pod/lf-probe --namespace={{ langfuse.namespace }}
@@ -1125,7 +1292,8 @@
       - "exposure:   {{ ('no load balancer -- kubectl port-forward -n ' ~ langfuse.namespace ~ ' svc/' ~ _lf_web_svc ~ ' 3000:3000, then open ' ~ _lf_url)
                         if not _lf_present else
                         (langfuse.load_balancer.type ~ ' NLB ' ~ _lf_host ~ ', allowed from ' ~ (_lf_sources | join(', ')) ~ '; '
-                         ~ (_lf_lb_health.results | map(attribute='stdout') | map('trim') | join('/')) ~ ' healthy target(s); ' ~ _lf_nlb_note) }}"
+                         ~ (_lf_lb_health.results | map(attribute='stdout') | map('trim') | join('/')) ~ ' healthy target(s); ' ~ _lf_nlb_note
+                         ~ ('; TLS terminated at the NLB with a self-signed certificate -- clients trust ' ~ (langfuse_state_files.tls_cert_file | realpath) ~ ' (curl --cacert)' if _lf_tls else '')) }}"
       - "login:      {{ langfuse.init.user_email }} -- password in {{ langfuse_state_files.init_user_password_file | realpath }}"
       - "api keys:   {{ langfuse_state_files.public_key_file | realpath }} (public), {{ langfuse_state_files.secret_key_file | realpath }} (secret) -- project {{ langfuse.init.project_id }}"
       - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:8123 as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"

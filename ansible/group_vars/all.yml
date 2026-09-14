@@ -321,6 +321,11 @@ langfuse_state_files:
   init_user_password_file:  "{{ state_dir }}/langfuse-admin-password"
   public_key_file:          "{{ state_dir }}/langfuse-public-key"
   secret_key_file:          "{{ state_dir }}/langfuse-secret-key"
+  # The self-signed key and certificate the langfuse role generates when
+  # langfuse.load_balancer.tls is true. The certificate doubles as the CA
+  # file clients trust (curl --cacert). Kept on teardown like the rest.
+  tls_cert_file:            "{{ state_dir }}/langfuse-tls-cert.pem"
+  tls_key_file:             "{{ state_dir }}/langfuse-tls-key.pem"
 
 # ---------------------------------------------------------------------------
 # Langfuse (optional Steps 13-15) -- an LLM tracing server that stores its
@@ -356,7 +361,8 @@ langfuse:
 
   # --- how browsers and SDKs reach Langfuse ---
   # Same shape and rules as clickhouse.load_balancer (Step 12), realised as a
-  # second NLB Service in front of the web pods. Plain HTTP; no domain or TLS.
+  # second NLB Service in front of the web pods. Plain HTTP by default; tls
+  # below terminates TLS at the NLB with a self-signed certificate. No domain.
   load_balancer:
     # none | internal | public -- see clickhouse.load_balancer for what each
     # means. public requires allowed_cidrs and refuses 0.0.0.0/0 unless you
@@ -365,9 +371,26 @@ langfuse:
     # Empty means the VPC CIDR for `internal` and an error for `public`.
     allowed_cidrs: []
     # NLB listener port; the target is always the web pod's 3000. Anything
-    # other than 80 is appended to the derived NEXTAUTH_URL.
+    # other than 80 (443 when tls is true) is appended to the derived
+    # NEXTAUTH_URL.
     port: 80
     cross_zone: true
+    # true = the NLB terminates TLS. Step 15 generates an RSA key and a
+    # self-signed certificate naming the NLB hostname into state/ (see
+    # langfuse_state_files), imports it into ACM and points the Service at it;
+    # the API keys and the login session then cross the network encrypted.
+    # Self-signed means clients must trust the certificate itself: curl
+    # --cacert state/langfuse-tls-cert.pem, a browser warning to click through,
+    # the SDK's CA environment variable. Set port to 443 with it, so the URL
+    # stays https://<hostname> with no port. Off by default: with false
+    # nothing here changes. Going back to false after a TLS deploy: tear down
+    # first (-e langfuse_state=absent) or remove the two aws-load-balancer-ssl-*
+    # annotations from Service langfuse-lb by hand -- a plain re-run keeps
+    # annotations it did not apply.
+    tls: false
+    # Validity of the self-signed certificate in days. It is regenerated only
+    # when missing or when the NLB hostname changes, not on expiry.
+    tls_cert_days: 825
 
   # --- pod sizing ---
   # Requests AND limits. Everything runs on the operator node group, which has
