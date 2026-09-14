@@ -95,7 +95,12 @@ http_code() {
 
 # ---- 1. find a URL that answers ---------------------------------------------
 step "Reaching Langfuse"
-reachable() { [[ "$(http_code --max-time 5 "$1/api/public/health")" == 200 ]]; }
+# The health probe deliberately bypasses http_code: /api/public/health needs
+# no credential, and at this point the URL is not yet confirmed to be the right
+# server, so the key must not travel with the probe (000 on connection failure).
+reachable() {
+  [[ "$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' "$1/api/public/health" 2>/dev/null || true)" == 200 ]]
+}
 
 LF_URL="${LANGFUSE_URL:-}"
 if [[ -n "$LF_URL" ]]; then
