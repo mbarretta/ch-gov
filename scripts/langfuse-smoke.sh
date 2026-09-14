@@ -35,8 +35,16 @@
 # curl config under a private temp directory, handed to curl as `--config -`
 # on stdin, and removed on exit. `bash -x` therefore shows only file paths.
 #
-# Override the URL with LANGFUSE_URL=http://... when you reach Langfuse by a
-# name this script cannot discover (a VPN alias, an SSH tunnel).
+# TLS: with langfuse.load_balancer.tls true the NLB terminates TLS with the
+# self-signed certificate the role generated, so the derived https:// address
+# is verified against that file, state/langfuse-tls-cert.pem, via `--cacert`
+# (lf_cacert, lib/common.sh). The certificate names the NLB hostname only, so
+# a LANGFUSE_URL or langfuse.url alias is verified against the system trust
+# store instead; set LANGFUSE_CACERT=<pem> to trust another CA. Verification
+# is never switched off (no -k / --insecure).
+#
+# Override the URL with LANGFUSE_URL=http(s)://... when you reach Langfuse by
+# a name this script cannot discover (a VPN alias, an SSH tunnel).
 #
 # Needs curl, jq, kubectl, and whatever scripts/ch-client.sh needs.
 #
@@ -81,12 +89,16 @@ trap cleanup EXIT
 # line from the files directly, so the secret is never expanded by the shell.
 AUTH_CFG="$TMP/auth.cfg"
 paste -d: "$PK_FILE" "$SK_FILE" | sed 's/^/user = "/; s/$/"/' > "$AUTH_CFG"
+# TLS trust for both curl wrappers below, settled once the URL is chosen:
+# (--cacert <pem>) for the NLB's self-signed certificate or an explicit
+# LANGFUSE_CACERT, empty for the system trust store. Never -k.
+CURL_TLS=()
 # curl wrapper: config on stdin, body to $TMP/body, HTTP status on stdout
 # (000 when the connection fails). Callers add the URL and any method/body
 # flags; nothing secret is ever among them.
 http_code() {
-  curl --silent --max-time 30 --config - --output "$TMP/body" --write-out '%{http_code}' "$@" \
-    < "$AUTH_CFG" 2>/dev/null || true
+  curl --silent --max-time 30 --config - --output "$TMP/body" --write-out '%{http_code}' \
+    ${CURL_TLS[@]+"${CURL_TLS[@]}"} "$@" < "$AUTH_CFG" 2>/dev/null || true
 }
 
 # ---- 1. find a URL that answers ---------------------------------------------
@@ -95,7 +107,8 @@ step "Reaching Langfuse"
 # no credential, and at this point the URL is not yet confirmed to be the right
 # server, so the key must not travel with the probe (000 on connection failure).
 reachable() {
-  [[ "$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' "$1/api/public/health" 2>/dev/null || true)" == 200 ]]
+  [[ "$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' \
+         ${CURL_TLS[@]+"${CURL_TLS[@]}"} "$1/api/public/health" 2>/dev/null || true)" == 200 ]]
 }
 
 LF_URL="${LANGFUSE_URL:-}"
@@ -105,12 +118,27 @@ elif [[ -n "$LF_URL_CFG" ]]; then
   LF_URL="$LF_URL_CFG"
   info "using langfuse.url from group_vars: $LF_URL"
 elif [[ "${LF_LB_TYPE:-none}" != none ]]; then
-  # lf_url (lib/common.sh): the NLB hostname, port appended unless 80.
+  # lf_url (lib/common.sh): the NLB hostname; https with the port appended
+  # unless 443 when langfuse.load_balancer.tls is true, else http unless 80.
   if LF_URL="$(lf_url)"; then
     info "load balancer ($LF_LB_TYPE NLB): $LF_URL"
+    # The NLB presents the role's self-signed certificate, and this derived
+    # address is the one name it carries -- so only here is it the CA.
+    if LF_CACERT="$(lf_cacert)"; then
+      CURL_TLS=(--cacert "$LF_CACERT")
+      info "TLS: trusting the role's self-signed certificate at $LF_CACERT"
+    elif [[ "$LF_URL" == https://* ]]; then
+      warn "tls is on but $LF_TLS_CERT is missing; curl will refuse the NLB's certificate -- run: scripts/play.sh --tags lf-app"
+    fi
   else
     warn "no hostname on Service langfuse-lb in $LF_NS yet"
   fi
+fi
+# An explicit CA wins over both the system trust store and the derived one.
+if [[ -n "${LANGFUSE_CACERT:-}" ]]; then
+  [[ -r "$LANGFUSE_CACERT" ]] || die "LANGFUSE_CACERT=$LANGFUSE_CACERT is not readable"
+  CURL_TLS=(--cacert "$LANGFUSE_CACERT")
+  info "TLS: trusting LANGFUSE_CACERT=$LANGFUSE_CACERT"
 fi
 
 if [[ -n "$LF_URL" ]] && reachable "$LF_URL"; then
@@ -133,6 +161,7 @@ else
     sleep 0.1
   done
   LF_URL="http://localhost:3000"
+  CURL_TLS=()   # plain http through the tunnel; no CA applies
   info "forwarding localhost:3000 -> svc/$LF_RELEASE-web:3000 in $LF_NS"
   reachable "$LF_URL" || die "Langfuse does not answer at $LF_URL -- is the release healthy? kubectl get pods -n $LF_NS"
   ok "health check passed through the port-forward"
@@ -211,5 +240,9 @@ if [[ -n "$PF" ]]; then
   info "open it: kubectl port-forward -n $LF_NS svc/$LF_RELEASE-web 3000:3000, then http://localhost:3000"
 else
   info "open it: $LF_URL"
+  # CURL_TLS[1] is the CA curl actually used (LANGFUSE_CACERT if it was set).
+  if [[ -n "${LF_CACERT:-}" ]]; then
+    info "self-signed certificate: expect a browser warning; curl needs --cacert ${CURL_TLS[1]}"
+  fi
 fi
 info "login: the init user in group_vars; password in state/langfuse-admin-password"

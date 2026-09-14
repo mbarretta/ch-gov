@@ -71,6 +71,10 @@ readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
 
 # ---- Langfuse (optional Steps 13-15) --------------------------------------
 readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
+# The certificate the langfuse role generates into state/ when
+# langfuse.load_balancer.tls is true and terminates at the langfuse-lb NLB.
+# Self-signed, so it is its own CA: `curl --cacert "$LF_TLS_CERT"` trusts it.
+readonly LF_TLS_CERT="$CH_PROJECT_ROOT/state/langfuse-tls-cert.pem"
 
 # Prints one value from the langfuse: block of group_vars, e.g.
 #   lf_var '  namespace:'      lf_var '    type:'      lf_var '  enabled:'
@@ -90,22 +94,41 @@ lf_var() {
     }' "$CH_GROUP_VARS"
 }
 
+# Succeeds when langfuse.load_balancer.tls is true. `    tls:` is the only
+# key at that indentation spelled that way in the langfuse: block, so the
+# prefix match is unambiguous.
+lf_tls() { [[ "$(lf_var '    tls:')" == true ]]; }
+
 # Prints the address Langfuse is reached at -- the same rule the langfuse role
-# uses for NEXTAUTH_URL, so the two never disagree: langfuse.url when set,
-# else http://<hostname of the langfuse-lb NLB>, with :<port> appended when
-# langfuse.load_balancer.port is not 80. Prints nothing and returns 1 when the
-# NLB has no hostname (not provisioned yet, or the Service is absent). Reads
-# the Service through state/kubeconfig, like every other script here. The
-# load_balancer.type `none` case (kubectl port-forward, fixed at
-# http://localhost:3000) has nothing to derive and is the caller's to handle.
+# uses for NEXTAUTH_URL, so the two never disagree: langfuse.url when set;
+# else the hostname of the langfuse-lb NLB, as https://<host> with :<port>
+# appended unless it is 443 when langfuse.load_balancer.tls is true, and as
+# http://<host> with :<port> appended unless it is 80 otherwise. Prints nothing
+# and returns 1 when the NLB has no hostname (not provisioned yet, or the
+# Service is absent). Reads the Service through state/kubeconfig, like every
+# other script here. The load_balancer.type `none` case (kubectl port-forward,
+# fixed at http://localhost:3000) has nothing to derive and is the caller's to
+# handle.
 lf_url() {
-  local url host port
+  local url host port scheme default_port
   url="$(lf_var '  url:')"
   if [[ -n "$url" ]]; then printf '%s\n' "$url"; return 0; fi
   host="$(KUBECONFIG="$CH_PROJECT_ROOT/state/kubeconfig" kubectl get service langfuse-lb \
             -n "$(lf_var '  namespace:')" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
   [[ -n "$host" ]] || return 1
   port="$(lf_var '    port:')"
-  url="http://$host"; [[ "${port:-80}" == 80 ]] || url="$url:$port"
+  if lf_tls; then scheme=https; default_port=443; else scheme=http; default_port=80; fi
+  url="$scheme://$host"; [[ "${port:-$default_port}" == "$default_port" ]] || url="$url:$port"
   printf '%s\n' "$url"
+}
+
+# Prints the CA file curl needs for the address lf_url derives -- the role's
+# self-signed certificate, LF_TLS_CERT -- when tls is true and the file is
+# readable. Prints nothing and returns 1 otherwise (tls off, or the role has
+# not generated it yet). Only for the derived NLB address: the certificate
+# names the NLB hostname alone, so a langfuse.url or LANGFUSE_URL alias must be
+# verified against the system trust store (or a CA the caller supplies).
+lf_cacert() {
+  lf_tls && [[ -r "$LF_TLS_CERT" ]] || return 1
+  printf '%s\n' "$LF_TLS_CERT"
 }
