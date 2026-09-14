@@ -41,7 +41,6 @@
     tags:
       Project: clickhouse-private
       ManagedBy: ansible
-  register: _ch_bucket
 
 - name: Report the bucket
   ansible.builtin.debug:

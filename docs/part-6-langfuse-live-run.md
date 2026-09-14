@@ -829,7 +829,9 @@ creates), and every read, wait and probe task ran for real, as the
   the token task's `stdout`. The token is a 12-hour ECR credential for the
   target registry. Pre-existing Step 1–12 code that `plan.constraints[5]`
   puts out of scope for this cycle; recorded in the plan's deferral ledger.
-  The scratch log of this run was scrubbed.
+  The scratch log of this run was scrubbed. Fixed since by plan
+  `fix-langfuse-deferrals` (task `def-d3`): the assert now carries the
+  `show_secrets`-gated `no_log`.
 
 ## Commits from this run
 

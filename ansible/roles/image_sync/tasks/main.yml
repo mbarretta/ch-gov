@@ -45,6 +45,7 @@
     label: "{{ item.name }}"
   register: _ecr_tokens
   changed_when: false
+  check_mode: false
   no_log: true          # stdout IS the credential
 
 - name: Log in to each registry
@@ -63,11 +64,16 @@
   register: _logins
   changed_when: false
   failed_when: false    # checked below, so we can report clearly
+  check_mode: false
   no_log: true          # stdin carries the credential
 
 - name: Verify both logins succeeded
-  # Separate task so the diagnostic is readable: only rc and stderr are
-  # surfaced, neither of which contains the token.
+  # Separate task so the diagnostic is readable. assert always dumps its
+  # full result, and each loop item here is a login result whose own `item`
+  # is the token task's result -- stdout included. The label below keeps the
+  # per-item line clean, but only no_log keeps the token out of that dump.
+  # fail_msg (rc and stderr, never the token) still surfaces on a failure;
+  # -e show_secrets=true reveals the full result.
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: >-
@@ -78,6 +84,7 @@
   loop: "{{ _logins.results }}"
   loop_control:
     label: "{{ item.item.item.name }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 # --- the copy itself -------------------------------------------------------
 
@@ -101,6 +108,7 @@
   register: _existing
   changed_when: false
   failed_when: false      # "not found" is an expected, meaningful answer
+  check_mode: false
 
 - name: Split the results by how each artifact is mirrored
   # Everything without a kind, and any kind other than helm-http, goes
