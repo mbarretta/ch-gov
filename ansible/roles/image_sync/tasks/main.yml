@@ -67,24 +67,37 @@
   check_mode: false
   no_log: true          # stdin carries the credential
 
+- name: Project the login results into a token-free list
+  # Each login result nests its loop item, which is the token task's result
+  # -- stdout included. assert always dumps its full result, so anything the
+  # assert below loops over ends up in the log at -v or on failure. Keep only
+  # what the diagnostic needs (name, registry, rc, stderr); no_log here
+  # because the input still carries the token, and -e show_secrets=true does
+  # not lift it: a 12-hour registry token is not a password worth revealing.
+  ansible.builtin.set_fact:
+    _login_results: >-
+      {{ _login_results | default([]) + [{
+           'name': item.item.item.name,
+           'registry': item.item.item.registry,
+           'rc': item.rc,
+           'stderr': item.stderr | default('') }] }}
+  loop: "{{ _logins.results }}"
+  no_log: true          # item nests the token
+
 - name: Verify both logins succeeded
-  # Separate task so the diagnostic is readable. assert always dumps its
-  # full result, and each loop item here is a login result whose own `item`
-  # is the token task's result -- stdout included. The label below keeps the
-  # per-item line clean, but only no_log keeps the token out of that dump.
-  # fail_msg (rc and stderr, never the token) still surfaces on a failure;
-  # -e show_secrets=true reveals the full result.
+  # Separate task so the diagnostic is readable. It loops over the projection
+  # above, so nothing it can print -- per-item result, fail_msg, -vvv dump --
+  # contains the token; no no_log needed. fail_msg surfaces rc and stderr.
   ansible.builtin.assert:
     that: item.rc == 0
     fail_msg: >-
-      skopeo login failed for {{ item.item.item.name }} registry
-      ({{ item.item.item.registry }}), rc={{ item.rc }}:
-      {{ item.stderr | default('no stderr') }}
-    success_msg: "logged in to {{ item.item.item.registry }}"
-  loop: "{{ _logins.results }}"
+      skopeo login failed for {{ item.name }} registry
+      ({{ item.registry }}), rc={{ item.rc }}:
+      {{ item.stderr | default('no stderr', true) }}
+    success_msg: "logged in to {{ item.registry }}"
+  loop: "{{ _login_results }}"
   loop_control:
-    label: "{{ item.item.item.name }}"
-  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+    label: "{{ item.name }}"
 
 # --- the copy itself -------------------------------------------------------
 
