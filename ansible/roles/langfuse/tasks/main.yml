@@ -957,11 +957,13 @@
   no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: The migrations landed, on the shared engine
-  # Langfuse declares traces, observations and scores as ReplacingMergeTree;
-  # ClickHouse Private (cloud_mode) creates every MergeTree-family table as
-  # Shared*MergeTree -- the S3-backed, Keeper-coordinated engine -- so the
-  # check is for that prefix. A plain MergeTree here would be a table on one
-  # replica's local disk that the others cannot read.
+  # Langfuse declares traces, observations and scores as ReplacingMergeTree,
+  # and so events_core -- the table v4 in events_only mode actually writes
+  # to, while those three stay empty. ClickHouse Private (cloud_mode) creates
+  # every MergeTree-family table as Shared*MergeTree -- the S3-backed,
+  # Keeper-coordinated engine -- so the check is for that prefix. A plain
+  # MergeTree here would be a table on one replica's local disk that the
+  # others cannot read.
   ansible.builtin.assert:
     that:
       - _lf_ch_tables.stdout_lines | length > 0
@@ -975,7 +977,7 @@
       database {{ langfuse.clickhouse_database }}: {{ _lf_ch_tables.stdout_lines | length }} tables,
       {{ _lf_ch_core_lines | join(', ') }}
   vars:
-    _lf_ch_core: [traces, observations, scores]
+    _lf_ch_core: [traces, observations, scores, events_core]
     _lf_ch_core_lines: "{{ _lf_ch_tables.stdout_lines | select('match', '^(' ~ (_lf_ch_core | join('|')) ~ ')=') | list }}"
     _lf_ch_missing: "{{ _lf_ch_core | difference(_lf_ch_core_lines | map('regex_replace', '=.*$', '') | list) }}"
     _lf_ch_unshared: "{{ _lf_ch_core_lines | reject('search', '=Shared\\w*MergeTree$') | list }}"

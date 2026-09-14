@@ -467,7 +467,7 @@ ok: [localhost] => { "msg": "all 6 containers in langfuse pull from <account>.dk
 TASK [langfuse : The data stores are the major versions the images were mirrored for] ***
 ok: [localhost] => { "msg": "postgres (PostgreSQL) 18.6 / Valkey server v=9.1.2 ..." }
 TASK [langfuse : The migrations landed, on the shared engine] ******************
-ok: [localhost] => { "msg": "database langfuse: 13 tables, observations=SharedReplacingMergeTree, scores=SharedReplacingMergeTree, traces=SharedReplacingMergeTree" }
+ok: [localhost] => { "msg": "database langfuse: 13 tables, events_core=SharedReplacingMergeTree, observations=SharedReplacingMergeTree, scores=SharedReplacingMergeTree, traces=SharedReplacingMergeTree" }
 TASK [langfuse : Wait for the web node(s) to pass the NLB health check] ********
 ok: [localhost]
 TASK [langfuse : Langfuse must answer through its Service] *********************
