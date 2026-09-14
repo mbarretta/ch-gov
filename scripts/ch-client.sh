@@ -27,9 +27,8 @@ source "$CH_ROOT/scripts/lib/common.sh"
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars.
-gv="$CH_ROOT/ansible/group_vars/all.yml"
-NS="$(awk -F'"' '/^  namespace:/ {print $2; exit}' "$gv")"
-USER_="$(awk -F'"' '/^  admin_username:/ {print $2; exit}' "$gv")"
+NS="$(awk -F'"' '/^  namespace:/ {print $2; exit}' "$CH_GROUP_VARS")"
+USER_="$(awk -F'"' '/^  admin_username:/ {print $2; exit}' "$CH_GROUP_VARS")"
 PW_FILE="$CH_ROOT/state/clickhouse-admin-password"
 LOCAL_PORT="${CH_LOCAL_PORT:-19000}"
 
@@ -40,7 +39,7 @@ else die "clickhouse-client not installed: brew install clickhouse"; fi
 
 if [[ "${1:-}" == "--lb" ]]; then
   shift
-  CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$gv")"
+  CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
   host="$(kubectl get service "$CLUSTER-lb" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
   [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
   info "connecting to $host:9000 (NLB)"

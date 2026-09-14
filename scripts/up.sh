@@ -23,7 +23,6 @@ source "$CH_ROOT/scripts/lib/common.sh"
 # this order when no tags are given, so the list here only serves --from.
 STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb)
 
-gv="$CH_ROOT/ansible/group_vars/all.yml"
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
 # lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
 # scrapes below keep landing on the ClickHouse keys.
@@ -48,7 +47,7 @@ fi
 ((SKIP_IMAGES)) && TAGS=("${TAGS[@]/images}")
 TAGS=("${TAGS[@]}"); TAGS=($(printf '%s\n' "${TAGS[@]}" | grep -v '^$'))
 
-LB_TYPE="$(awk -F'"' '/^    type:/ {print $2; exit}' "$gv")"
+LB_TYPE="$(awk -F'"' '/^    type:/ {print $2; exit}' "$CH_GROUP_VARS")"
 
 step "Bringing up: ${TAGS[*]}"
 info "compute starts at Step 5 (nodes): ~\$2.32/hr while up, ~\$0.15/hr with nodes down"

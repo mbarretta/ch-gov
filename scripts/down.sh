@@ -51,12 +51,11 @@ while (($#)); do
 done
 
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
-gv="$CH_ROOT/ansible/group_vars/all.yml"
-NS="$(awk -F'"' '/^  namespace:/ {print $2; exit}' "$gv")"
-CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$gv")"
-BUCKET_ACCOUNT="$(awk -F'"' '/^  target_account_id:/ {print $2; exit}' "$gv")"
-REGION="$(awk -F'"' '/^  target_region:/ {print $2; exit}' "$gv")"
-ENVIRONMENT_NAME="$(awk -F'"' '/^infrastructure:/{f=1} f && /^  environment_name:/ {print $2; exit}' "$gv")"
+NS="$(awk -F'"' '/^  namespace:/ {print $2; exit}' "$CH_GROUP_VARS")"
+CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
+BUCKET_ACCOUNT="$(awk -F'"' '/^  target_account_id:/ {print $2; exit}' "$CH_GROUP_VARS")"
+REGION="$(awk -F'"' '/^  target_region:/ {print $2; exit}' "$CH_GROUP_VARS")"
+ENVIRONMENT_NAME="$(awk -F'"' '/^infrastructure:/{f=1} f && /^  environment_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
 # lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
 # scrapes above keep landing on the ClickHouse keys.
 LF_NAMESPACE="$(lf_var '  namespace:')"
