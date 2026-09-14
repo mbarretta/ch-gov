@@ -163,10 +163,26 @@
   register: _copied
 
 - name: Report what was copied vs already present
+  # In --check the copy task never runs, so every one of its results is
+  # skipped: the missing artifacts because check mode skips the command
+  # module, the present ones because their `when` was false. Counting
+  # skipped results as present there reports everything as present. So
+  # "already present" re-applies the copy task's predicate, inverted, to
+  # the nested existence-check result (item.item -- that read is real in
+  # --check, check_mode: false), and check mode labels the rest "would
+  # copy". A real run keeps counting what actually ran.
+  vars:
+    _present: >-
+      {{ _copied.results | map(attribute='item')
+         | selectattr('rc', 'equalto', 0)
+         | selectattr('stdout', 'defined')
+         | selectattr('stdout', 'search', 'sha256:') | list | length }}
+    _ran: "{{ _copied.results | rejectattr('skipped', 'defined') | list | length }}"
+    _would: "{{ (_copied.results | length) - (_present | int) }}"
   ansible.builtin.debug:
     msg: >-
-      {{ _copied.results | rejectattr('skipped', 'defined') | list | length }} copied,
-      {{ _copied.results | selectattr('skipped', 'defined') | list | length }} already present
+      {{ _would ~ ' would copy' if ansible_check_mode else _ran ~ ' copied' }},
+      {{ _present }} already present
       ({{ 'FIPS' if fips else 'standard' }} build);
       {{ _helm_http_missing | length }} chart(s) to push with helm
 
