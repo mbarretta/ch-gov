@@ -25,10 +25,9 @@ STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb
 
 gv="$CH_ROOT/ansible/group_vars/all.yml"
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
-# The langfuse: block is last in all.yml, so this scrape is block-scoped --
-# match the block header first, then the key -- and the first-match scrapes
-# below keep landing on the ClickHouse keys.
-LF_ENABLED="$(awk '/^langfuse:/{f=1} f && /^  enabled:/ {print $2; exit}' "$gv")"
+# lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
+# scrapes below keep landing on the ClickHouse keys.
+LF_ENABLED="$(lf_var '  enabled:')"
 [[ "$LF_ENABLED" == true ]] && STEPS+=(lf-storage lf-db lf-app)
 
 YES=0; SKIP_IMAGES=0; FROM=""
@@ -70,25 +69,18 @@ if ((rc == 0)); then
   ok "connect:  scripts/ch-client.sh            (port-forward from this machine)"
   [[ "${LB_TYPE:-none}" != none ]] && ok "          scripts/ch-client.sh --lb       (via the $LB_TYPE NLB, where its address is reachable)"
   if [[ "$LF_ENABLED" == true ]]; then
-    # The address NEXTAUTH_URL was baked with, derived the way the langfuse
-    # role derives it: langfuse.url if set, else the NLB hostname (port
-    # appended unless 80), else the fixed 3000:3000 port-forward.
-    lf_var() { awk -F'"' -v key="$1" '/^langfuse:/{f=1} f && index($0, key) == 1 {print $2; exit}' "$gv"; }
+    # The address NEXTAUTH_URL was baked with: langfuse.url if set, else the
+    # NLB hostname via lf_url (port appended unless 80; the same rule the
+    # langfuse role uses), else the fixed 3000:3000 port-forward.
     LF_NS="$(lf_var '  namespace:')"; LF_RELEASE="$(lf_var '  release:')"; LF_URL="$(lf_var '  url:')"; LF_LB_TYPE="$(lf_var '    type:')"
-    LF_LB_PORT="$(awk '/^langfuse:/{f=1} f && /^    port:/ {print $2; exit}' "$gv")"
     if [[ -n "$LF_URL" ]]; then
       ok "langfuse: $LF_URL   (langfuse.url from group_vars; login: state/langfuse-admin-password)"
     elif [[ "${LF_LB_TYPE:-none}" == none ]]; then
       ok "langfuse: kubectl port-forward -n $LF_NS svc/$LF_RELEASE-web 3000:3000, then http://localhost:3000"
+    elif LF_URL="$(lf_url)"; then
+      ok "langfuse: $LF_URL   (via the $LF_LB_TYPE NLB; login: state/langfuse-admin-password)"
     else
-      host="$(KUBECONFIG="$CH_ROOT/state/kubeconfig" kubectl get service langfuse-lb -n "$LF_NS" \
-                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-      if [[ -n "$host" ]]; then
-        LF_URL="http://$host"; [[ "${LF_LB_PORT:-80}" != 80 ]] && LF_URL="$LF_URL:$LF_LB_PORT"
-        ok "langfuse: $LF_URL   (via the $LF_LB_TYPE NLB; login: state/langfuse-admin-password)"
-      else
-        warn "langfuse: could not read the $LF_LB_TYPE NLB hostname; try: kubectl get service langfuse-lb -n $LF_NS"
-      fi
+      warn "langfuse: could not read the $LF_LB_TYPE NLB hostname; try: kubectl get service langfuse-lb -n $LF_NS"
     fi
     ok "          scripts/langfuse-smoke.sh       (posts a trace and reads it back from ClickHouse)"
   fi

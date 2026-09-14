@@ -57,11 +57,10 @@ CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$gv")"
 BUCKET_ACCOUNT="$(awk -F'"' '/^  target_account_id:/ {print $2; exit}' "$gv")"
 REGION="$(awk -F'"' '/^  target_region:/ {print $2; exit}' "$gv")"
 ENVIRONMENT_NAME="$(awk -F'"' '/^infrastructure:/{f=1} f && /^  environment_name:/ {print $2; exit}' "$gv")"
-# The langfuse: block is last in all.yml, so its scrapes are block-scoped --
-# match the block header first, then the key -- and the first-match scrapes
-# above keep landing on the ClickHouse keys.
-LF_NAMESPACE="$(awk -F'"' '/^langfuse:/{f=1} f && /^  namespace:/ {print $2; exit}' "$gv")"
-LF_RELEASE="$(awk -F'"' '/^langfuse:/{f=1} f && /^  release:/ {print $2; exit}' "$gv")"
+# lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
+# scrapes above keep landing on the ClickHouse keys.
+LF_NAMESPACE="$(lf_var '  namespace:')"
+LF_RELEASE="$(lf_var '  release:')"
 
 # tag:state-variable pairs, in teardown order. lf-db (the Langfuse database
 # and user inside ClickHouse) is deliberately NOT in the default plan:

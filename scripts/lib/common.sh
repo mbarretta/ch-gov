@@ -68,3 +68,44 @@ readonly TARGET_PROFILE="sa"
 
 # The three images that make up a ClickHouse Private deployment.
 readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
+
+# ---- Langfuse (optional Steps 13-15) --------------------------------------
+readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
+
+# Prints one value from the langfuse: block of group_vars, e.g.
+#   lf_var '  namespace:'      lf_var '    type:'      lf_var '  enabled:'
+# The key carries its own indentation, which is what tells "  namespace:"
+# under langfuse: apart from the same key under clickhouse:. The block is last
+# in all.yml, so the scrape is block-scoped -- match the header first, then
+# the key -- and the first-match scrapes of the ClickHouse keys elsewhere are
+# unaffected. Quoted values come back without the quotes; bare ones (true,
+# 80) as written. Prints nothing when the key is absent.
+lf_var() {
+  awk -v key="$1" '
+    /^langfuse:/ { f = 1 }
+    f && index($0, key) == 1 {
+      if (split($0, q, "\"") > 2) print q[2]
+      else { sub(/^[^:]*:[ \t]*/, ""); print $1 }
+      exit
+    }' "$CH_GROUP_VARS"
+}
+
+# Prints the address Langfuse is reached at -- the same rule the langfuse role
+# uses for NEXTAUTH_URL, so the two never disagree: langfuse.url when set,
+# else http://<hostname of the langfuse-lb NLB>, with :<port> appended when
+# langfuse.load_balancer.port is not 80. Prints nothing and returns 1 when the
+# NLB has no hostname (not provisioned yet, or the Service is absent). Reads
+# the Service through state/kubeconfig, like every other script here. The
+# load_balancer.type `none` case (kubectl port-forward, fixed at
+# http://localhost:3000) has nothing to derive and is the caller's to handle.
+lf_url() {
+  local url host port
+  url="$(lf_var '  url:')"
+  if [[ -n "$url" ]]; then printf '%s\n' "$url"; return 0; fi
+  host="$(KUBECONFIG="$CH_PROJECT_ROOT/state/kubeconfig" kubectl get service langfuse-lb \
+            -n "$(lf_var '  namespace:')" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 1
+  port="$(lf_var '    port:')"
+  url="http://$host"; [[ "${port:-80}" == 80 ]] || url="$url:$port"
+  printf '%s\n' "$url"
+}

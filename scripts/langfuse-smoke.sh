@@ -57,18 +57,14 @@ done
 for tool in curl jq kubectl; do have "$tool" || die "$tool not installed"; done
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
-# Read what the playbook decided, so this stays in step with group_vars. The
-# langfuse: block is last in all.yml, so every scrape is block-scoped: match
-# the block header first, then the key.
-gv="$CH_ROOT/ansible/group_vars/all.yml"
-lf_var() { awk -F'"' -v key="$1" '/^langfuse:/{f=1} f && index($0, key) == 1 {print $2; exit}' "$gv"; }
+# Read what the playbook decided, so this stays in step with group_vars
+# (lf_var, lib/common.sh, is block-scoped to langfuse:).
 LF_NS="$(lf_var '  namespace:')"
 LF_RELEASE="$(lf_var '  release:')"
 LF_DB="$(lf_var '  clickhouse_database:')"
 LF_URL_CFG="$(lf_var '  url:')"
 LF_LB_TYPE="$(lf_var '    type:')"
-LF_LB_PORT="$(awk '/^langfuse:/{f=1} f && /^    port:/ {print $2; exit}' "$gv")"
-[[ -n "$LF_NS" && -n "$LF_RELEASE" && -n "$LF_DB" ]] || die "could not read the langfuse: block from $gv"
+[[ -n "$LF_NS" && -n "$LF_RELEASE" && -n "$LF_DB" ]] || die "could not read the langfuse: block from $CH_GROUP_VARS"
 
 PK_FILE="$CH_ROOT/state/langfuse-public-key"
 SK_FILE="$CH_ROOT/state/langfuse-secret-key"
@@ -109,9 +105,8 @@ elif [[ -n "$LF_URL_CFG" ]]; then
   LF_URL="$LF_URL_CFG"
   info "using langfuse.url from group_vars: $LF_URL"
 elif [[ "${LF_LB_TYPE:-none}" != none ]]; then
-  host="$(kubectl get service langfuse-lb -n "$LF_NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-  if [[ -n "$host" ]]; then
-    LF_URL="http://$host"; [[ "${LF_LB_PORT:-80}" != 80 ]] && LF_URL="$LF_URL:$LF_LB_PORT"
+  # lf_url (lib/common.sh): the NLB hostname, port appended unless 80.
+  if LF_URL="$(lf_url)"; then
     info "load balancer ($LF_LB_TYPE NLB): $LF_URL"
   else
     warn "no hostname on Service langfuse-lb in $LF_NS yet"
