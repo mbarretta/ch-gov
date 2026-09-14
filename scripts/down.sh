@@ -139,7 +139,10 @@ case "$MODE" in
 esac
 info "S3 data is never deleted by this script -- see scripts/s3-purge-cluster-data.sh"
 if ((!YES)); then
-  read -r -p "  Proceed? [y/N] " ans; [[ "$ans" =~ ^[Yy]$ ]] || die "aborted"
+  # `|| ans=n`: with stdin at EOF (a wrapper or CI calling without --yes) read
+  # returns 1 and set -e used to exit here with no output. Treat EOF as "n".
+  read -r -p "  Proceed? [y/N] " ans || ans=n
+  [[ "$ans" =~ ^[Yy]$ ]] || die "aborted"
 fi
 
 start=$(date +%s)
