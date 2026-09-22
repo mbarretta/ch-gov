@@ -11,9 +11,6 @@
 # This project keeps its AWS config in-repo rather than in ~/.aws, so the whole
 # setup is portable. Point the CLI at it unless the caller already chose a file.
 CH_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [[ -z "${AWS_CONFIG_FILE:-}" && -f "$CH_PROJECT_ROOT/.aws/config" ]]; then
-  export AWS_CONFIG_FILE="$CH_PROJECT_ROOT/.aws/config"
-fi
 
 # ---- output helpers -------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -29,6 +26,36 @@ warn()  { printf '  %s[warn]%s %s\n'   "$C_YEL" "$C_RESET" "$*"; }
 fail()  { printf '  %s[fail]%s %s\n'   "$C_RED" "$C_RESET" "$*"; }
 info()  { printf '  %s%s%s\n'          "$C_DIM" "$*" "$C_RESET"; }
 die()   { fail "$*"; exit 1; }
+
+# ---- AWS config bootstrap --------------------------------------------------
+# .aws/config is generated from ansible/files/aws-config.ini.j2, not tracked
+# directly, so use_fips_endpoint always matches the `fips:` switch. The
+# authoritative render happens inside ansible/deploy.yml's pre_tasks
+# (tags: [always]), which honors whatever -e fips=... a given run passes.
+# This one exists only because scripts/play.sh and scripts/part1-setup.sh both
+# check AWS authentication BEFORE Ansible ever starts -- on a fresh checkout
+# there is no .aws/config yet for that check to use. Credential-free (plain
+# text substitution against the persistent `fips:` default in group_vars),
+# and safe to re-run: it only fills in the file when it's missing, so it never
+# clobbers a render already produced by an -e fips=... deploy.yml run.
+render_aws_config() {
+  local out="$CH_PROJECT_ROOT/.aws/config"
+  # Skip only when the existing file already carries use_fips_endpoint --
+  # not merely when it exists. A checkout cloned before this template
+  # existed may still have the old, tracked .aws/config on disk (now
+  # gitignored, so nothing else would ever touch it); re-render that one
+  # once so the new knob actually takes effect there too.
+  [[ -f "$out" ]] && grep -q '^use_fips_endpoint' "$out" && return 0
+  local tmpl="$CH_PROJECT_ROOT/ansible/files/aws-config.ini.j2"
+  [[ -f "$tmpl" ]] || die "missing $tmpl -- checkout looks incomplete"
+  local fips_default use_fips=false
+  fips_default="$(awk -F'[: \t]+' '/^fips:/{print $2; exit}' "$CH_PROJECT_ROOT/ansible/group_vars/all.yml")"
+  [[ "$fips_default" == "true" ]] && use_fips=true
+  mkdir -p "$(dirname "$out")"
+  sed "s/{{ 'true' if fips else 'false' }}/$use_fips/g" "$tmpl" > "$out"
+}
+render_aws_config
+export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
 
 # Tracks non-fatal problems so the script can exit non-zero at the very end
 # instead of stopping at the first issue -- you want the whole report.

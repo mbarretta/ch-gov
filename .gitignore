@@ -4,6 +4,11 @@
 .aws/cli/
 .env
 
+# .aws/config is generated from ansible/files/aws-config.ini.j2 (rendered by
+# ansible/deploy.yml's pre_tasks, and before that by scripts/lib/common.sh),
+# so use_fips_endpoint always tracks the `fips:` switch -- do not track it.
+.aws/config
+
 *.log
 state/
 logs/
