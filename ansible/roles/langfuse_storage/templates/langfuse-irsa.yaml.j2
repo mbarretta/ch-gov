@@ -74,10 +74,79 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${BucketName}'
                   - !Sub 'arn:aws:s3:::${BucketName}/*'
+{% if fips %}
+              # FIPS hardening Phase 2: the bucket's default encryption below
+              # becomes aws:kms (see langfuse_storage/tasks/main.yml), backed
+              # by LangfuseBucketKmsKey. This is the ONLY statement anywhere
+              # that grants a real principal use of that key -- see the key's
+              # own KeyPolicy comment for why access is delegated here, in
+              # IAM, rather than named directly in the key policy.
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt LangfuseBucketKmsKey.Arn
+{% endif %}
       Tags:
         - {Key: Project, Value: clickhouse-private}
+{% if fips %}
+  # =========================================================================
+  # Customer-managed KMS key (FIPS 140-3 hardening, Phase 2)
+  # =========================================================================
+  # Account-root admin only, same reasoning as storage_iam's KMS keys: a
+  # KeyPolicy statement naming LangfuseS3Role.Arn while that role's own
+  # policy names the key's Arn back is a circular resource dependency, which
+  # CloudFormation refuses to create. Real access is delegated entirely to
+  # LangfuseS3Role's own IAM policy above, a one-directional dependency.
+  LangfuseBucketKmsKey:
+    Type: AWS::KMS::Key
+    # Retained on purpose: the Langfuse bucket outlives this stack (see "the
+    # bucket" comment in langfuse_storage/tasks/main.yml), but the key that
+    # protects its ciphertext lives here, inside the disposable IRSA stack.
+    # Without Retain, tearing down --tags lf-storage schedules this key's
+    # deletion and strands every object the bucket still holds.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: >-
+        SSE-KMS key for the Langfuse bucket ({{ langfuse.bucket_name }}).
+        Retained across teardown/recreation of the
+        {{ infrastructure.environment_name }}-langfuse-irsa stack -- the
+        bucket the key protects is never deleted.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+  # Retained alongside the key: this is the recovery handle. See
+  # tasks/main.yml for the full recovery procedure after a stack recreation.
+  LangfuseBucketKmsAlias:
+    Type: AWS::KMS::Alias
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: "alias/{{ infrastructure.environment_name }}-langfuse-bucket"
+      TargetKeyId: !Ref LangfuseBucketKmsKey
+{% endif %}
 
 Outputs:
   LangfuseS3RoleArn:
     Description: The Langfuse chart's ServiceAccount is annotated with this in Step 15.
     Value: !GetAtt LangfuseS3Role.Arn
+{% if fips %}
+  LangfuseBucketKmsKeyArn:
+    Description: >-
+      Passed as the Langfuse bucket's encryption_key_id in
+      langfuse_storage/tasks/main.yml. Retained on teardown -- see the key's
+      own comment above for the recovery path if this stack is recreated.
+    Value: !GetAtt LangfuseBucketKmsKey.Arn
+{% endif %}

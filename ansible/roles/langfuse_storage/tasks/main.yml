@@ -11,49 +11,13 @@
 #   (the bucket is deliberately NOT deleted -- see the task at the end)
 
 - name: Preconditions and inputs (skipped on teardown)
-  # The bucket is an input to the stack (its name is a template parameter) and
-  # the OIDC provider is the precondition for the role being assumable. Neither
-  # applies when removing the stack: creating a bucket during teardown would be
-  # absurd, and the OIDC lookup needs an EKS cluster that may already be gone.
+  # The OIDC provider is the precondition for the role being assumable, and
+  # the OIDC lookup needs an EKS cluster that may already be gone on
+  # teardown. Bucket creation used to live in this block too; it now runs
+  # after the IRSA stack deploy below (see that task's comment), since
+  # fips: true needs a KMS key that stack creates.
   when: (langfuse_storage_state | default('present')) != 'absent'
   block:
-    # --- the bucket ----------------------------------------------------------
-    # Managed with the s3_bucket module rather than CloudFormation, for the
-    # same reason as the ClickHouse data bucket: a bucket holding data must
-    # outlive its stack. The module is idempotent, so an existing bucket is
-    # simply adopted.
-
-    - name: Create the Langfuse bucket
-      amazon.aws.s3_bucket:
-        name: "{{ langfuse.bucket_name }}"
-        region: "{{ aws.target_region }}"
-        profile: "{{ aws.target_profile }}"
-        state: present
-        # Server-side encryption with S3-managed keys, as for the ClickHouse
-        # bucket. KMS would add a per-request cost and a second thing to get
-        # the IAM policy right on.
-        encryption: "AES256"
-        # Nothing about this bucket should ever be public. This blocks it at
-        # the bucket level, independent of any policy or ACL applied later.
-        public_access:
-          block_public_acls: true
-          block_public_policy: true
-          ignore_public_acls: true
-          restrict_public_buckets: true
-        # Versioning stays OFF. Langfuse deletes media and expired exports
-        # itself (hence s3:DeleteObject below); versioning would retain every
-        # deleted object indefinitely and quietly multiply storage cost.
-        versioning: false
-        tags:
-          Project: clickhouse-private
-          ManagedBy: ansible
-
-    - name: Report the bucket
-      ansible.builtin.debug:
-        msg:
-          - "bucket:   {{ langfuse.bucket_name }} ({{ aws.target_region }})"
-          - "prefixes: events/ exports/ media/  (set by the chart values in Step 15)"
-
     # --- the OIDC issuer this cluster's tokens are signed by ------------------
 
     - name: Look up the cluster's OIDC issuer
@@ -151,12 +115,64 @@
       ManagedBy: ansible
   register: _lf_irsa_stack
 
-- name: Record the role ARN
+- name: Record the role and key ARN
   # Step 15 does not rely on this fact; it reads the stack output itself so it
-  # works when run alone with --tags lf-app. This is for the report below.
+  # works when run alone with --tags lf-app. This is for the report below and
+  # for the bucket creation task that follows.
   ansible.builtin.set_fact:
     _lf_s3_role_arn: "{{ _lf_irsa_stack.stack_outputs.LangfuseS3RoleArn }}"
+    _lf_bucket_kms_key_arn: "{{ _lf_irsa_stack.stack_outputs.LangfuseBucketKmsKeyArn | default('') }}"
   when: _lf_irsa_stack.stack_outputs is defined
+
+# --- the bucket --------------------------------------------------------------
+# Managed with the s3_bucket module rather than CloudFormation, for the same
+# reason as the ClickHouse data bucket: a bucket holding data must outlive
+# its stack. The module is idempotent, so an existing bucket is simply
+# adopted. Runs after the stack deploy above, not before: under fips: true
+# its encryption_key_id names LangfuseBucketKmsKey, which that stack creates.
+#
+# fips: false keeps today's SSE-S3 behaviour (AES256, no customer-managed
+# key -- KMS adds a per-request cost and a second IAM policy to get right
+# for no benefit outside a FIPS/compliance posture).
+#
+# Future-PUTs-only limitation, unfixed by design (out of scope for this task
+# -- see plan ac5, same as the ClickHouse bucket): switching an existing
+# non-empty bucket's default encryption only changes what NEW PUTs get
+# encrypted with; it does not retroactively re-encrypt objects already
+# there. A fresh deployment has nothing to backfill.
+- name: Create the Langfuse bucket
+  amazon.aws.s3_bucket:
+    name: "{{ langfuse.bucket_name }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    state: present
+    # aws:kms under fips: true, backed by LangfuseBucketKmsKey above; plain
+    # SSE-S3 (AES256) otherwise -- unchanged from pre-FIPS behaviour.
+    encryption: "{{ 'aws:kms' if fips else 'AES256' }}"
+    encryption_key_id: "{{ _lf_bucket_kms_key_arn if fips else omit }}"
+    # Nothing about this bucket should ever be public. This blocks it at
+    # the bucket level, independent of any policy or ACL applied later.
+    public_access:
+      block_public_acls: true
+      block_public_policy: true
+      ignore_public_acls: true
+      restrict_public_buckets: true
+    # Versioning stays OFF. Langfuse deletes media and expired exports
+    # itself (hence s3:DeleteObject below); versioning would retain every
+    # deleted object indefinitely and quietly multiply storage cost.
+    versioning: false
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  when: _lf_s3_role_arn is defined
+
+- name: Report the bucket
+  ansible.builtin.debug:
+    msg:
+      - "bucket:   {{ langfuse.bucket_name }} ({{ aws.target_region }})"
+      - "prefixes: events/ exports/ media/  (set by the chart values in Step 15)"
+      - "encryption: {{ 'aws:kms (' ~ _lf_bucket_kms_key_arn ~ ')' if fips else 'AES256 (SSE-S3)' }}"
+  when: _lf_s3_role_arn is defined
 
 - name: Report the IRSA wiring
   ansible.builtin.debug:
@@ -166,3 +182,20 @@
       - "  may PutObject, GetObject, ListBucket, DeleteObject on {{ langfuse.bucket_name }} only"
       - "note: the bucket is never deleted by teardown -- it holds data."
   when: _lf_s3_role_arn is defined
+
+# --- KMS key retention and recovery (FIPS hardening Phase 2, plan ac6) ------
+# LangfuseBucketKmsKey (and its alias) carry DeletionPolicy: Retain in the
+# template, so `--tags lf-storage -e langfuse_storage_state=absent` never
+# schedules the key's deletion. Recreating the "-langfuse-irsa" stack still
+# creates a brand-new key with a new ARN -- CloudFormation has no memory of
+# a retained resource once its owning stack is gone. Full recovery procedure
+# (resolve the orphaned key by its alias, recreate the stack, explicitly
+# re-point the bucket's encryption_key_id at the OLD key's ARN and grant the
+# NEW LangfuseS3Role access to it out-of-band, or accept that objects under
+# the old key become unreadable and reject that as unsupported rather than
+# claiming they remain usable) is identical to ClickHouseBucketKmsKey's --
+# see storage_iam/tasks/main.yml's comment at the end of this file for the
+# full walkthrough, substituting:
+#   aws kms describe-key --key-id alias/{{ infrastructure.environment_name }}-langfuse-bucket \
+#     --profile {{ aws.target_profile }} --region {{ aws.target_region }} \
+#     --query KeyMetadata.Arn --output text

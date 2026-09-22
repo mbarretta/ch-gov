@@ -15,39 +15,24 @@
 # (failing the whole teardown) or, with a retain policy, leave an orphan that
 # then blocks the next create. The module is idempotent, so an existing
 # bucket is simply adopted.
-
-- name: Create the ClickHouse data bucket
-  amazon.aws.s3_bucket:
-    name: "{{ clickhouse.bucket_name }}"
-    region: "{{ aws.target_region }}"
-    profile: "{{ aws.target_profile }}"
-    state: present
-    # Server-side encryption with S3-managed keys. The tutorial requires
-    # encryption but not a customer-managed key; KMS would add a per-request
-    # cost and a second thing to get the IAM policy right on.
-    encryption: "AES256"
-    # Nothing about this bucket should ever be public. This blocks it at the
-    # bucket level, independent of any policy or ACL applied later.
-    public_access:
-      block_public_acls: true
-      block_public_policy: true
-      ignore_public_acls: true
-      restrict_public_buckets: true
-    # Versioning stays OFF on purpose. ClickHouse manages the lifecycle of
-    # its own objects; versioning would retain every overwritten part
-    # indefinitely and quietly multiply storage cost. For the same reason the
-    # tutorial says explicitly: do not add S3 lifecycle rules to this bucket.
-    versioning: false
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
-
-- name: Report the bucket
-  ansible.builtin.debug:
-    msg:
-      - "bucket:     {{ clickhouse.bucket_name }} ({{ aws.target_region }})"
-      - "key prefix: {{ clickhouse.s3_key_prefix }}"
-      - "one bucket can serve several clusters, separated by key prefix"
+#
+# Creation moved to AFTER the IRSA stack deploy below (FIPS hardening Phase
+# 2): under fips: true the bucket's encryption_key_id names a KMS key that
+# only exists once that stack has run, so the stack has to go first.
+#
+# fips: false keeps today's SSE-S3 behaviour (AES256, no customer-managed
+# key -- the tutorial requires encryption but not a KMS key, and KMS adds a
+# per-request cost and a second IAM policy to get right for no benefit
+# outside a FIPS/compliance posture).
+#
+# Future-PUTs-only limitation, unfixed by design (out of scope for this
+# task -- see plan ac5): switching an existing non-empty bucket's default
+# encryption from AES256 to aws:kms (or vice versa) only changes what NEW
+# PUTs get encrypted with. It does not retroactively re-encrypt any object
+# already sitting in the bucket. A fresh deployment has nothing to backfill,
+# so this only matters if you flip `fips` on a bucket that already holds
+# data; re-encrypting those existing objects (e.g. an S3 Batch Operations
+# copy-in-place job) is explicitly not attempted here.
 
 # --- the OIDC issuer this cluster's tokens are signed by --------------------
 
@@ -127,11 +112,52 @@
   ansible.builtin.meta: end_play
   when: (storage_state | default('present')) == 'absent'
 
-- name: Record the role ARNs for later steps
+- name: Record the role and key ARNs for later steps
   ansible.builtin.set_fact:
     clickhouse_s3_role_arn: "{{ _irsa_stack.stack_outputs.ClickHouseS3RoleArn }}"
     ebs_csi_role_arn: "{{ _irsa_stack.stack_outputs.EbsCsiDriverRoleArn }}"
+    clickhouse_bucket_kms_key_arn: "{{ _irsa_stack.stack_outputs.ClickHouseBucketKmsKeyArn | default('') }}"
+    ebs_kms_key_arn: "{{ _irsa_stack.stack_outputs.EbsKmsKeyArn | default('') }}"
   when: _irsa_stack.stack_outputs is defined
+
+# Bucket creation, now that the key it may need (fips: true) exists. See the
+# comment at the top of this file for why this runs after the stack deploy
+# and why fips: false is unaffected.
+- name: Create the ClickHouse data bucket
+  amazon.aws.s3_bucket:
+    name: "{{ clickhouse.bucket_name }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    state: present
+    # aws:kms under fips: true, backed by ClickHouseBucketKmsKey above; plain
+    # SSE-S3 (AES256) otherwise -- unchanged from pre-FIPS behaviour.
+    encryption: "{{ 'aws:kms' if fips else 'AES256' }}"
+    encryption_key_id: "{{ clickhouse_bucket_kms_key_arn if fips else omit }}"
+    # Nothing about this bucket should ever be public. This blocks it at the
+    # bucket level, independent of any policy or ACL applied later.
+    public_access:
+      block_public_acls: true
+      block_public_policy: true
+      ignore_public_acls: true
+      restrict_public_buckets: true
+    # Versioning stays OFF on purpose. ClickHouse manages the lifecycle of
+    # its own objects; versioning would retain every overwritten part
+    # indefinitely and quietly multiply storage cost. For the same reason the
+    # tutorial says explicitly: do not add S3 lifecycle rules to this bucket.
+    versioning: false
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  when: clickhouse_s3_role_arn is defined
+
+- name: Report the bucket
+  ansible.builtin.debug:
+    msg:
+      - "bucket:     {{ clickhouse.bucket_name }} ({{ aws.target_region }})"
+      - "key prefix: {{ clickhouse.s3_key_prefix }}"
+      - "one bucket can serve several clusters, separated by key prefix"
+      - "encryption: {{ 'aws:kms (' ~ clickhouse_bucket_kms_key_arn ~ ')' if fips else 'AES256 (SSE-S3)' }}"
+  when: clickhouse_s3_role_arn is defined
 
 - name: Report the IRSA wiring
   ansible.builtin.debug:
@@ -142,3 +168,44 @@
       - "  assumable only by system:serviceaccount:kube-system:ebs-csi-controller-sa"
       - "note: the bucket is never deleted by teardown -- it holds data."
   when: clickhouse_s3_role_arn is defined
+
+# --- KMS key retention and recovery (FIPS hardening Phase 2, plan ac6) -----
+# ClickHouseBucketKmsKey (and its alias) carry DeletionPolicy: Retain in the
+# template, so `--tags storage -e storage_state=absent` (or a fips: true ->
+# false transition that drops the key from the template) never schedules the
+# key's deletion -- see the template's own comment for why. What Retain does
+# NOT do is let a brand-new "-irsa" stack automatically reuse that retained
+# key: CloudFormation has no memory of a resource once its owning stack is
+# gone, so recreating this stack from the same template creates a BRAND NEW
+# ClickHouseBucketKmsKey with a new ARN, while the old key survives orphaned
+# (retained, but no longer referenced by any stack).
+#
+# Recovery after a stack recreation, in order:
+#   1. Before recreating, or any time after, resolve the orphaned key's ARN
+#      by its retained alias (this does not need the old stack to exist):
+#        aws kms describe-key --key-id alias/{{ infrastructure.environment_name }}-clickhouse-bucket \
+#          --profile {{ aws.target_profile }} --region {{ aws.target_region }} \
+#          --query KeyMetadata.Arn --output text
+#   2. Recreate the "-irsa" stack. It creates a NEW ClickHouseS3Role and a
+#      NEW ClickHouseBucketKmsKey/alias -- the new role's policy grants it
+#      access to the NEW key only, not the orphaned one.
+#   3. To keep the bucket's existing (pre-recreation) objects readable, you
+#      must explicitly re-point the bucket's default encryption at the
+#      OLD (orphaned) key's ARN from step 1 -- NOT the new stack's output --
+#      and grant the NEW ClickHouseS3Role access to that old key, since its
+#      own IAM policy only names the new key. The old key is no longer
+#      managed by any stack, so this grant has to be added out-of-band (e.g.
+#      `aws kms put-key-policy` on the orphaned key, or an inline IAM policy
+#      on the new role naming the old key's ARN directly).
+#   4. Rejected as unsupported: doing nothing and letting the new stack's
+#      freshly generated key silently become the bucket's encryption_key_id.
+#      That leaves every object encrypted under the OLD key permanently
+#      unreadable by the new role (it has no grant on the old key), while
+#      the bucket looks perfectly healthy -- "still encrypted" is not "still
+#      readable." Re-encrypting old objects under the new key instead of
+#      reusing the old one is the S3 Batch Operations rewrite named out of
+#      scope in ac5 -- not attempted here either.
+# The same procedure applies to langfuse_storage's LangfuseBucketKmsKey and
+# its alias, substituting that alias's name. EbsKmsKey above is NOT retained
+# and has no alias -- it is not part of this recovery path; see its own
+# comment in the template for why.
