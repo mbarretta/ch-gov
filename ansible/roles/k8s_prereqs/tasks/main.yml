@@ -46,15 +46,41 @@
   check_mode: false
 
 - name: Extract the EBS CSI role ARN
+  # .get(..., {}) at each level (not a bare [] index or a single trailing
+  # `| default`): if the stack does not exist at all, .cloudformation has no
+  # '...-irsa' key, and a bare index there raises a raw Jinja undefined error
+  # instead of ever reaching the friendly assert below. Chained .get() falls
+  # through to '' cleanly regardless of which level is missing.
   ansible.builtin.set_fact:
     _ebs_csi_role_arn: >-
-      {{ _irsa_info.cloudformation[infrastructure.environment_name + '-irsa']
-         .stack_outputs.EbsCsiDriverRoleArn }}
+      {{ (_irsa_info.cloudformation.get(infrastructure.environment_name + '-irsa', {})
+          .get('stack_outputs', {}).get('EbsCsiDriverRoleArn', '')) }}
 
 - name: Fail clearly if Step 6 has not run
   ansible.builtin.assert:
     that: _ebs_csi_role_arn | length > 0
     fail_msg: "No IRSA stack. Run: ansible-playbook deploy.yml --tags storage"
+
+# FIPS hardening Phase 2: the gp3-encrypted StorageClass gets an explicit
+# kmsKeyId under fips: true, read back from the same stack (storage_iam's
+# template only creates EbsKmsKey when fips is true, so this output only
+# exists then -- see irsa-roles.yaml.j2). Same .get() chaining as the role
+# ARN above, and for the same reason.
+- name: Extract the EBS KMS key ARN
+  ansible.builtin.set_fact:
+    _ebs_kms_key_arn: >-
+      {{ (_irsa_info.cloudformation.get(infrastructure.environment_name + '-irsa', {})
+          .get('stack_outputs', {}).get('EbsKmsKeyArn', '')) }}
+  when: fips
+
+- name: Fail clearly if Step 6 has not run with fips enabled
+  ansible.builtin.assert:
+    that: _ebs_kms_key_arn | length > 0
+    fail_msg: >-
+      fips is true but the IRSA stack has no EbsKmsKeyArn output -- storage_iam
+      was last applied with fips: false. Run:
+      ansible-playbook deploy.yml --tags storage
+  when: fips
 
 - name: Install the EBS CSI driver add-on
   amazon.aws.cloudformation:
@@ -149,6 +175,78 @@
   check_mode: false
   no_log: true            # stdin carries the credential
 
+# --- StorageClass parameters (FIPS hardening Phase 2) ----------------------
+# The chart's own defaults are left completely alone under fips: false -- no
+# `parameters:` override at all, so behaviour there is byte-for-byte
+# unchanged from before this task.
+#
+# Under fips: true we specify parameters explicitly so new volumes are
+# encrypted with EbsKmsKey specifically, not whatever AWS-managed key the
+# driver would otherwise pick. type/fsType match the class's existing name
+# and posture (gp3, ext4, matching gp3-encrypted's own naming and the
+# already-established EBS setup); only `encrypted`/`kmsKeyId` actually
+# change relative to what's presumed to be there today. These exact
+# defaults are unverified against the chart's own values.schema.json --
+# this task has no chart access (that is task 4a-spike's scoped exception
+# only; see plan.constraints[]) -- so treat type/fsType here as this task's
+# best-evidence assumption, not a confirmed chart contract.
+#
+# StorageClass.parameters is immutable in Kubernetes once the object exists
+# -- Helm cannot patch it in place, and forcing the change risks either the
+# release erroring out mid-upgrade or, depending on kubectl/helm version, a
+# delete-and-replace that orphans any PVC still bound to the old class. The
+# two tasks below inspect any existing gp3-encrypted class BEFORE the Helm
+# release runs and fail clearly on a mismatch instead of letting either of
+# those happen. Matching parameters is an idempotent no-op either way.
+#
+# This only asserts the fips: true side, because it is the only side this
+# task can state with certainty; fips: false's parameters are whatever the
+# chart defaults to. Migrating an EXISTING deployment onto new parameters,
+# in either direction (including a fips: true -> false rollback onto a
+# class already carrying a kmsKeyId), is not attempted automatically here:
+# it requires an explicit storage migration or recreating the StorageClass
+# (and therefore its PVCs) by hand. Either way, changing these parameters
+# never re-encrypts a volume already bound under the old ones -- only newly
+# provisioned volumes pick up the new parameters.
+- name: Determine the intended gp3-encrypted StorageClass parameters
+  ansible.builtin.set_fact:
+    _sc_intended_parameters:
+      type: gp3
+      fsType: ext4
+      encrypted: "true"
+      kmsKeyId: "{{ _ebs_kms_key_arn }}"
+  when: fips
+
+- name: Look up any existing gp3-encrypted StorageClass
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - storageclass
+      - gp3-encrypted
+      - -o=json
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _existing_sc
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: fips
+
+- name: Fail clearly on an immutable StorageClass parameter mismatch
+  ansible.builtin.assert:
+    that: (_existing_sc.stdout | from_json).parameters == _sc_intended_parameters
+    fail_msg: >-
+      gp3-encrypted already exists with parameters
+      {{ (_existing_sc.stdout | from_json).parameters }}, which do not match
+      what fips: true requires: {{ _sc_intended_parameters }}.
+      StorageClass.parameters is immutable, so Helm cannot patch this in
+      place. Recreate it explicitly: delete the StorageClass (and rebind or
+      recreate any PVC using it) and re-run --tags prereqs. This does not
+      re-encrypt any volume already bound under the old parameters.
+    success_msg: "gp3-encrypted's existing parameters already match fips: true -- idempotent no-op"
+  when: fips and _existing_sc.rc == 0
+
 - name: Install the shared StorageClass
   kubernetes.core.helm:
     kubeconfig: "{{ kubeconfig_path }}"
@@ -161,6 +259,7 @@
       # The one thing we actually want from this release.
       storageClass:
         create: true
+        parameters: "{{ _sc_intended_parameters if fips else omit }}"
       # No ClickHouseCluster custom resource -- that is Step 9.
       createCluster: false
       # No service account either; each cluster gets its own, created by its

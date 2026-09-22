@@ -68,6 +68,20 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${BucketName}'
                   - !Sub 'arn:aws:s3:::${BucketName}/*'
+{% if fips %}
+              # FIPS hardening Phase 2: the bucket's default encryption below
+              # becomes aws:kms (see storage_iam/tasks/main.yml), backed by
+              # ClickHouseBucketKmsKey. This is the ONLY statement anywhere
+              # that grants a real principal use of that key -- see the key's
+              # own KeyPolicy comment for why access is delegated here, in IAM,
+              # rather than named directly in the key policy.
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt ClickHouseBucketKmsKey.Arn
+{% endif %}
       Tags:
         - {Key: Project, Value: clickhouse-private}
 
@@ -95,8 +109,127 @@ Resources:
         # Note the service-role/ path. AmazonEBSCSIDriverPolicy does not exist
         # at the top level, and the wrong ARN fails at stack creation.
         - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+{% if fips %}
+      Policies:
+        - PolicyName: ebs-kms-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The driver needs the full read/write set: it encrypts new
+              # volumes, decrypts and re-encrypts on snapshot/restore, and
+              # generates data keys for every attach.
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt EbsKmsKey.Arn
+              # Grant management is a separate statement, not folded into the
+              # one above: CreateGrant/ListGrants/RevokeGrant are how the CSI
+              # driver lets EC2 use the key on the volume's behalf (attach,
+              # detach), and AWS's own EBS-encryption guidance requires this
+              # exact condition -- without it, this statement would let the
+              # role create grants for ANY resource, not just EBS volumes.
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:ListGrants
+                  - kms:RevokeGrant
+                Resource: !GetAtt EbsKmsKey.Arn
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: true
+{% endif %}
       Tags:
         - {Key: Project, Value: clickhouse-private}
+{% if fips %}
+  # =========================================================================
+  # Customer-managed KMS keys (FIPS 140-3 hardening, Phase 2)
+  # =========================================================================
+  # Both keys grant only account-root admin in their own KeyPolicy. Real
+  # usage grants live in the roles' own IAM policies above (ClickHouseBucket
+  # KmsKey -> ClickHouseS3Role, EbsKmsKey -> EbsCsiDriverRole), not here.
+  # That is deliberate, not an oversight: a KeyPolicy statement naming
+  # ClickHouseS3Role.Arn while that role's own policy names the key's Arn
+  # back is a circular resource dependency, and CloudFormation refuses to
+  # create a stack shaped like that. Granting the account root full `kms:*`
+  # here (the default AWS recommends for exactly this reason) delegates all
+  # real access control to IAM identity policies instead, which is a
+  # one-directional dependency: the role's policy needs the key's Arn, the
+  # key needs nothing about the role. Each key is still usable by exactly
+  # one role in practice, because each is the only role whose policy names
+  # that key's Arn.
+  ClickHouseBucketKmsKey:
+    Type: AWS::KMS::Key
+    # Retained on purpose: the ClickHouse bucket outlives this stack (see the
+    # "the bucket" comment in storage_iam/tasks/main.yml), but the key that
+    # protects its ciphertext lives here, inside the disposable IRSA stack.
+    # Without Retain, tearing down --tags storage schedules this key's
+    # deletion and strands every object the bucket still holds. See the
+    # recovery note on the alias output below and in tasks/main.yml.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: >-
+        SSE-KMS key for the ClickHouse data bucket ({{ clickhouse.bucket_name }}).
+        Retained across teardown/recreation of the {{ infrastructure.environment_name }}-irsa
+        stack -- the bucket the key protects is never deleted.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+  # Retained alongside the key: this is the recovery handle. If the key
+  # object survives teardown but its alias does not, finding it again means
+  # scanning every key in the account by tag. With the alias retained too,
+  # `aws kms describe-key --key-id alias/{{ infrastructure.environment_name }}-clickhouse-bucket`
+  # resolves the ARN directly -- see tasks/main.yml for the full recovery
+  # procedure after a stack recreation.
+  ClickHouseBucketKmsAlias:
+    Type: AWS::KMS::Alias
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: "alias/{{ infrastructure.environment_name }}-clickhouse-bucket"
+      TargetKeyId: !Ref ClickHouseBucketKmsKey
+
+  EbsKmsKey:
+    Type: AWS::KMS::Key
+    # No Retain here, unlike the bucket key above: EBS volumes do NOT
+    # outlive this stack under the repo's own teardown order (scripts/down.sh
+    # tears down `cluster` -- which deletes the Keeper PVCs/PVs -- before
+    # `storage`, which deletes this stack). If you ever run
+    # `--tags storage -e storage_state=absent` in isolation while volumes
+    # encrypted by this key are still attached, that is already an unsupported
+    # sequence today (it also deletes EbsCsiDriverRole out from under a live
+    # CSI driver) -- this key does not change that risk, it does not add one.
+    Properties:
+      Description: >-
+        SSE-KMS key for gp3-encrypted EBS volumes (Keeper today; Langfuse's
+        Postgres/Valkey PVCs later), provisioned via the EBS CSI driver.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+{% endif %}
 
 Outputs:
   ClickHouseS3RoleArn:
@@ -105,3 +238,16 @@ Outputs:
   EbsCsiDriverRoleArn:
     Description: Passed to the EBS CSI driver add-on in Step 7.
     Value: !GetAtt EbsCsiDriverRole.Arn
+{% if fips %}
+  ClickHouseBucketKmsKeyArn:
+    Description: >-
+      Passed as the ClickHouse bucket's encryption_key_id in
+      storage_iam/tasks/main.yml. Retained on teardown -- see the key's own
+      comment above for the recovery path if this stack is recreated.
+    Value: !GetAtt ClickHouseBucketKmsKey.Arn
+  EbsKmsKeyArn:
+    Description: >-
+      Passed as the gp3-encrypted StorageClass's kmsKeyId in
+      k8s_prereqs/tasks/main.yml.
+    Value: !GetAtt EbsKmsKey.Arn
+{% endif %}
