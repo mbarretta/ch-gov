@@ -24,6 +24,20 @@
     AWS_CONFIG_FILE: "{{ playbook_dir }}/../.aws/config"
 
   pre_tasks:
+    # Renders ansible/files/aws-config.ini.j2 -> ../.aws/config for THIS run,
+    # honoring whatever -e fips=... was passed -- the authoritative render.
+    # tags: [always] so a tagged invocation (e.g. --tags nodes) never skips
+    # it and runs against a stale use_fips_endpoint. scripts/lib/common.sh
+    # does its own credential-free render first, since scripts/play.sh and
+    # scripts/part1-setup.sh check AWS auth before Ansible starts at all --
+    # that one only fills in a missing file, so it never fights this one.
+    - name: Render AWS CLI config (use_fips_endpoint tracks fips)
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/files/aws-config.ini.j2"
+        dest: "{{ playbook_dir }}/../.aws/config"
+        mode: "0600"
+      tags: [always]
+
     - name: Show what this run will do
       ansible.builtin.debug:
         msg:
@@ -31,6 +45,7 @@
           - "target account:  {{ aws.target_account_id }} / {{ aws.target_region }}"
           - "target registry: {{ target_registry }}"
           - "source registry: {{ source_registry }}"
+          - "aws api endpoints: {{ 'FIPS-validated (use_fips_endpoint)' if fips else 'standard' }}"
           - "artifacts:       {{ all_artifacts | map(attribute='repo') | list | join(', ') }}"
       tags: [always]
 

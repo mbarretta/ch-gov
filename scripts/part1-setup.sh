@@ -192,6 +192,10 @@ step "5/6  AWS profiles"
 #   sa          -> your account. Builds VPC/EKS/S3/ECR. Holds your data.
 #   private-us  -> an assumed role that can READ ClickHouse's source ECR.
 #                  It chains off sa, so `aws sso login` once covers both.
+# On a fresh checkout there is no .aws/config yet for these checks to use --
+# lib/common.sh's render_aws_config (sourced above, before Ansible exists to
+# render it via ansible/deploy.yml's pre_tasks) already generated one from
+# ansible/files/aws-config.ini.j2.
 check_profile() {
   local p="$1" desc="$2" arn
   if ! aws configure list-profiles 2>/dev/null | grep -qx "$p"; then

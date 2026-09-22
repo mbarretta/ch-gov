@@ -35,6 +35,12 @@ export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 # SSO tokens last hours, not days. Without this check an expired token surfaces
 # partway into a run as an unrelated-looking module failure, sometimes after
 # something has already been created.
+#
+# This runs before Ansible ever starts, so on a fresh checkout there is no
+# .aws/config yet for it to check against -- common.sh's render_aws_config
+# (sourced above) already rendered one from ansible/files/aws-config.ini.j2.
+# Ansible's own pre_tasks re-render it per-run, honoring -e fips=...; this one
+# only fills in a missing file, so the two never fight.
 if ! aws sts get-caller-identity --query Arn --output text >/dev/null 2>&1; then
   die "not authenticated -- run: AWS_CONFIG_FILE=$AWS_CONFIG_FILE aws sso login --profile $AWS_PROFILE"
 fi

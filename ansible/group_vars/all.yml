@@ -243,6 +243,38 @@ target_registry: >-
      if fips
      else aws.target_account_id ~ '.dkr.ecr.' ~ aws.target_region ~ '.amazonaws.com' }}
 
+# S3's FIPS endpoint hostname shape (unlike ECR's, no account id in it):
+# s3-fips.<region>.amazonaws.com. Consumed by ClickHouse's own S3 disk config
+# in clickhouse_cluster/tasks/main.yml -- see the endpoint-coverage matrix
+# below for what this does and does not put on a FIPS path.
+s3_endpoint: "https://{{ 's3-fips' if fips else 's3' }}.{{ aws.target_region }}.amazonaws.com"
+
+# ---------------------------------------------------------------------------
+# FIPS AWS-API endpoint-coverage matrix (Phase 1 of the FIPS hardening plan).
+# fips: true FIPS-routes:
+#   - Every AWS CLI/SDK call this repo's Ansible CONTROLLER makes under the
+#     `sa` and `private-us` profiles (STS, IAM, EKS, CloudFormation, ECR's own
+#     token exchange, ...) -- via use_fips_endpoint in the rendered
+#     ansible/files/aws-config.ini.j2 (both profiles set it; it does not
+#     inherit through source_profile).
+#   - The ECR image-pull hostname (target_registry, above -- predates this
+#     phase).
+#   - ClickHouse's own in-pod S3 client, i.e. its native S3-disk storage
+#     backend authenticating via its own IRSA service-account annotation --
+#     via s3_endpoint, above, wired into clickhouse_cluster's Helm values.
+# fips: true does NOT FIPS-route (documented gap, carried into the docs task
+# and FIPS.md -- do not imply blanket coverage):
+#   - Langfuse's own in-pod S3 client (its own separate IRSA role, used by
+#     langfuse_storage / langfuse for its object storage) -- untouched by
+#     this task; still targets the standard S3 endpoint under fips: true.
+#   - Any other pod-side AWS SDK call this deployment makes outside the
+#     controller's own .aws/config and ClickHouse's S3 disk config above.
+# The controller's .aws/config is evidence only for the controller's own
+# calls -- it says nothing about what a pod's AWS SDK, running under its own
+# IRSA-issued credentials with its own SDK config (or none), actually routes
+# through.
+# ---------------------------------------------------------------------------
+
 container_images:
   - repo: clickhouse-server
     tag: "{{ versions.server }}{{ fips_suffix }}"

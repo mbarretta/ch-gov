@@ -263,7 +263,12 @@
             # in the wrong region, and the IRSA role (scoped to one bucket ARN,
             # which is region-agnostic) would even let it try.
             region: "{{ aws.target_region }}"
-            endpoint: "https://s3.{{ aws.target_region }}.amazonaws.com"
+            # s3_endpoint (group_vars) is FIPS-aware -- this is ClickHouse's
+            # own in-pod S3 client, authenticating via its IRSA service
+            # account, so it needs the FIPS hostname itself; the controller's
+            # .aws/config has no bearing on it. See the endpoint-coverage
+            # matrix in group_vars/all.yml.
+            endpoint: "{{ s3_endpoint }}"
         loggerConfig:
           loggerLevel: "{{ clickhouse.server.log_level }}"
         prometheus:
