@@ -18,7 +18,10 @@
 #
 # Exposure follows Step 12: langfuse.load_balancer.type none|internal|public,
 # realised as a second NLB Service (langfuse-lb) in front of the web pods.
-# Plain HTTP by default. With langfuse.load_balancer.tls the NLB terminates
+# Plain HTTP by default. With langfuse.load_balancer.tls -- or with fips: true
+# and load_balancer.type not none, which forces the same behaviour on even
+# with tls left false, since a single fips switch is the whole point (see
+# _lf_tls below and docs/part-6-langfuse.md section 9) -- the NLB terminates
 # TLS with a self-signed certificate this role generates once the hostname is
 # known: key and certificate land in state/ (langfuse_state_files.tls_*), the
 # certificate is imported into ACM under the Name tag
@@ -57,13 +60,21 @@
     - name: Decide whether the load balancer Service should exist, and whether it terminates TLS
       ansible.builtin.set_fact:
         _lf_present: "{{ langfuse.load_balancer.type != 'none' }}"
-        _lf_tls: "{{ langfuse.load_balancer.type != 'none' and (langfuse.load_balancer.tls | bool) }}"
+        # The effective TLS state: the legacy langfuse.load_balancer.tls
+        # switch, OR'd with fips (Phase 4c) so that a single fips: true does
+        # not silently leave the NLB in plaintext -- the single-fips-switch
+        # ground rule this whole plan follows. type: none never terminates
+        # TLS regardless of either value: there is no NLB to terminate it on.
+        # fips: false leaves the pre-4c behaviour (tls alone) unchanged.
+        _lf_tls: "{{ langfuse.load_balancer.type != 'none' and ((langfuse.load_balancer.tls | bool) or (fips | bool)) }}"
         # The TLS security policy of the NLB listener: AWS's recommended
         # default for Network Load Balancers (TLS 1.2 and 1.3, no legacy
-        # ciphers). Named explicitly, on the listener AND in the Service
-        # annotation, so the cloud controller sees the listener exactly as it
-        # would have built it and leaves it alone on every sync.
-        _lf_tls_policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        # ciphers) when fips is false; the FIPS 140-3 validated policy this
+        # account has confirmed available when fips is true. Named explicitly,
+        # on the listener AND in the Service annotation, so the cloud
+        # controller sees the listener exactly as it would have built it and
+        # leaves it alone on every sync.
+        _lf_tls_policy: "{{ 'ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04' if fips else 'ELBSecurityPolicy-TLS13-1-2-2021-06' }}"
 
     - name: Resolve who may connect
       # The cloud controller turns loadBalancerSourceRanges into ingress rules on
@@ -297,6 +308,13 @@
 - name: Teardown (langfuse_state=absent)
   when: (langfuse_state | default('present')) == 'absent'
   block:
+    - name: Recompute the effective TLS state (the install-time facts above never ran)
+      # Same rule as _lf_tls in the preconditions block: tls OR fips, but
+      # never for type: none. Needed here, standalone, because that block is
+      # skipped whenever langfuse_state=absent.
+      ansible.builtin.set_fact:
+        _lf_tls: "{{ langfuse.load_balancer.type != 'none' and ((langfuse.load_balancer.tls | bool) or (fips | bool)) }}"
+
     - name: Remove the load balancer Service
       # The cloud controller removes the NLB when the Service goes, and the
       # Service stays until that finalizer clears. Takes ~1 minute.
@@ -315,8 +333,9 @@
       # after the Service's finalizer clears -- hence the bounded retries on
       # exactly that error. Any other failure stops the teardown right here,
       # before the release and the namespace go, so scripts/down.sh still sees
-      # Langfuse installed and a re-run retries the deletion. Only with tls:
-      # a plain-HTTP deployment never imported anything.
+      # Langfuse installed and a re-run retries the deletion. Only with the
+      # effective TLS state (_lf_tls, recomputed above): a plain-HTTP
+      # deployment -- tls: false and fips: false -- never imported anything.
       community.aws.acm_certificate:
         name_tag: "{{ infrastructure.environment_name }}-langfuse-lb"
         state: absent
@@ -329,7 +348,7 @@
             and (_lf_acm_del.error.code | default('')) != 'ResourceInUseException')
       retries: 18
       delay: 10
-      when: langfuse.load_balancer.tls | bool
+      when: _lf_tls
 
     - name: Uninstall the release
       # wait: returns once the release's resources are gone. The PostgreSQL
@@ -359,7 +378,7 @@
         msg:
           - "Langfuse removed: Service langfuse-lb (and its NLB), release {{ langfuse.release }}, namespace {{ langfuse.namespace }} with its PersistentVolumeClaims -- the PostgreSQL and Valkey volumes are gone"
           - "the ClickHouse database {{ langfuse.clickhouse_database }} and user {{ langfuse.clickhouse_user }} are kept; purge them with --tags lf-db -e langfuse_db_state=absent"
-          - "the Step 13 bucket and IRSA stack are not touched (--tags lf-storage -e langfuse_storage_state=absent); the generated secrets under {{ state_dir | realpath }} are kept and reused by the next --tags lf-app{{ '; the ACM certificate ' ~ infrastructure.environment_name ~ '-langfuse-lb is deleted, the TLS key and certificate under state/ are kept and re-imported by the next --tags lf-app' if langfuse.load_balancer.tls | bool else '' }}"
+          - "the Step 13 bucket and IRSA stack are not touched (--tags lf-storage -e langfuse_storage_state=absent); the generated secrets under {{ state_dir | realpath }} are kept and reused by the next --tags lf-app{{ '; the ACM certificate ' ~ infrastructure.environment_name ~ '-langfuse-lb is deleted, the TLS key and certificate under state/ are kept and re-imported by the next --tags lf-app' if _lf_tls else '' }}"
 
     - name: Stop here when tearing down
       ansible.builtin.meta: end_play
@@ -588,7 +607,7 @@
   check_mode: false
   when: _lf_present
 
-# --- TLS at the load balancer (skipped unless langfuse.load_balancer.tls) -----
+# --- TLS at the load balancer (skipped unless _lf_tls: langfuse.load_balancer.tls, or fips: true with load_balancer.type not none) -----
 # Only now: the certificate must name the NLB hostname, which exists only once
 # the Service above has one. Key and certificate go to state/ like the other
 # generated secrets and are made again only when missing or when the SAN no
@@ -617,7 +636,7 @@
       # would be regenerated -- and re-imported -- every run.
       ansible.builtin.assert:
         that: _lf_openssl.rc == 0 and _lf_openssl.stdout is match('OpenSSL [3-9]')
-        fail_msg: "openssl on PATH is '{{ _lf_openssl.stdout | default('') | trim }}' (rc {{ _lf_openssl.rc }}); langfuse.load_balancer.tls needs OpenSSL 3 -- brew install openssl@3 and put /opt/homebrew/bin first on PATH"
+        fail_msg: "openssl on PATH is '{{ _lf_openssl.stdout | default('') | trim }}' (rc {{ _lf_openssl.rc }}); NLB TLS (langfuse.load_balancer.tls, or fips: true with load_balancer.type not none) needs OpenSSL 3 -- brew install openssl@3 and put /opt/homebrew/bin first on PATH"
 
     - name: Read the SAN of the certificate already there, if any
       ansible.builtin.command:
@@ -633,18 +652,40 @@
       register: _lf_tls_key
       check_mode: false
 
-    - name: Generate the key and the self-signed certificate (missing, or naming another hostname)
-      # One shot: a 2048-bit RSA key, unencrypted (the NLB needs it plain and
-      # ACM imports it plain), and a certificate signed by it with the NLB
+    - name: Read the RSA key size of the certificate already there, if any
+      # -text, not -modulus: counting hex digits in the modulus is an
+      # imprecise proxy for bit length (leading-zero nibbles), while openssl's
+      # own "Public-Key: (N bit)" line in the human-readable dump is exact.
+      # failed_when: false the same as the SAN read above -- no file, or not a
+      # certificate, both mean "unknown", handled as 0 below.
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ langfuse_state_files.tls_cert_file }}", -noout, -text]
+      register: _lf_tls_keysize
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Note that key size as an integer (0 when unknown)
+      ansible.builtin.set_fact:
+        _lf_tls_key_bits: "{{ (_lf_tls_keysize.stdout | regex_search('Public-Key: \\((\\d+) bit\\)', '\\1') | default(['0'], true) | first) | int }}"
+
+    - name: Generate the key and the self-signed certificate (missing, naming another hostname, or under-strength for fips)
+      # One shot: an rsa:{{ tls_rsa_bits }}-bit RSA key (2048 normally, 3072+
+      # under fips -- ac2), unencrypted (the NLB needs it plain and ACM
+      # imports it plain), and a certificate signed by it with the NLB
       # hostname as its only SAN. Paths only on argv; openssl writes the key
-      # 0600 itself.
+      # 0600 itself. The fips key-size clause below regenerates an
+      # already-valid, SAN-matching 2048-bit certificate left over from a
+      # fips: false run (or from before this task existed) once fips flips
+      # true; a certificate already at or above tls_rsa_bits is reused
+      # untouched on every later run -- idempotent either way.
       ansible.builtin.command:
         argv:
           - openssl
           - req
           - -x509
           - -newkey
-          - rsa:2048
+          - "rsa:{{ tls_rsa_bits }}"
           - -noenc
           - -keyout
           - "{{ langfuse_state_files.tls_key_file }}"
@@ -656,7 +697,11 @@
           - /CN=langfuse
           - -addext
           - "subjectAltName=DNS:{{ _lf_host }}"
-      when: not _lf_tls_key.stat.exists or _lf_tls_san.rc != 0 or ('DNS:' ~ _lf_host) not in _lf_tls_san.stdout
+      when: >-
+        not _lf_tls_key.stat.exists
+        or _lf_tls_san.rc != 0
+        or ('DNS:' ~ _lf_host) not in _lf_tls_san.stdout
+        or (fips and _lf_tls_key_bits < (tls_rsa_bits | int))
       no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
     - name: Keep the key owner-readable only

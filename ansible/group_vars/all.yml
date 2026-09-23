@@ -442,8 +442,13 @@ langfuse:
     # Self-signed means clients must trust the certificate itself: curl
     # --cacert state/langfuse-tls-cert.pem, a browser warning to click through,
     # the SDK's CA environment variable. Set port to 443 with it, so the URL
-    # stays https://<hostname> with no port. Off by default: with false
-    # nothing here changes. Going back to false after a TLS deploy: the clean
+    # stays https://<hostname> with no port. Off by default when fips is
+    # false: with false nothing here changes. fips: true forces this on
+    # (effectively true) whenever load_balancer.type is not none, regardless
+    # of this value -- the single fips switch is meant to be the whole
+    # decision (Phase 4c). load_balancer.type: none has no NLB at all, so
+    # there is nothing for either switch to terminate TLS on. See
+    # docs/part-6-langfuse.md section 9. Going back to false after a TLS deploy: the clean
     # way is to tear down first (-e langfuse_state=absent) and re-run. The
     # by-hand route is removing the three aws-load-balancer-ssl-* annotations
     # from Service langfuse-lb AND switching the listener back yourself:
