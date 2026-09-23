@@ -131,10 +131,22 @@ shared between both builds — the FIPS variant is selected by image tag, not by
 a different chart. Getting this wrong is an easy mistake: appending `-fips` to a
 chart version produces a tag that does not exist.
 
-What it will also change, once we reach those steps: **x86_64 nodes only**
-(FIPS crypto is not validated on ARM64, so the ARM instance types are out),
-TLS-only on port 9440, RSA-3072+ certificates per cluster, and an S3 bucket
-name with no periods in it.
+What it will also change, once we reach those steps: ~~**x86_64 nodes
+only** (FIPS crypto is not validated on ARM64, so the ARM instance types are
+out)~~ — already true today, regardless of `fips`: `node_ami_type`
+(`group_vars/all.yml`) has selected `AL2023_x86_64_STANDARD` under `fips:
+true` since Step 5 first shipped, well before the FIPS hardening cycle
+below existed. ~~TLS-only on port 9440~~ — delivered:
+[Part 7 §4](part-7-fips-hardening.md#4-in-transit-tls-clickhouse-native-langfuse-to-clickhouse-and-the-langfuse-nlb)
+wires `server.openSSL`/`keeper.openSSL` so ClickHouse's native protocol
+moves to port 9440 under `fips: true`, CA-verified. ~~RSA-3072+
+certificates per cluster~~ — delivered: the same section adds
+`tls_rsa_bits` (3072 under `fips: true`) and generates the CA/leaf
+certificate at that size. ~~and an S3 bucket name with no periods in
+it~~ — already true today, regardless of `fips`: `clickhouse.bucket_name`
+has never contained a period, precisely so virtual-hosted-style S3 requests
+never break on TLS certificate matching; nothing about the FIPS hardening
+cycle changed that.
 
 ---
 
