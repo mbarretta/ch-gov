@@ -26,6 +26,18 @@ Parameters:
   PublicEndpointCidrs:
     Type: CommaDelimitedList
     Description: Source CIDRs allowed to reach the public endpoint.
+  EnableSecretsEncryption:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether the cluster gets an explicit customer-managed KMS key for
+      Kubernetes Secrets envelope encryption (etcd). EKS 1.28+ already
+      encrypts Secrets at rest with an AWS-owned key regardless of this
+      value -- 'true' swaps that default key for one this account owns and
+      controls, for audit/lifecycle purposes. It does not turn on encryption
+      where none existed. This is a ONE-WAY DOOR once applied to an existing
+      cluster: see eks_cluster/tasks/main.yml's confirm_encryption_config
+      guard.
 
 Conditions:
   # Needed so EndpointPublicAccess receives a real boolean. Passing the
@@ -33,6 +45,8 @@ Conditions:
   # validation before any resource is created, with a message that names
   # neither the property nor the reason.
   PublicEndpoint: !Equals [!Ref PublicEndpointAccess, 'true']
+  # Same reasoning, for the FIPS-hardening Phase 3 EncryptionConfig switch.
+  SecretsEncryptionEnabled: !Equals [!Ref EnableSecretsEncryption, 'true']
 
 Resources:
   # The control plane assumes this role to manage AWS resources on your
@@ -55,6 +69,60 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
 
+  # =========================================================================
+  # Customer-managed KMS key for EKS Secrets envelope encryption
+  # (FIPS 140-3 hardening, Phase 3)
+  # =========================================================================
+  # EKS 1.28+ already wraps Secrets in etcd with an AWS-owned key by default
+  # -- this key does not introduce encryption where none existed. It swaps
+  # that AWS-owned key for one this account owns, so key policy, rotation,
+  # and audit trail are all under explicit control. Only created when
+  # EnableSecretsEncryption is 'true'; it lives and dies with this stack --
+  # unlike the Phase 2 bucket keys, nothing here is retained across
+  # teardown, because there is no data left to protect once the cluster
+  # (and its etcd) is gone.
+  EksSecretsKey:
+    Type: AWS::KMS::Key
+    Condition: SecretsEncryptionEnabled
+    Properties:
+      Description: !Sub >-
+        Customer-managed KMS key for EKS Secrets/etcd envelope encryption on
+        ${EksClusterName}. Lives and dies with the EKS stack -- there is
+        nothing to retain once the cluster is torn down.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          # EKS calls these on the cluster role's behalf to wrap/unwrap
+          # Secrets in etcd and to let the control plane create the grants
+          # it needs per node. No circular dependency here: EksClusterRole
+          # does not need to know this key's Arn back.
+          - Sid: AllowEksClusterRoleEnvelopeEncryption
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EksClusterRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: '*'
+      Tags:
+        - {Key: Project, Value: clickhouse-private}
+
+  EksSecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: SecretsEncryptionEnabled
+    Properties:
+      AliasName: !Sub 'alias/${EnvironmentName}-eks-secrets'
+      TargetKeyId: !Ref EksSecretsKey
+
   EksCluster:
     Type: AWS::EKS::Cluster
     Properties:
@@ -68,6 +136,18 @@ Resources:
         EndpointPrivateAccess: true
         EndpointPublicAccess: !If [PublicEndpoint, true, false]
         PublicAccessCidrs: !Ref PublicEndpointCidrs
+      # ONE-WAY DOOR: EKS lets you ADD EncryptionConfig to an existing
+      # cluster in place, but never lets you remove it or repoint it to a
+      # different key afterward -- only a full teardown
+      # (-e eks_state=absent) and recreate undoes it. See
+      # eks_cluster/tasks/main.yml's confirm_encryption_config guard, which
+      # exists so a casual fips=true re-run cannot trigger this silently.
+      EncryptionConfig: !If
+        - SecretsEncryptionEnabled
+        - - Resources: [secrets]
+            Provider:
+              KeyArn: !GetAtt EksSecretsKey.Arn
+        - !Ref 'AWS::NoValue'
       AccessConfig:
         # API_AND_CONFIG_MAP is the modern path: cluster permissions are
         # granted with EKS access entries (real IAM objects) instead of by
@@ -103,3 +183,9 @@ Outputs:
     Value: !GetAtt EksCluster.OpenIdConnectIssuerUrl
   ClusterSecurityGroupId:
     Value: !GetAtt EksCluster.ClusterSecurityGroupId
+  # Read back in tasks/main.yml to report the intended EncryptionConfig
+  # outcome against this template's own rendered state -- not a live
+  # `aws eks describe-cluster` call, per plan.constraints[].
+  EksSecretsKeyArn:
+    Condition: SecretsEncryptionEnabled
+    Value: !GetAtt EksSecretsKey.Arn

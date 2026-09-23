@@ -29,6 +29,8 @@
       - "creating EKS {{ infrastructure.eks_version }} control plane: ~10-15 min"
       - "cost: $0.10/hr (~$2.40/day) for the control plane alone, nodes extra"
       - "public API endpoint: {{ eks_public_endpoint | default('true') }}"
+      - >-
+        Secrets envelope encryption (etcd): {{ 'customer-managed KMS key (fips: true)' if (fips | default(false) | bool) else 'AWS-owned default key, unchanged (fips: false)' }}
       - "teardown: ansible-playbook deploy.yml --tags eks -e eks_state=absent"
 
 # A CloudFormation stack whose very first CREATE fails is left in
@@ -76,6 +78,37 @@
     - _eks_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
     - clear_failed_stack | default(false) | bool
 
+# FIPS hardening Phase 3: EncryptionConfig (a customer-managed KMS key for
+# EKS Secrets/etcd envelope encryption) can be ADDED to an existing cluster
+# in place, but EKS never lets it be removed or repointed to a different
+# key afterward -- only a full teardown (-e eks_state=absent) and recreate
+# undoes it. This is a SHARED account and a casual fips=true re-run must not
+# silently lock that in on a cluster that already exists, so -- matching the
+# clear_failed_stack/allow_open_internet explicit-confirmation pattern above
+# -- require an explicit flag before touching an existing stack with
+# fips: true. A brand-new stack carries no such risk (there is no prior
+# EncryptionConfig state to lock in), so this only guards updates.
+- name: Refuse to change EncryptionConfig on an existing cluster without explicit confirmation
+  ansible.builtin.assert:
+    that: confirm_encryption_config | default(false) | bool
+    fail_msg: >-
+      Stack {{ infrastructure.environment_name }}-eks already exists and
+      fips: true would add/keep a customer-managed KMS key as this cluster's
+      Secrets/etcd EncryptionConfig. This is a ONE-WAY DOOR: EKS allows
+      adding EncryptionConfig in place but never allows removing it or
+      repointing it to a different key without a full teardown
+      (-e eks_state=absent) and recreate. Confirm this is what you want,
+      then re-run with -e confirm_encryption_config=true
+  when:
+    - fips | default(false) | bool
+    - (eks_state | default('present')) != 'absent'
+    - _eks_stack_status.rc == 0
+    # Excludes ROLLBACK_COMPLETE: that status means the stack holds zero
+    # resources, so any prior EncryptionConfig lock-in risk is already moot
+    # -- and if it's about to be cleared (clear_failed_stack=true) this run
+    # is effectively a fresh create, not an update to an existing cluster.
+    - _eks_stack_status.stdout | trim != 'ROLLBACK_COMPLETE'
+
 - name: Deploy the EKS control plane stack
   amazon.aws.cloudformation:
     stack_name: "{{ infrastructure.environment_name }}-eks"
@@ -92,6 +125,7 @@
       SubnetIds: "{{ _vpc_outputs.PrivateSubnetIds }}"
       PublicEndpointAccess: "{{ eks_public_endpoint | default('true') }}"
       PublicEndpointCidrs: "{{ eks_public_cidrs | default('0.0.0.0/0') }}"
+      EnableSecretsEncryption: "{{ 'true' if fips else 'false' }}"
     capabilities:
       - CAPABILITY_IAM
     tags:
@@ -102,6 +136,22 @@
 - name: Stop here when tearing down
   ansible.builtin.meta: end_play
   when: (eks_state | default('present')) == 'absent'
+
+# ac3: documentation of intent, read back from this same CloudFormation
+# stack's own outputs -- not a live `aws eks describe-cluster` call, per
+# plan.constraints[]. EksSecretsKeyArn only exists in stack_outputs when
+# EnableSecretsEncryption was 'true' for this deploy (see the CFN template's
+# SecretsEncryptionEnabled condition), so its presence is itself the proof
+# the template rendered the encrypted branch.
+- name: Report the intended EKS Secrets envelope-encryption outcome
+  vars:
+    _eks_secrets_key_arn: "{{ _eks_stack.stack_outputs.EksSecretsKeyArn | default('') }}"
+  ansible.builtin.debug:
+    msg: >-
+      EncryptionConfig (Secrets/etcd):
+      {{ 'customer-managed KMS key (' ~ _eks_secrets_key_arn ~ ')'
+         if _eks_secrets_key_arn
+         else 'AWS-owned default key (EKS 1.28+ built-in; unchanged by this deploy)' }}
 
 - name: Write a project-local kubeconfig
   # Deliberately NOT ~/.kube/config: the same reasoning as the AWS config.
