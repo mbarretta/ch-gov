@@ -456,6 +456,34 @@
         LANGFUSE_INIT_USER_PASSWORD: "{{ _lf_init_pw | b64encode }}"
   no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
+- name: Write the ClickHouse CA Secret (Step 9's TLS material, for the migration and runtime clients)
+  # fips: true only. clickhouse_cluster (Step 9) runs before this role and
+  # already wrote clickhouse_tls_ca_cert_file (4a-impl); the CA itself has no
+  # secret material (it signs, it does not authenticate as anything), so a
+  # Secret is used here only to match this file's existing convention of
+  # putting everything the chart mounts into a Secret, not because ca.crt is
+  # sensitive. Mounted below via langfuse.extraVolumes/extraVolumeMounts and
+  # trusted via NODE_EXTRA_CA_CERTS (langfuse.additionalEnv) -- see the
+  # `clickhouse:` Helm values block for why that route, not a chart-native
+  # clickhouse.tls.* value (this chart, unlike its own redis.tls.caPath, has
+  # none).
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: langfuse-clickhouse-ca
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data:
+        ca.crt: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) | b64encode }}"
+  when: fips
+
 # --- the load balancer -------------------------------------------------------
 # Before the release, because NEXTAUTH_URL is derived from its hostname. Same
 # manifest shape as Step 12's Service; the selector is the chart's own web
@@ -814,6 +842,35 @@
             eks.amazonaws.com/role-arn: "{{ _lf_s3_role_arn }}"
         additionalEnvFrom:
           - secretRef: {name: langfuse-init}
+        # fips: true only. NODE_EXTRA_CA_CERTS, not a chart-native clickhouse.tls.*
+        # value (this chart has none -- see the CA Secret task above and the
+        # `clickhouse:` block below). This name is not one of the reserved
+        # CLICKHOUSE_* names templates/validations.yaml checks additionalEnv
+        # against when clickhouse.host is set (confirmed against the pulled
+        # 2.1.0 chart's validations.yaml), so it does not trip the "Only one of
+        # additionalEnv or the new structure can be configured" fail. Node's
+        # https/tls core modules read this env var into the process-wide
+        # default CA trust store at startup; @clickhouse/client's Node
+        # connection (packages/client-node/src/connection/node_https_connection.ts
+        # in the pinned ClickHouse JS client, confirmed by reading its source)
+        # passes `ca: undefined` to https.Agent when no client-side tls config
+        # is set -- which Langfuse's own ClickHouse client construction
+        # (packages/shared/src/server/clickhouse/client.ts in the pinned
+        # v4.25.0 app, confirmed by reading its source) never sets -- so this
+        # is the CA path Node actually consults, with full hostname
+        # verification intact (no rejectUnauthorized override anywhere in that
+        # path either).
+        additionalEnv: "{{ [{'name': 'NODE_EXTRA_CA_CERTS', 'value': '/etc/langfuse/clickhouse-ca/ca.crt'}] if fips else [] }}"
+        # Mounts the Secret written above into every langfuse deployment
+        # (web and worker both need it: the worker also runs runtime
+        # ClickHouse queries). extraVolumes/extraVolumeMounts are top-level
+        # langfuse.* values applied to all deployments (confirmed in the
+        # pulled chart's values.yaml comments), matching this chart's own
+        # pattern for redis.tls.caPath ("Path to the CA certificate file...
+        # mounted into Langfuse pods" -- the chart expects the caller to wire
+        # the mount, same as here).
+        extraVolumes: "{{ [{'name': 'clickhouse-ca', 'secret': {'secretName': 'langfuse-clickhouse-ca'}}] if fips else [] }}"
+        extraVolumeMounts: "{{ [{'name': 'clickhouse-ca', 'mountPath': '/etc/langfuse/clickhouse-ca', 'readOnly': true}] if fips else [] }}"
         image:
           pullPolicy: IfNotPresent   # tags are immutable in our ECR
         web:
@@ -848,11 +905,45 @@
 
       # The OLAP store: ClickHouse Private from Step 9, over the pod network
       # through the operator's server-any Service. Nothing is deployed here.
+      #
+      # fips: true moves both the runtime and migration connections to the
+      # secure ports 4a-impl wired (server.openSSL.required zeroes 8123/9000
+      # for every caller -- 4a-spike's findings -- so leaving these on their
+      # plaintext defaults would simply fail to connect, not "keep working
+      # unencrypted"). The chart's own `langfuse.clickhouse.protocol` helper
+      # (confirmed by reading templates/_helpers.tpl in the pulled 2.1.0
+      # chart) derives CLICKHOUSE_URL's scheme from whether `host` starts with
+      # "https://", stripping that prefix before use as the hostname -- so
+      # prefixing host is how CLICKHOUSE_URL becomes https:// without a
+      # duplicate-name additionalEnv override (see ac3's additionalEnv note
+      # below and the langfuse.additionalEnv block above). The hostname itself
+      # (.svc.cluster.local) is in the leaf certificate's SAN list
+      # clickhouse_cluster/tasks/main.yml generates, alongside
+      # langfuse_clickhouse's bare .svc form -- both verify.
+      #
+      # migration.ssl: true is a real, unavoidable gap, not a choice made
+      # here: the pinned Langfuse app (v4.25.0)'s own bundled migration
+      # runner (packages/shared/clickhouse/scripts/up.sh, confirmed at git tag
+      # v4.25.0) unconditionally appends `&secure=true&skip_verify=true` to
+      # golang-migrate's connection string whenever CLICKHOUSE_MIGRATION_SSL
+      # is true -- skip_verify is baked into the shipped image and is not
+      # reachable from any Helm value, additionalEnv, or ansible setting this
+      # role controls. So the one-time schema-migration connection at each web
+      # pod's startup is TLS-encrypted but not certificate/hostname-verified
+      # under fips: true; this is an upstream Langfuse limitation at this
+      # pinned version, not something disabled by this role. The ongoing
+      # runtime query traffic (CLICKHOUSE_URL, used by both web and worker for
+      # every trace read/write after startup) does NOT share this gap: the
+      # @clickhouse/client Node connection never sets skip_verify/
+      # rejectUnauthorized anywhere, so NODE_EXTRA_CA_CERTS above gives it full
+      # CA-and-hostname verification. Not enabling migration.ssl at all is not
+      # an option: with the plaintext port gone, migrations would not connect
+      # at all, so Langfuse could never start under fips: true.
       clickhouse:
         deploy: false
-        host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local"
-        httpPort: 8123
-        nativePort: 9000
+        host: "{{ ('https://' if fips else '') ~ 'c-' ~ clickhouse.cluster_name ~ '-server-any.' ~ clickhouse.namespace ~ '.svc.cluster.local' }}"
+        httpPort: "{{ (8443 if fips else 8123) | int }}"
+        nativePort: "{{ (9440 if fips else 9000) | int }}"
         database: "{{ langfuse.clickhouse_database }}"
         auth:
           username: "{{ langfuse.clickhouse_user }}"
@@ -861,7 +952,7 @@
         cluster:
           enabled: "{{ _lf_cluster_enabled | bool }}"   # decided above
         migration:
-          ssl: false
+          ssl: "{{ fips | bool }}"
           autoMigrate: true
 
       # PostgreSQL: the bundled subchart on Chainguard's image. Its postgres
@@ -1376,6 +1467,6 @@
                          ~ ('; TLS terminated at the NLB with a self-signed certificate -- clients trust ' ~ (langfuse_state_files.tls_cert_file | realpath) ~ ' (curl --cacert)' if _lf_tls else '')) }}"
       - "login:      {{ langfuse.init.user_email }} -- password in {{ langfuse_state_files.init_user_password_file | realpath }}"
       - "api keys:   {{ langfuse_state_files.public_key_file | realpath }} (public), {{ langfuse_state_files.secret_key_file | realpath }} (secret) -- project {{ langfuse.init.project_id }}"
-      - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:8123 as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"
+      - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local:{{ 8443 if fips else 8123 }} ({{ 'TLS, CA-verified' if fips else 'plaintext' }}) as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"
       - "smoke test: scripts/langfuse-smoke.sh   (posts a trace and reads it back from ClickHouse)"
       - "teardown:   ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent   (keeps the ClickHouse data; --tags lf-db -e langfuse_db_state=absent purges it)"
