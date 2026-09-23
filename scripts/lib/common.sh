@@ -122,15 +122,23 @@ lf_var() {
     }' "$CH_GROUP_VARS"
 }
 
-# Succeeds when langfuse.load_balancer.tls is true. `    tls:` is the only
-# key at that indentation spelled that way in the langfuse: block, so the
-# prefix match is unambiguous.
-lf_tls() { [[ "$(lf_var '    tls:')" == true ]]; }
+# Succeeds when the NLB terminates TLS -- the same effective state the
+# langfuse role computes as _lf_tls (Phase 4c): langfuse.load_balancer.tls,
+# OR'd with the persistent fips: switch (ch_fips, defined below -- function
+# order in this file does not matter, only call order), but never for
+# load_balancer.type: none, which has no NLB at all. `    tls:` and
+# `    type:` are the only keys at that indentation spelled that way in the
+# langfuse: block, so the prefix matches are unambiguous.
+lf_tls() {
+  [[ "$(lf_var '    type:')" != none ]] || return 1
+  [[ "$(lf_var '    tls:')" == true ]] || ch_fips
+}
 
 # Prints the address Langfuse is reached at -- the same rule the langfuse role
 # uses for NEXTAUTH_URL, so the two never disagree: langfuse.url when set;
 # else the hostname of the langfuse-lb NLB, as https://<host> with :<port>
-# appended unless it is 443 when langfuse.load_balancer.tls is true, and as
+# appended unless it is 443 when lf_tls (langfuse.load_balancer.tls, or
+# fips: true with load_balancer.type not none), and as
 # http://<host> with :<port> appended unless it is 80 otherwise. Prints nothing
 # and returns 1 when the NLB has no hostname (not provisioned yet, or the
 # Service is absent). Reads the Service through state/kubeconfig, like every
@@ -151,9 +159,9 @@ lf_url() {
 }
 
 # Prints the CA file curl needs for the address lf_url derives -- the role's
-# self-signed certificate, LF_TLS_CERT -- when tls is true and the file is
-# readable. Prints nothing and returns 1 otherwise (tls off, or the role has
-# not generated it yet). Only for the derived NLB address: the certificate
+# self-signed certificate, LF_TLS_CERT -- when lf_tls (see above) and the
+# file is readable. Prints nothing and returns 1 otherwise (TLS off, or the
+# role has not generated it yet). Only for the derived NLB address: the certificate
 # names the NLB hostname alone, so a langfuse.url or LANGFUSE_URL alias must be
 # verified against the system trust store (or a CA the caller supplies).
 lf_cacert() {

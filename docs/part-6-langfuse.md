@@ -549,6 +549,39 @@ then `scripts/play.sh --tags lf-app` (or `up.sh`, which runs it). The role
 needs OpenSSL 3 on `PATH` — `brew install openssl@3`, with `/opt/homebrew/bin`
 first — and fails with that instruction if it finds macOS's LibreSSL instead.
 
+**`fips: true` turns this on for you (Phase 4c).** `tls: true` above is the
+by-hand switch; the whole point of the repo's single `fips` boolean is that
+you should not also have to flip it. So the role computes an *effective* TLS
+state, `_lf_tls`: `tls` OR `fips`, whenever `load_balancer.type` is not
+`none`. With `fips: false` nothing here changes — `tls` alone still decides,
+exactly as above. With `fips: true` and a `type` of `internal` or `public`,
+the NLB terminates TLS whether or not you also set `tls: true`.
+`load_balancer.type: none` has no NLB at all, under either switch: there is
+nothing for `_lf_tls` to terminate TLS on, so a `none` deployment stays
+`http://localhost:3000` via port-forward regardless of `fips`. Two more
+`fips: true` changes ride along with the same certificate this section
+describes:
+
+- The NLB's TLS security policy (the `aws-load-balancer-ssl-negotiation-policy`
+  annotation and the listener's own `--ssl-policy`) becomes
+  `ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04` instead of the default
+  `ELBSecurityPolicy-TLS13-1-2-2021-06` — a FIPS 140-3 validated policy this
+  account has confirmed available, still TLS 1.2/1.3, no legacy ciphers.
+- The self-signed key becomes RSA `tls_rsa_bits` (`group_vars/all.yml`) —
+  3072 bits under `fips: true`, the repo's usual FIPS-140-3 floor, instead of
+  the normal 2048. A certificate already at or above the required strength
+  is reused untouched on the next run; one still below it (left over from a
+  `fips: false` run, or from before this bump existed) is regenerated even
+  though its SAN still names the current hostname.
+
+**What `fips: true` does *not* buy here.** The certificate is still generated
+by openssl on the controller running Ansible — the same self-signed,
+nobody-vouches-for-it certificate described above, just at a larger key size
+and behind a FIPS-validated listener policy. This plan does not make that
+controller's own OpenSSL build itself FIPS 140-3 validated; whether that
+matters for your compliance target is a question this repo does not answer
+for you.
+
 **What you get, and what you do not.** The certificate is self-signed: the
 role generates it, nobody vouches for it, and no browser or SDK trusts it
 until you hand them the file. That buys **encryption** — the key pair and
@@ -569,12 +602,16 @@ between the hostname wait and the URL:
 
 1. **The Service** `langfuse-lb` is created as before, and the role waits
    for its hostname.
-2. **Key and certificate** go into `state/`: `openssl req -x509 -newkey rsa:2048 -noenc`
+2. **Key and certificate** go into `state/`: `openssl req -x509 -newkey rsa:{{ tls_rsa_bits }} -noenc`
    writes `state/langfuse-tls-key.pem` (0600) and `state/langfuse-tls-cert.pem`
    with `CN=langfuse` and `subjectAltName=DNS:<hostname>`, valid
-   `tls_cert_days`. They are regenerated only when either file is missing or
-   the certificate's SAN does not name the current hostname
-   (`openssl x509 -noout -ext subjectAltName`); expiry does not trigger it.
+   `tls_cert_days` (`tls_rsa_bits` is 2048 normally, 3072 under `fips: true` —
+   see above). They are regenerated when either file is missing, the
+   certificate's SAN does not name the current hostname
+   (`openssl x509 -noout -ext subjectAltName`), or — `fips: true` only — the
+   existing key is below `tls_rsa_bits` (`openssl x509 -noout -text`, the
+   `Public-Key: (N bit)` line); expiry does not trigger it, and a certificate
+   already at the required strength is reused untouched.
 3. **The ACM import**, with `community.aws.acm_certificate`, under the Name
    tag `clickhouse-private-langfuse-lb`
    (`{{ infrastructure.environment_name }}-langfuse-lb`). The same body maps
@@ -583,9 +620,10 @@ between the hostname wait and the URL:
 4. **The Service is patched** with the three annotations the cloud controller
    reads: `service.beta.kubernetes.io/aws-load-balancer-ssl-cert` (the ARN),
    `aws-load-balancer-ssl-ports` (the listener port, `443`) and
-   `aws-load-balancer-ssl-negotiation-policy`
-   (`ELBSecurityPolicy-TLS13-1-2-2021-06`, AWS's recommended TLS 1.2/1.3
-   policy for NLBs). The target stays plain TCP to the web pod's 3000.
+   `aws-load-balancer-ssl-negotiation-policy` — `ELBSecurityPolicy-TLS13-1-2-2021-06`,
+   AWS's recommended TLS 1.2/1.3 policy for NLBs, or
+   `ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04` under `fips: true` (see above).
+   The target stays plain TCP to the web pod's 3000.
 5. **The role switches the listener itself**: `aws elbv2 modify-listener --protocol TLS`
    with that certificate and policy — because the controller cannot, see
    below. Skipped when the listener is already TLS with this certificate,
@@ -628,17 +666,20 @@ a live problem.
 derive the same address. The rule, in the role and in `lf_url()` in
 `scripts/lib/common.sh`:
 
-| `langfuse.url` | `type` | `tls` | Address |
+| `langfuse.url` | `type` | `tls` *(effective: `tls` OR `fips`)* | Address |
 |---|---|---|---|
 | set | any | any | `langfuse.url`, as given |
-| empty | `none` | — | `http://localhost:3000` (the fixed port-forward) |
+| empty | `none` | — | `http://localhost:3000` (the fixed port-forward, regardless of `fips`) |
 | empty | `internal` / `public` | `false` | `http://<hostname>`, with `:<port>` unless `port` is 80 |
 | empty | `internal` / `public` | `true` | `https://<hostname>`, with `:<port>` unless `port` is 443 |
 
-Set `port: 443` with `tls: true`. The rule is honest about any other value —
-`port: 8443` gives `https://<hostname>:8443` — but `tls: true` with the
-default `port: 80` gives `https://<hostname>:80`, which works and looks
-wrong to everyone who reads it.
+The `tls` column is the *effective* state (§9 above): `fips: true` makes it
+`true` even when `langfuse.load_balancer.tls` is left `false`, for any `type`
+other than `none`. Set `port: 443` with `tls: true` (or `fips: true`). The
+rule is honest about any other value — `port: 8443` gives
+`https://<hostname>:8443` — but effective-`tls: true` with the default
+`port: 80` gives `https://<hostname>:80`, which works and looks wrong to
+everyone who reads it.
 
 ### Trusting it from a client
 
@@ -819,10 +860,11 @@ account, none tagged `Name=clickhouse-private-langfuse-lb`, and
 
 Two rules that follow from how the deletion is gated:
 
-- **It runs only when `tls` is still `true` at teardown time.** Flip
-  `enabled` off if you like — teardown works with the switch already off,
-  §13 — but leave `tls` alone until Langfuse is gone, or the certificate
-  stays in ACM with nothing pointing at it.
+- **It runs only when the effective TLS state (`tls`, or `fips`, per above)
+  is still true at teardown time.** Flip `enabled` off if you like — teardown
+  works with the switch already off, §13 — but leave `tls` and `fips` alone
+  until Langfuse is gone, or the certificate stays in ACM with nothing
+  pointing at it.
 - **`tls: true` → `false` without a teardown does not undo TLS.** The role
   applies the three ssl annotations as a patch, and a plain re-run keeps
   annotations it did not apply, so the listener stays TLS while the
