@@ -27,6 +27,17 @@ fail()  { printf '  %s[fail]%s %s\n'   "$C_RED" "$C_RESET" "$*"; }
 info()  { printf '  %s%s%s\n'          "$C_DIM" "$*" "$C_RESET"; }
 die()   { fail "$*"; exit 1; }
 
+# ---- group_vars flag reader ------------------------------------------------
+# Reads a top-level scalar key (e.g. `fips:`) straight out of group_vars/all.yml.
+# Shared by render_aws_config below and ch_fips further down: both run before,
+# or without, Ansible ever templating anything, so this is the only source.
+# Defined ahead of render_aws_config (which runs immediately, at source time,
+# before CH_GROUP_VARS further down even exists) so it takes the path
+# explicitly rather than assuming that constant.
+group_var_flag() {
+  awk -F'[: \t]+' "/^$1:/"'{print $2; exit}' "$2"
+}
+
 # ---- AWS config bootstrap --------------------------------------------------
 # .aws/config is generated from ansible/files/aws-config.ini.j2, not tracked
 # directly, so use_fips_endpoint always matches the `fips:` switch. The
@@ -49,7 +60,7 @@ render_aws_config() {
   local tmpl="$CH_PROJECT_ROOT/ansible/files/aws-config.ini.j2"
   [[ -f "$tmpl" ]] || die "missing $tmpl -- checkout looks incomplete"
   local fips_default use_fips=false
-  fips_default="$(awk -F'[: \t]+' '/^fips:/{print $2; exit}' "$CH_PROJECT_ROOT/ansible/group_vars/all.yml")"
+  fips_default="$(group_var_flag fips "$CH_PROJECT_ROOT/ansible/group_vars/all.yml")"
   [[ "$fips_default" == "true" ]] && use_fips=true
   mkdir -p "$(dirname "$out")"
   sed "s/{{ 'true' if fips else 'false' }}/$use_fips/g" "$tmpl" > "$out"
@@ -170,12 +181,9 @@ lf_cacert() {
 }
 
 # ---- fips (shared by ch-client.sh's TLS handling) -------------------------
-# Succeeds when the persistent fips: switch in group_vars is true. Read
-# directly from all.yml, the same way render_aws_config reads its own
-# fips_default above: these scripts run before, or without, Ansible ever
-# templating anything, so there is no other source.
+# Succeeds when the persistent fips: switch in group_vars is true.
 ch_fips() {
-  [[ "$(awk -F'[: \t]+' '/^fips:/{print $2; exit}' "$CH_GROUP_VARS")" == "true" ]]
+  [[ "$(group_var_flag fips "$CH_GROUP_VARS")" == "true" ]]
 }
 
 # The CA clickhouse_cluster generates into state/ when fips is true (see
