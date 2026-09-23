@@ -61,21 +61,31 @@
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
     # $0 = user, $1 = host, $2 = attempts; the user's password is the first
-    # line of stdin. SELECT 1 over HTTP, the port Langfuse's own runtime
-    # client uses (fips: true moves this to HTTPS 8443 -- 4a-spike's findings
-    # confirm the plain 8123 listener is zeroed the same as 9000's -- with
-    # --no-check-certificate rather than plumbing a CA into wget: this is an
-    # in-cluster health probe that had no certificate verification at all on
-    # the removed plaintext port either, so this is not a downgrade). The
-    # password rides in a header on wget's argv inside the container, the
-    # same exposure as clickhouse-client's --password in _lfdb_sh; the kubectl
-    # argv on this machine carries nothing. Retries are here rather than in
-    # `until:` so the task can be `failed_when: false` and the assert after it
-    # can explain the failure (an exhausted `until:` fails regardless).
+    # line of stdin, followed (fips: true only) by the ClickHouse CA 4a-impl
+    # wrote (clickhouse_tls_ca_cert_file). SELECT 1 over HTTP, the port
+    # Langfuse's own runtime client uses (fips: true moves this to HTTPS
+    # 8443 -- 4a-spike's findings confirm the plain 8123 listener is zeroed
+    # the same as 9000's). ac1 (task 4b) asks for CA verification on this
+    # check specifically, not --no-check-certificate: `read -r pw` consumes
+    # exactly the first stdin line (the password has no embedded newline), so
+    # the plain `cat` after it slurps whatever is left on stdin -- the CA,
+    # when the caller appended it -- into a per-exec temp file inside the
+    # (already-running) server pod. There is no other way to get the CA into
+    # this pod's filesystem: unlike clickhouse_loadbalancer's own probe, this
+    # role execs into the *existing* server pod rather than creating one of
+    # its own, so it cannot add a volume mount, and the operator's own
+    # in-pod mount path for server.openSSL's Secret is not documented by
+    # anything 4a-spike or 4a-impl recorded. The password rides in a header
+    # on wget's argv inside the container, the same exposure as
+    # clickhouse-client's --password in _lfdb_sh; the kubectl argv on this
+    # machine carries nothing. Retries are here rather than in `until:` so
+    # the task can be `failed_when: false` and the assert after it can
+    # explain the failure (an exhausted `until:` fails regardless).
     _lfdb_http_sh: |
       IFS= read -r pw
+      {{ 'cat >/tmp/ch-ca.crt' if fips else '' }}
       i=1
-      while ! wget -qO- --timeout=10 {{ '--no-check-certificate' if fips else '' }} --header="X-ClickHouse-User: $0" --header="X-ClickHouse-Key: $pw" "{{ 'https' if fips else 'http' }}://$1:{{ 8443 if fips else 8123 }}/?query=SELECT%201"; do
+      while ! wget -qO- --timeout=10 {{ '--ca-certificate=/tmp/ch-ca.crt' if fips else '' }} --header="X-ClickHouse-User: $0" --header="X-ClickHouse-Key: $pw" "{{ 'https' if fips else 'http' }}://$1:{{ 8443 if fips else 8123 }}/?query=SELECT%201"; do
         [ "$i" -ge "$2" ] && exit 1
         i=$((i+1))
         sleep 5
@@ -166,6 +176,18 @@
       ansible.builtin.set_fact:
         _lfdb_pw_hash: "{{ _lfdb_pw | hash('sha256') }}"
       no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Decide the CA to append after the password on every _lfdb_http_sh call
+      # fips: true only (empty otherwise, so the non-fips stdin is unchanged
+      # from before this task). Deliberately inside this teardown-skipped
+      # block, not "Name the pieces" above: this does a real file read
+      # (clickhouse_tls_ca_cert_file), and "Name the pieces" runs
+      # unconditionally, before this block's own guard and before the
+      # teardown block's `end_play` -- computing it there would make a purge
+      # (-e langfuse_db_state=absent) fail if that file were ever missing,
+      # even though a purge never uses it.
+      ansible.builtin.set_fact:
+        _lfdb_ca_stdin: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) if fips else '' }}"
 
 # --- teardown ---------------------------------------------------------------
 # The "purge Langfuse data" switch. DROP DATABASE ... SYNC waits for every
@@ -272,7 +294,7 @@
   # or the user predates this role; it is what triggers the ALTER USER.
   ansible.builtin.command:
     argv: "{{ _lfdb_exec + [_lfdb_pod, '--', 'sh', '-c', _lfdb_http_sh, _lfdb_user, _lfdb_host, '1'] }}"
-    stdin: "{{ _lfdb_pw }}\n"
+    stdin: "{{ _lfdb_pw }}\n{{ _lfdb_ca_stdin }}"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
   register: _lfdb_auth_before
@@ -450,7 +472,7 @@
   # a small lag.
   ansible.builtin.command:
     argv: "{{ _lfdb_exec + [_lfdb_pod, '--', 'sh', '-c', _lfdb_http_sh, _lfdb_user, _lfdb_host, '6'] }}"
-    stdin: "{{ _lfdb_pw }}\n"
+    stdin: "{{ _lfdb_pw }}\n{{ _lfdb_ca_stdin }}"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
   register: _lfdb_auth
