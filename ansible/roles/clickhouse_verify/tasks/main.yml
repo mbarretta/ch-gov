@@ -57,7 +57,19 @@
     # an INSERT as external data -- which async inserts refuse:
     #   Code: 48. Processing async inserts with both inlined and external data
     #   (from stdin or infile) is not supported. (NOT_IMPLEMENTED)
-    _vf_sh: 'IFS= read -r pw; exec clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null'
+    #
+    # fips: true adds --secure --port 9440: this exec runs inside the server
+    # pod itself (no --host, implicit localhost), and server.openSSL.required
+    # zeroes localhost's own plaintext 9000 the same as everyone else's
+    # (4a-spike findings). No --config-file/CA argument here -- this is an
+    # in-cluster loopback admin check that had no certificate verification at
+    # all on the removed plaintext port either, so accepting whatever cert
+    # the server presents is not a downgrade from before.
+    _vf_sh: >-
+      IFS= read -r pw;
+      exec clickhouse-client --user "$0" --password "$pw"
+      {{ '--secure --port 9440' if fips else '' }}
+      --multiquery --query "$1" </dev/null
 
 - name: Version and host, from replica A
   ansible.builtin.command:

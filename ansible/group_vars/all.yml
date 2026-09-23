@@ -164,9 +164,10 @@ clickhouse:
     #             The right answer for an airgapped or regulated deployment.
     # public   -> NLB in the public subnets with a public address. Requires
     #             allowed_cidrs, and refuses 0.0.0.0/0 unless you also pass
-    #             -e allow_open_internet=true. Plain TCP -- TLS is not
-    #             configured in this deployment, so treat "public" as a lab
-    #             convenience, not a posture.
+    #             -e allow_open_internet=true. Plain TCP when fips is false,
+    #             so treat "public" as a lab convenience, not a posture --
+    #             fips: true moves these ports to native TLS (8443/9440);
+    #             see clickhouse_loadbalancer/tasks/main.yml.
     type: "internal"
     # CIDRs allowed to connect. Becomes the Service's loadBalancerSourceRanges,
     # which the cloud controller writes into the node security group. Empty
@@ -248,6 +249,12 @@ target_registry: >-
 # in clickhouse_cluster/tasks/main.yml -- see the endpoint-coverage matrix
 # below for what this does and does not put on a FIPS path.
 s3_endpoint: "https://{{ 's3-fips' if fips else 's3' }}.{{ aws.target_region }}.amazonaws.com"
+
+# RSA key size for the ClickHouse native-TLS CA/leaf certificate
+# clickhouse_cluster generates (Phase 4a): the FIPS 140-3 floor of 3072 bits
+# when fips is true, the usual 2048 otherwise. Kept alongside the other
+# single-fips ternaries in this block per plan.constraints[].
+tls_rsa_bits: "{{ 3072 if fips else 2048 }}"
 
 # ---------------------------------------------------------------------------
 # FIPS AWS-API endpoint-coverage matrix (Phase 1 of the FIPS hardening plan).
@@ -342,6 +349,27 @@ admin_password_file: "{{ state_dir }}/clickhouse-admin-password"
 prometheus_password_file: "{{ state_dir }}/clickhouse-prometheus-password"
 # Where the preflight role leaves its rendered spec and last report.
 preflight_dir: "{{ state_dir }}/preflight"
+
+# ClickHouse native TLS (Phase 4a): a self-signed CA and a leaf server cert
+# it signs, generated once by clickhouse_cluster when fips is true and kept
+# under state/ like the other generated material above. Named after
+# langfuse_state_files' tls_cert_file/tls_key_file convention below, but kept
+# flat here -- like admin_password_file/prometheus_password_file above --
+# since ClickHouse's own state vars are not nested under a block the way
+# Langfuse's are.
+clickhouse_tls_ca_cert_file: "{{ state_dir }}/clickhouse-tls-ca.pem"
+clickhouse_tls_ca_key_file:  "{{ state_dir }}/clickhouse-tls-ca-key.pem"
+clickhouse_tls_cert_file:    "{{ state_dir }}/clickhouse-tls-cert.pem"
+clickhouse_tls_key_file:     "{{ state_dir }}/clickhouse-tls-key.pem"
+# The chart's own default Secret name for server.openSSL/keeper.openSSL's
+# `secret` value, confirmed by 4a-spike's helm template render (see the
+# findings doc, AC2 evidence #5): "<release>-server-cert-secret". Reused
+# for BOTH server.openSSL.secret and keeper.openSSL.secret below -- one CA,
+# one leaf cert, one Secret -- since the chart's TLS surface is CA-chain
+# verification only (no per-listener SAN/hostname field exists to force two
+# separate certs), and keeper's own default secret-name convention was not
+# independently confirmed against the (un-pulled) operator chart.
+clickhouse_tls_secret_name: "{{ clickhouse.cluster_name }}-server-cert-secret"
 
 # Langfuse's generated secrets (Steps 14-15), kept under state/ exactly like the
 # ClickHouse admin password above: created on first run, read back afterwards.
