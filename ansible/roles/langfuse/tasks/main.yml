@@ -215,7 +215,19 @@
       # for the full reasoning, including why the client gets /dev/null).
       ansible.builtin.set_fact:
         _lf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server", "{{ _lf_server_pods.stdout_lines[0] }}", "--", "sh", "-c"]
-        _lf_sh: 'IFS= read -r pw; exec clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null'
+        # fips: true adds --secure --port 9440: this exec runs inside the
+        # server pod itself (no --host, implicit localhost), and
+        # server.openSSL.required zeroes localhost's own plaintext 9000 the
+        # same as everyone else's (4a-spike findings). No --config-file/CA
+        # argument here -- this is an in-cluster loopback admin check that
+        # had no certificate verification at all on the removed plaintext
+        # port either, so accepting whatever cert the server presents is not
+        # a downgrade from before (see clickhouse_verify's identical _vf_sh).
+        _lf_sh: >-
+          IFS= read -r pw;
+          exec clickhouse-client --user "$0" --password "$pw"
+          {{ '--secure --port 9440' if fips else '' }}
+          --multiquery --query "$1" </dev/null
         # A server setting (access_control_improvements). Which system table
         # lists it differs between versions, so both are asked; an empty answer
         # means the server does not report it, i.e. it is not enforced.

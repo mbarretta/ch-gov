@@ -33,6 +33,20 @@
     _lb_present: "{{ (lb_state | default('present')) == 'present' and clickhouse.load_balancer.type != 'none' }}"
     _lb_name: "{{ clickhouse.cluster_name }}-lb"
 
+- name: Decide the load balancer's listener ports
+  # 4a-spike's findings (AC2): server.openSSL.required: true zeroes the
+  # plaintext http_port/tcp_port for every caller, including this NLB's
+  # targets -- so under fips: true this Service (and the health probe below)
+  # must point at ClickHouse's TLS ports instead of group_vars' plaintext
+  # defaults. 8443/9440 are ClickHouse's own https/tcp_port_secure defaults
+  # (also named in docs/part-2-image-sync.md's "TLS-only on port 9440" debt
+  # item); the chart's base config enables them via featureFlags.enableSecurePorts
+  # once server.openSSL.required is true (see clickhouse_cluster/tasks/main.yml).
+  ansible.builtin.set_fact:
+    _lb_ports: >-
+      {{ [{'name': 'http', 'port': 8443}, {'name': 'native', 'port': 9440}]
+         if fips else clickhouse.load_balancer.ports }}
+
 # --- absent ------------------------------------------------------------------
 
 - name: Remove the load balancer Service
@@ -50,7 +64,11 @@
 
 - name: Report
   ansible.builtin.debug:
-    msg: "load balancer: none. Reach the cluster with scripts/ch-client.sh (port-forward) or from inside the cluster at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:9000"
+    msg: >-
+      load balancer: none. Reach the cluster with scripts/ch-client.sh
+      (port-forward) or from inside the cluster at
+      c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc:{{ 9440 if fips else 9000 }}
+      {{ '(--secure)' if fips else '' }}
   when: not _lb_present
 
 - name: Stop here when there is nothing to build
@@ -103,9 +121,10 @@
       clickhouse.load_balancer.type is 'public' but allowed_cidrs is
       {{ 'empty' if _lb_sources | length == 0 else 'the whole internet' }}.
       Set allowed_cidrs to the CIDRs that should reach ClickHouse
-      (your office/VPN egress, e.g. "203.0.113.7/32"). To really open port
-      9000 and 8123 to everyone, add -e allow_open_internet=true -- and note
-      TLS is not configured in this deployment.
+      (your office/VPN egress, e.g. "203.0.113.7/32"). To really open
+      {{ _lb_ports | map(attribute='port') | map('string') | join(' and ') }}
+      to everyone, add -e allow_open_internet=true
+      {{ '(TLS-secured, CA-verified -- fips: true)' if fips else '(plain TCP -- TLS is not configured in this deployment)' }}.
   when: clickhouse.load_balancer.type == 'public'
 
 # --- the Service -------------------------------------------------------------
@@ -143,8 +162,9 @@
         externalTrafficPolicy: Local
         loadBalancerSourceRanges: "{{ _lb_sources }}"
         # targetPort defaults to port; the operator's pods listen on the
-        # standard ClickHouse ports.
-        ports: "{{ clickhouse.load_balancer.ports | map('combine', {'protocol': 'TCP'}) | list }}"
+        # standard ClickHouse ports (the TLS ports under fips: true -- see
+        # _lb_ports above).
+        ports: "{{ _lb_ports | map('combine', {'protocol': 'TCP'}) | list }}"
   register: _lb_svc
 
 - name: Wait for the cloud controller to assign a hostname
@@ -264,19 +284,38 @@
       spec:
         restartPolicy: Never
         affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: clickhouseGroup, operator: DoesNotExist}]}]}}}
+        {% if fips %}
+        volumes:
+          - name: ca
+            secret: {secretName: {{ clickhouse_tls_secret_name }}, items: [{key: ca.crt, path: ca.crt}]}
+        {% endif %}
         containers:
           - name: probe
             image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
             env:
               - {name: LB, value: "{{ _lb_host.stdout | trim }}"}
               - {name: CLICKHOUSE_PASSWORD, valueFrom: {secretKeyRef: {name: lb-probe, key: password}}}
+            {% if fips %}
+            volumeMounts:
+              - {name: ca, mountPath: /tls, readOnly: true}
+            {% endif %}
             command: ["sh", "-c"]
             args:
               - |
+                {% if fips %}
+                cat >/tmp/client.xml <<'XML'
+                <config><openSSL><client><caConfig>/tls/ca.crt</caConfig><verificationMode>strict</verificationMode><invalidCertificateHandler><name>RejectCertificateHandler</name></invalidCertificateHandler></client></openSSL></config>
+                XML
+                {% endif %}
                 for i in 1 2 3 4 5 6; do
-                  clickhouse-client --host "$LB" --port 9000 --user {{ clickhouse.admin_username }} --connect_timeout 5 -q 'SELECT hostName()' 2>&1 | head -1
-                done | sort | uniq -c | sed 's/^/native 9000: /'
-                echo "http 8123:   $(wget -qO- --timeout=5 "http://$LB:8123/ping" 2>&1 | head -1)"
+                  clickhouse-client --host "$LB" --port {{ 9440 if fips else 9000 }} {{ '--secure --config-file=/tmp/client.xml' if fips else '' }} --user {{ clickhouse.admin_username }} --connect_timeout 5 -q 'SELECT hostName()' 2>&1 | head -1
+                done | sort | uniq -c | sed 's/^/native {{ 9440 if fips else 9000 }}: /'
+                # This second line is informational only (nothing asserts on
+                # it below) -- --no-check-certificate rather than plumbing a
+                # CA into wget too, since not every wget build here takes
+                # --ca-certificate; the asserted check above already proves
+                # the CA chain with --config-file.
+                echo "{{ 'https' if fips else 'http' }} {{ 8443 if fips else 8123 }}:   $(wget -qO- {{ '--no-check-certificate' if fips else '' }} --timeout=5 "{{ 'https' if fips else 'http' }}://$LB:{{ 8443 if fips else 8123 }}/ping" 2>&1 | head -1)"
       YAML
       kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lb-probe --namespace={{ clickhouse.namespace }} --timeout=180s >/dev/null
       kubectl logs pod/lb-probe --namespace={{ clickhouse.namespace }}
@@ -300,18 +339,21 @@
 
 - name: The probe must have reached a server through the NLB
   ansible.builtin.assert:
-    that: "_lb_probe.stdout is search('native 9000: +[0-9]+ c-' ~ clickhouse.cluster_name ~ '-server')"
+    that: "_lb_probe.stdout is search('native ' ~ (9440 if fips else 9000) ~ ': +[0-9]+ c-' ~ clickhouse.cluster_name ~ '-server')"
     fail_msg: "{{ _lb_probe.stdout_lines }}"
     success_msg: "{{ _lb_probe.stdout_lines }}"
 
 - name: Report
   ansible.builtin.debug:
     msg:
-      - "type:      {{ clickhouse.load_balancer.type }} NLB, {{ 'private' if clickhouse.load_balancer.type == 'internal' else 'public' }} address, cross-zone {{ 'on' if clickhouse.load_balancer.cross_zone else 'off' }}"
+      - "type:      {{ clickhouse.load_balancer.type }} NLB, {{ 'private' if clickhouse.load_balancer.type == 'internal' else 'public' }} address, cross-zone {{ 'on' if clickhouse.load_balancer.cross_zone else 'off' }}, TLS {{ 'on (CA-verified)' if fips else 'off' }}"
       - "endpoint:  {{ _lb_host.stdout | trim }}"
-      - "ports:     {{ clickhouse.load_balancer.ports | map(attribute='port') | join(', ') }}"
+      - "ports:     {{ _lb_ports | map(attribute='port') | join(', ') }}"
       - "allowed:   {{ _lb_sources | join(', ') }}"
       - "healthy:   {{ _lb_health.results | map(attribute='stdout') | map('trim') | join('/') }} targets per port (one per server node; other nodes fail the health check by design)"
-      - "connect:   clickhouse-client --host {{ _lb_host.stdout | trim }} --port 9000 --user {{ clickhouse.admin_username }} --password \"$(cat {{ admin_password_file | realpath }})\""
+      - >-
+        connect:   clickhouse-client --host {{ _lb_host.stdout | trim }} --port {{ 9440 if fips else 9000 }}
+        {{ ('--secure --config-file=<a client openSSL config trusting ' ~ clickhouse_tls_ca_cert_file ~ ' -- scripts/ch-client.sh writes one for you>') if fips else '' }}
+        --user {{ clickhouse.admin_username }} --password "$(cat {{ admin_password_file | realpath }})"
       - "           scripts/ch-client.sh --lb   (same, from this repo){{ '' if clickhouse.load_balancer.type == 'public' else '  -- from inside the VPC or over VPN/peering; the address is private' }}"
       - "teardown:  ansible-playbook deploy.yml --tags lb -e lb_state=absent  (before removing the cluster or EKS)"

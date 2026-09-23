@@ -98,6 +98,7 @@ readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
 
 # ---- Langfuse (optional Steps 13-15) --------------------------------------
 readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
+
 # The certificate the langfuse role generates into state/ when
 # langfuse.load_balancer.tls is true and terminates at the langfuse-lb NLB.
 # Self-signed, so it is its own CA: `curl --cacert "$LF_TLS_CERT"` trusts it.
@@ -158,4 +159,40 @@ lf_url() {
 lf_cacert() {
   lf_tls && [[ -r "$LF_TLS_CERT" ]] || return 1
   printf '%s\n' "$LF_TLS_CERT"
+}
+
+# ---- fips (shared by ch-client.sh's TLS handling) -------------------------
+# Succeeds when the persistent fips: switch in group_vars is true. Read
+# directly from all.yml, the same way render_aws_config reads its own
+# fips_default above: these scripts run before, or without, Ansible ever
+# templating anything, so there is no other source.
+ch_fips() {
+  [[ "$(awk -F'[: \t]+' '/^fips:/{print $2; exit}' "$CH_GROUP_VARS")" == "true" ]]
+}
+
+# The CA clickhouse_cluster generates into state/ when fips is true (see
+# ansible/group_vars/all.yml's clickhouse_tls_ca_cert_file) -- a leaf server
+# cert signed by it terminates the ClickHouse native/HTTP TLS listeners once
+# server.openSSL.required zeroes their plaintext ports (4a-spike findings).
+readonly CH_TLS_CA="$CH_PROJECT_ROOT/state/clickhouse-tls-ca.pem"
+# A minimal clickhouse-client openSSL config trusting CH_TLS_CA, rewritten by
+# ch_tls_client_config() below every time it's needed. It carries no secret
+# (just a path), so unlike the CA/leaf material it needs no idempotency
+# check or tightened file mode.
+readonly CH_TLS_CLIENT_CFG="$CH_PROJECT_ROOT/state/clickhouse-client-tls.xml"
+
+# Writes CH_TLS_CLIENT_CFG so `clickhouse-client --config-file
+# "$CH_TLS_CLIENT_CFG" --secure` trusts the CA clickhouse_cluster generated,
+# instead of the system trust store (which never has our self-signed CA in
+# it). verificationMode is strict, rejecting an unrecognized chain outright:
+# per 4a-spike's findings the chart's TLS surface is CA-chain verification
+# only (no separate hostname/SNI check exists to configure either way), so
+# this is the whole story -- there is no hostname-matching flag to add.
+# Dies with a clear message if fips: true but clickhouse_cluster has not
+# generated the CA yet.
+ch_tls_client_config() {
+  [[ -r "$CH_TLS_CA" ]] || die "fips: true but no CA at $CH_TLS_CA -- run: scripts/play.sh --tags cluster"
+  cat > "$CH_TLS_CLIENT_CFG" <<XML
+<config><openSSL><client><caConfig>$CH_TLS_CA</caConfig><verificationMode>strict</verificationMode><invalidCertificateHandler><name>RejectCertificateHandler</name></invalidCertificateHandler></client></openSSL></config>
+XML
 }

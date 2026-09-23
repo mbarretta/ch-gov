@@ -7,13 +7,18 @@
 #   scripts/ch-client.sh --lb [-q ...]         # via the Step 12 load balancer
 #
 # Default: does what the tutorial's Step 11 does by hand -- port-forward the
-# first server pod's native port (9000) to localhost, connect with the admin
-# user, and tear the forward down on exit. With --lb it connects straight to
-# the NLB hostname instead (no port-forward), which works from anywhere the
+# first server pod's native port to localhost, connect with the admin user,
+# and tear the forward down on exit. With --lb it connects straight to the
+# NLB hostname instead (no port-forward), which works from anywhere the
 # NLB's address is reachable: the internet for type `public`, the VPC or a
 # VPN/peering into it for `internal`. The password is read from state/
 # (written by the clickhouse_cluster role) and passed via the environment,
 # not on argv.
+#
+# fips: true moves both paths to the native TLS port (9440) with --secure
+# and a CA-verified connection against the CA clickhouse_cluster generated
+# (see scripts/lib/common.sh's ch_tls_client_config) -- 9000 has no listener
+# left once server.openSSL.required zeroes the plaintext ports.
 #
 # Needs `clickhouse-client` or `clickhouse` locally: brew install clickhouse
 #
@@ -37,20 +42,31 @@ if have clickhouse-client; then CLIENT=(clickhouse-client)
 elif have clickhouse; then CLIENT=(clickhouse client)
 else die "clickhouse-client not installed: brew install clickhouse"; fi
 
+# Native port and TLS args, decided once and reused by both paths below.
+# fips: true means server.openSSL.required has zeroed 9000's listener (see
+# 4a-spike's findings) -- 9440 is ClickHouse's own tcp_port_secure default.
+CH_PORT=9000
+SECURE_ARGS=()
+if ch_fips; then
+  CH_PORT=9440
+  ch_tls_client_config
+  SECURE_ARGS=(--secure --config-file "$CH_TLS_CLIENT_CFG")
+fi
+
 if [[ "${1:-}" == "--lb" ]]; then
   shift
   CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
   host="$(kubectl get service "$CLUSTER-lb" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
   [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
-  info "connecting to $host:9000 (NLB)"
-  CLICKHOUSE_PASSWORD="$(<"$PW_FILE")" exec "${CLIENT[@]}" --host "$host" --port 9000 --user "$USER_" "$@"
+  info "connecting to $host:$CH_PORT (NLB)$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')"
+  CLICKHOUSE_PASSWORD="$(<"$PW_FILE")" exec "${CLIENT[@]}" --host "$host" --port "$CH_PORT" "${SECURE_ARGS[@]}" --user "$USER_" "$@"
 fi
 
 pod="$(kubectl get pods -n "$NS" -l app.kubernetes.io/name=clickhouse-server \
          --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 [[ -n "$pod" ]] || die "no Running server pod in $NS -- are the node groups up?"
 
-kubectl port-forward -n "$NS" "pod/$pod" "$LOCAL_PORT:9000" >/dev/null 2>&1 &
+kubectl port-forward -n "$NS" "pod/$pod" "$LOCAL_PORT:$CH_PORT" >/dev/null 2>&1 &
 PF=$!
 trap 'kill $PF 2>/dev/null || true' EXIT
 # Wait for the forward to accept connections rather than sleeping a guess.
@@ -59,5 +75,5 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 
-info "forwarding localhost:$LOCAL_PORT -> $pod:9000 in $NS"
-CLICKHOUSE_PASSWORD="$(<"$PW_FILE")" "${CLIENT[@]}" --host 127.0.0.1 --port "$LOCAL_PORT" --user "$USER_" "$@"
+info "forwarding localhost:$LOCAL_PORT -> $pod:$CH_PORT in $NS$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')"
+CLICKHOUSE_PASSWORD="$(<"$PW_FILE")" "${CLIENT[@]}" --host 127.0.0.1 --port "$LOCAL_PORT" "${SECURE_ARGS[@]}" --user "$USER_" "$@"
