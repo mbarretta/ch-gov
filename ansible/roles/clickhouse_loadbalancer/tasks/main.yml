@@ -312,9 +312,41 @@
                 done | sort | uniq -c | sed 's/^/native {{ 9440 if fips else 9000 }}: /'
                 # This second line is informational only (nothing asserts on
                 # it below) -- --no-check-certificate rather than plumbing a
-                # CA into wget too, since not every wget build here takes
-                # --ca-certificate; the asserted check above already proves
-                # the CA chain with --config-file.
+                # CA into wget too: the leaf cert's SAN list (clickhouse_cluster
+                # role) only covers the in-cluster .svc hostnames, not $LB, so
+                # real hostname-checked verification would hard-fail here even
+                # though the chain itself is trusted -- confirmed by pulling
+                # the real -fips image and testing (a mismatched-hostname
+                # request against a matching CA is correctly rejected by this
+                # wget's default verification). The asserted check above
+                # proves the CA chain (not hostname -- config.xml sets no
+                # hostname verifier), so this line stays no-check-certificate.
+                # Separately, wget's TLS backend unconditionally offers an
+                # ML-KEM-768 post-quantum-hybrid key share that this image's
+                # FIPS OpenSSL provider can't generate, failing every
+                # wget https:// call outright regardless of --no-check-certificate;
+                # OPENSSL_CONF below restricts the offered groups to
+                # FIPS-approved classical curves to route around it (both
+                # confirmed against a live pod).
+                {% if fips %}
+                cat >/tmp/wget-openssl.cnf <<'EOF'
+                .include /etc/ssl/fipsmodule.cnf
+                [openssl_init]
+                providers = provider_sect
+                ssl_conf = ssl_sect
+                [ssl_sect]
+                system_default = system_default_sect
+                [system_default_sect]
+                CipherString = DEFAULT:@SECLEVEL=2
+                Groups = X25519:P-256:P-384
+                [provider_sect]
+                fips = fips_sect
+                default = default_sect
+                [default_sect]
+                activate = 1
+                EOF
+                export OPENSSL_CONF=/tmp/wget-openssl.cnf
+                {% endif %}
                 echo "{{ 'https' if fips else 'http' }} {{ 8443 if fips else 8123 }}:   $(wget -qO- {{ '--no-check-certificate' if fips else '' }} --timeout=5 "{{ 'https' if fips else 'http' }}://$LB:{{ 8443 if fips else 8123 }}/ping" 2>&1 | head -1)"
       YAML
       kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lb-probe --namespace={{ clickhouse.namespace }} --timeout=180s >/dev/null
