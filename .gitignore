@@ -21,5 +21,8 @@ state/skopeo-auth.json
 # kubectl preflight writes a support bundle into its cwd; the role runs from state/ but belt and braces
 preflightbundle-*.tar.gz
 
-# harness worktrees are throwaway; plan state under .claude/plans is tracked on purpose
+# harness worktrees are throwaway
 .claude/worktrees/
+
+# internal harness planning docs -- not part of the public tutorial
+.claude/plans/
