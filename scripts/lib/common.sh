@@ -180,6 +180,64 @@ lf_cacert() {
   printf '%s\n' "$LF_TLS_CERT"
 }
 
+# ---- Grafana (optional Steps 16-18) ----------------------------------------
+
+# The certificate the grafana role generates into state/ when
+# grafana.load_balancer.tls is true and terminates at the grafana-lb NLB.
+# Self-signed, so it is its own CA: `curl --cacert "$GF_TLS_CERT"` trusts it.
+readonly GF_TLS_CERT="$CH_PROJECT_ROOT/state/grafana-tls-cert.pem"
+
+# Prints one value from the grafana: block of group_vars, e.g.
+#   gf_var '  namespace:'      gf_var '    type:'      gf_var '  enabled:'
+# Same block-scoped first-match rule as lf_var above, anchored on
+# /^grafana:/ -- the new last block in all.yml -- instead of /^langfuse:/.
+gf_var() {
+  awk -v key="$1" '
+    /^grafana:/ { f = 1 }
+    f && index($0, key) == 1 {
+      if (split($0, q, "\"") > 2) print q[2]
+      else { sub(/^[^:]*:[ \t]*/, ""); print $1 }
+      exit
+    }' "$CH_GROUP_VARS"
+}
+
+# Succeeds when the NLB terminates TLS -- the same effective state the
+# grafana role computes as _gf_tls: grafana.load_balancer.tls, OR'd with the
+# persistent fips: switch via the shared ch_fips function (never duplicated
+# here), but never for load_balancer.type: none, which has no NLB at all.
+gf_tls() {
+  [[ "$(gf_var '    type:')" != none ]] || return 1
+  [[ "$(gf_var '    tls:')" == true ]] || ch_fips
+}
+
+# Prints the address Grafana is reached at -- the same rule lf_url uses for
+# Langfuse: grafana.url when set; else the hostname of the grafana-lb NLB, as
+# https://<host> with :<port> appended unless it is 443 when gf_tls, and as
+# http://<host> with :<port> appended unless it is 80 otherwise. Prints
+# nothing and returns 1 when the NLB has no hostname yet. The
+# load_balancer.type `none` case (kubectl port-forward, fixed at
+# http://localhost:3000) has nothing to derive and is the caller's to handle.
+gf_url() {
+  local url host port scheme default_port
+  url="$(gf_var '  url:')"
+  if [[ -n "$url" ]]; then printf '%s\n' "$url"; return 0; fi
+  host="$(KUBECONFIG="$CH_PROJECT_ROOT/state/kubeconfig" kubectl get service grafana-lb \
+            -n "$(gf_var '  namespace:')" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 1
+  port="$(gf_var '    port:')"
+  if gf_tls; then scheme=https; default_port=443; else scheme=http; default_port=80; fi
+  url="$scheme://$host"; [[ "${port:-$default_port}" == "$default_port" ]] || url="$url:$port"
+  printf '%s\n' "$url"
+}
+
+# Prints the CA file curl needs for the address gf_url derives -- the role's
+# self-signed certificate, GF_TLS_CERT -- when gf_tls (see above) and the
+# file is readable. Prints nothing and returns 1 otherwise.
+gf_cacert() {
+  gf_tls && [[ -r "$GF_TLS_CERT" ]] || return 1
+  printf '%s\n' "$GF_TLS_CERT"
+}
+
 # ---- fips (shared by ch-client.sh's TLS handling) -------------------------
 # Succeeds when the persistent fips: switch in group_vars is true.
 ch_fips() {
