@@ -252,8 +252,8 @@ def aws_view():
     o.append(box(260, 72, 200, 70, 'aws', 'Target ECR (private)', [
         '<acct>.dkr.ecr.us-east-1…', ('fips: dkr-ecr-fips…on.aws', {'color': '#ffc300'}), 'images + OCI Helm charts'],
         logo_name='aws', align='start'))
-    o.append(box(480, 72, 200, 70, 'aws', 'CloudFormation', [
-        '-vpc · -eks · -nodegroups', '-irsa · -langfuse-irsa (opt.)', 'one stack per infra step'],
+    o.append(box(480, 72, 200, 82, 'aws', 'CloudFormation', [
+        '-vpc · -eks · -nodegroups', '-irsa · -langfuse-irsa (opt.)', '-grafana-irsa (opt.)', 'one stack per infra step'],
         logo_name='aws', align='start'))
     o.append(box(700, 72, 190, 70, 'aws', 'EKS control plane', [
         'clickhouse-private-eks · 1.36', 'API: private + public endpoint', 'OIDC provider (IRSA)'],
@@ -276,8 +276,9 @@ def aws_view():
         icon_name='console', align='start', line_gap=12))
     o.append(box(15, 410, 195, 62, 'fe', 'In-VPC / VPN clients', [
         'apps · BI · clickhouse-client', 'NLB is internal by default'], icon_name='users', align='start'))
-    o.append(box(15, 510, 195, 70, 'gen', 'Public registries', [
-        'registry.k8s.io (kube-rbac-proxy)', 'cgr.dev · docker.langfuse.com', '(Langfuse, opt.) — also skopeo'],
+    o.append(box(15, 510, 195, 82, 'gen', 'Public registries', [
+        'registry.k8s.io (kube-rbac-proxy)', 'cgr.dev · docker.langfuse.com', '(Langfuse, opt.) — also skopeo',
+        ('dhi.io (auth, opt.) — Grafana/awscli', {'color': '#ffc300'})],
         icon_name='globe', align='start'))
 
     # ---- IGW + NAT
@@ -292,6 +293,8 @@ def aws_view():
     o.append(text(668, 348, 'TCP 8123 (HTTP) · 9000 (native)  —  fips: 8443 (HTTPS) · 9440 (native TLS)', size=8, color='#ffc300', anchor='middle'))
     o.append(box(283, 362, 770, 24, 'aws', 'Langfuse NLB (opt.) · svc langfuse-lb · :80, or TLS terminated with an ACM cert', [],
                  tsize=9, title_y=378, dashed=True))
+    o.append(box(283, 388, 770, 21, 'aws', 'Grafana NLB (opt.) · svc grafana-lb · :3000, or TLS terminated with an ACM cert', [],
+                 tsize=9, title_y=402, dashed=True))
 
     # ---- nodes
     SC = '#6df8e1'
@@ -343,6 +346,9 @@ def aws_view():
         'langfuse-<acct>-us-east-1', 'events · exports · media'], logo_name='aws-s3', align='start', dashed=True))
     o.append(box(1150, 650, 180, 54, 'aws', 'ACM (opt.)', [
         'self-signed cert for', 'Langfuse NLB TLS'], align='start', dashed=True, line_gap=11))
+    o.append(box(1150, 718, 180, 66, 'aws', 'S3 · Grafana plugins (opt.)', [
+        'grafana-<acct>-us-east-1', 'grafana-clickhouse-datasource', 'zip, under plugins/ prefix'],
+        logo_name='aws-s3', align='start', dashed=True, line_gap=11))
     o.append(box(1150, 180, 180, 80, 'gen', 'Where ClickHouse lives', [
         ('3 × server  → server nodes', {}), ('3 × keeper  → keeper nodes', {}), ('operator    → operator nodes', {}),
         ('data        → S3, never local', {})], align='start', tsize=10, lsize=7.5, line_gap=12))
@@ -353,7 +359,8 @@ def aws_view():
 
     o.append(legend(250, 925, [('aws', 'AWS service / EC2 node'), ('db', 'ClickHouse pod'), ('be', 'Operator'),
                                ('fe', 'Client / ingress'), ('sec', 'Identity & keys'), ('gen', 'Generic / storage'),
-                               (('dashbox', 'gen'), 'Optional (langfuse.enabled)'), (('line', 'bus', False), 'Image mirror')]))
+                               (('dashbox', 'gen'), 'Optional (langfuse.enabled)'), (('dashbox', 'aws'), 'Optional (grafana.enabled)'),
+                               (('line', 'bus', False), 'Image mirror')]))
 
     cards = [
         ('sunrise', 'Compute & placement', [
@@ -392,6 +399,8 @@ def ch_view():
                     fill='rgba(109, 248, 225, 0.03)'))
     o.append(region(15, 820, 1105, 170, 'namespace langfuse  (optional · langfuse.enabled)', color='#00cbeb', dash='6,3', rx=10,
                     fill='rgba(0, 203, 235, 0.03)'))
+    o.append(region(15, 1010, 1105, 170, 'namespace grafana  (optional · grafana.enabled)', color='#f46800', dash='6,3', rx=10,
+                    fill='rgba(244, 104, 0, 0.03)'))
 
     SX = [510, 715, 920]  # server/keeper columns
     SW = 175
@@ -524,9 +533,29 @@ def ch_view():
     o.append(box(1150, 878, 190, 70, 'aws', 'S3 · Langfuse bucket', ['events · exports · media', 'IRSA LangfuseS3Role'],
                  logo_name='aws-s3', align='start', dashed=True))
 
-    o.append(legend(20, 1010, [('db', 'ClickHouse server / keeper'), ('be', 'Operator / k8s object'), ('fe', 'Client / app'),
+    # ---- grafana
+    o.append(arrow([(200, 1098), (238, 1098)], 'fe'))
+    o.append(arrow([(430, 1099), (450, 1099)], 'gen'))
+    o.append(arrow([(670, 1099), (690, 1099)], 'sec'))
+    o.append(arrow([(900, 1099), (1148, 1101)], 'sec', dashed=True))
+    o.append(badge(1024, 1085, 'IRSA · s3:GetObject plugins/*', 'sec'))
+    o.append(box(30, 1068, 170, 60, 'aws', 'Grafana NLB', ['svc grafana-lb · :3000', 'TLS via ACM when enabled'],
+                 logo_name='aws', align='start', dashed=True))
+    o.append(box(240, 1058, 190, 82, 'fe', 'grafana', ['grafana chart · :3000', 'datasource uid clickhouse',
+                 'user grafana (SELECT *.*)', 'no PVC (config-as-code)'], icon_name='globe', align='start', dashed=True,
+                 tsize=9, lsize=7, line_gap=11))
+    o.append(box(450, 1058, 220, 82, 'gen', 'initContainers: load-plugin', ['awscli + grafana image', 'fetch grafana-clickhouse-',
+                 '  datasource from S3', 'before grafana starts'], icon_name='server', align='start', dashed=True,
+                 tsize=9, lsize=7, line_gap=11))
+    o.append(box(690, 1058, 210, 82, 'sec', 'ServiceAccount', ['grafana (release name)', 'role-arn → GrafanaS3Role',
+                 's3:GetObject plugins/* only'], icon_name='key', align='start', dashed=True, tsize=9, lsize=7, line_gap=11))
+    o.append(box(1150, 1068, 190, 70, 'aws', 'S3 · Grafana plugins', ['grafana-<acct>-us-east-1', 'IRSA-read, plugins/ prefix'],
+                 logo_name='aws-s3', align='start', dashed=True))
+
+    o.append(legend(20, 1200, [('db', 'ClickHouse server / keeper'), ('be', 'Operator / k8s object'), ('fe', 'Client / app'),
                                 ('aws', 'AWS service'), ('sec', 'Identity & secrets'), (('line', 'bus', True), 'Keeper / Raft'),
-                                (('line', 'sec', True), 'IRSA credential flow'), (('dashbox', 'fe'), 'Optional (Langfuse)')]))
+                                (('line', 'sec', True), 'IRSA credential flow'), (('dashbox', 'fe'), 'Optional (Langfuse)'),
+                                (('dashbox', 'aws'), 'Optional (Grafana)')]))
 
     cards = [
         ('violet', 'Data path', [
@@ -549,8 +578,8 @@ def ch_view():
         ], ['8443', '9440', 'RSA 3072']),
     ]
     page('clickhouse-components.html', 'ClickHouse Components',
-         'How the ClickHouse Private parts connect: clients, servers, Keeper, S3, the operator, and the optional Langfuse tenant',
-         1360, 1040, '\n'.join(o), cards, FOOTER)
+         'How the ClickHouse Private parts connect: clients, servers, Keeper, S3, the operator, and the optional Langfuse/Grafana tenants',
+         1360, 1240, '\n'.join(o), cards, FOOTER)
 
 
 # =====================================================================================
@@ -558,7 +587,7 @@ def ch_view():
 # =====================================================================================
 def deploy_view():
     o = []
-    o.append(region(15, 60, 1330, 330, 'scripts/up.sh → ansible-playbook deploy.yml  (every step idempotent · resume with --from <tag>)'))
+    o.append(region(15, 60, 1330, 490, 'scripts/up.sh → ansible-playbook deploy.yml  (every step idempotent · resume with --from <tag>)'))
     steps1 = [
         ('1–2', 'Images', 'ecr_setup · image_sync', ['tags: images', 'ECR repos + skopeo copy', 'server/keeper/operator', '+ 3 Helm charts'], 'bus'),
         ('3', 'VPC', 'vpc', ['tags: vpc', 'stack -vpc', '3 AZ · NAT · S3 GW'], 'aws'),
@@ -575,49 +604,57 @@ def deploy_view():
         ('12', 'Load balancer', 'clickhouse_loadbalancer', ['tags: lb', 'svc default-us-01-lb', 'none|internal|public', 'probe via NLB'], 'fe'),
         ('13–15', 'Langfuse (opt.)', 'langfuse_* (3 roles)', ['tags: langfuse', 'stack -langfuse-irsa', 'CH db + user', 'helm langfuse 2.1.0'], 'fe'),
     ]
+    steps3 = [
+        ('16–18', 'Grafana (opt.)', 'grafana_* (3 roles)', ['tags: grafana', 'stack -grafana-irsa', 'CH user · plugin mirror', 'helm grafana (DHI images)'], 'fe'),
+    ]
     BW, GAP, X0 = 196, 22, 35
-    for row, (steps, y) in enumerate([(steps1, 100), (steps2, 260)]):
+    rows = [(steps1, 100), (steps2, 260), (steps3, 420)]
+    for row, (steps, y) in enumerate(rows):
         for j, (num, name, role, lines, kind) in enumerate(steps):
             x = X0 + j * (BW + GAP)
             if j < len(steps) - 1:
                 o.append(arrow([(x + BW, y + 50), (x + BW + GAP - 2, y + 50)], 'gen'))
             o.append(box(x, y, BW, 110, kind, f'{num} · {name}', [(role, {'color': 'white', 'size': 7.5})] + lines,
-                         align='start', dashed=(num == '13–15'), line_gap=13))
-        if row == 0:
-            xe = X0 + 5 * (BW + GAP) + BW / 2
-            o.append(arrow([(xe, 210), (xe, 235), (X0 + BW / 2, 235), (X0 + BW / 2, 258)], 'gen'))
+                         align='start', dashed=(num in ('13–15', '16–18')), line_gap=13))
+        if row < len(rows) - 1:
+            xe = X0 + (len(steps) - 1) * (BW + GAP) + BW / 2
+            ny = rows[row + 1][1]
+            o.append(arrow([(xe, y + 110), (xe, y + 135), (X0 + BW / 2, y + 135), (X0 + BW / 2, ny - 2)], 'gen'))
     o.append(text(X0 + 3 * (BW + GAP) + BW / 2, 228, 'Steps 1–12 follow ClickHouse\'s deploy-aws tutorial one-to-one', size=8, anchor='middle', italic=True))
+    o.append(text(X0 + 3 * (BW + GAP) + BW / 2, 400, 'Steps 16–18 are optional (grafana.enabled), same pattern as Langfuse', size=8, anchor='middle', italic=True))
 
     # ---- supply chain
-    o.append(region(15, 420, 830, 250, 'Airgap supply chain — the one hop across accounts', color='#ff7729', dash='6,3', rx=10,
+    o.append(region(15, 580, 830, 250, 'Airgap supply chain — the one hop across accounts', color='#ff7729', dash='6,3', rx=10,
                     fill='rgba(255, 119, 41, 0.03)'))
-    o.append(arrow([(225, 505), (318, 505)], 'bus', width=1.8))
-    o.append(arrow([(225, 600), (318, 560)], 'bus', width=1.8, dashed=True))
-    o.append(arrow([(530, 530), (598, 530)], 'bus', width=1.8))
-    o.append(arrow([(705, 580), (705, 612)], 'gen'))
-    o.append(badge(270, 490, 'read', 'bus'))
-    o.append(badge(564, 515, 'write', 'bus'))
-    o.append(box(30, 460, 195, 90, 'aws', 'Source ECR', ['ClickHouse <SOURCE_ECR_ACCOUNT_ID>', 'profile private-us (SSO)', 'ClickHouseAirgapECR-', '  PullRole · read-only'],
+    o.append(arrow([(225, 665), (318, 665)], 'bus', width=1.8))
+    o.append(arrow([(225, 760), (318, 720)], 'bus', width=1.8, dashed=True))
+    o.append(arrow([(530, 690), (598, 690)], 'bus', width=1.8))
+    o.append(arrow([(705, 740), (705, 772)], 'gen'))
+    o.append(badge(270, 650, 'read', 'bus'))
+    o.append(badge(564, 675, 'write', 'bus'))
+    o.append(box(30, 620, 195, 90, 'aws', 'Source ECR', ['ClickHouse <SOURCE_ECR_ACCOUNT_ID>', 'profile private-us (SSO)', 'ClickHouseAirgapECR-', '  PullRole · read-only'],
                  logo_name='aws', align='start', line_gap=12))
-    o.append(box(30, 570, 195, 72, 'gen', 'Public registries', ['registry.k8s.io', 'cgr.dev · docker.langfuse.com', 'langfuse charts (helm-http)'],
+    o.append(box(30, 730, 195, 84, 'gen', 'Public registries', ['registry.k8s.io', 'cgr.dev · docker.langfuse.com', 'langfuse charts (helm-http)',
+                 ('dhi.io (auth) — Grafana/awscli', {'color': '#ffc300'})],
                  icon_name='globe', align='start', line_gap=12))
-    o.append(box(320, 470, 210, 120, 'gen', 'skopeo on workstation', ['state/skopeo-auth.json', '  (short-lived tokens)', 'container images → ECR',
+    o.append(box(320, 630, 210, 120, 'gen', 'skopeo on workstation', ['state/skopeo-auth.json', '  (short-lived tokens)', 'container images → ECR',
                  'Helm charts as OCI artifacts', 'tag gains -fips when fips', '--tags images to rerun'], icon_name='console', align='start', line_gap=13))
-    o.append(box(600, 470, 210, 110, 'aws', 'Target ECR', ['<YOUR_ACCOUNT_ID> · us-east-1', 'clickhouse-server|keeper|', '  operator · kube-rbac-proxy',
+    o.append(box(600, 630, 210, 110, 'aws', 'Target ECR', ['<YOUR_ACCOUNT_ID> · us-east-1', 'clickhouse-server|keeper|', '  operator · kube-rbac-proxy',
                  'helm/* charts', ('fips: dkr-ecr-fips…on.aws', {'color': '#ffc300'})], logo_name='aws', align='start', line_gap=12))
-    o.append(box(600, 614, 210, 44, 'be', 'EKS nodes pull only from here', ['no route to ClickHouse after install'], align='start', tsize=9, lsize=7.5))
+    o.append(box(600, 774, 210, 44, 'be', 'EKS nodes pull only from here', ['no route to ClickHouse after install'], align='start', tsize=9, lsize=7.5))
 
     # ---- teardown
-    o.append(region(870, 420, 475, 250, 'scripts/down.sh — teardown is not the reverse of bring-up', color='#ff2323', dash='6,3', rx=10,
+    o.append(region(870, 580, 475, 290, 'scripts/down.sh — teardown is not the reverse of bring-up', color='#ff2323', dash='6,3', rx=10,
                     fill='rgba(255, 35, 35, 0.03)'))
     td = [('lf-app', 'Langfuse first: its tables + PVCs need CH, operator, CSI'),
+          ('gf-app', 'Grafana next (opt.): release+NLB, then CH user; --all also deletes its plugin bucket + IRSA'),
           ('lb', 'NLB before EKS, or it is orphaned and blocks VPC delete'),
           ('cluster', 'while nodes still run: operator + CSI clean up Keeper PVCs'),
           ('nodes', 'default mode stops here (~$0.15/hr floor)'),
           ('--all', 'operator · prereqs · storage · eks · vpc'),
           ('kept', 'S3 buckets (data) and ECR images — never deleted')]
     for k, (tag, why) in enumerate(td):
-        y = 452 + k * 35
+        y = 612 + k * 35
         kind = 'sec' if tag != 'kept' else 'aws'
         if k < len(td) - 1:
             o.append(arrow([(930, y + 20), (930, y + 34)], 'sec'))
@@ -625,24 +662,24 @@ def deploy_view():
         o.append(text(985, y + 14, why, size=8))
 
     # ---- state
-    o.append(box(15, 690, 1330, 50, 'gen', 'state/  (gitignored, back it up)', [
-        'kubeconfig · clickhouse-admin-password · clickhouse-prometheus-password · clickhouse-tls-{ca,cert,key}.pem · preflight/ · skopeo-auth.json · langfuse-* secrets'],
+    o.append(box(15, 890, 1330, 50, 'gen', 'state/  (gitignored, back it up)', [
+        'kubeconfig · clickhouse-admin-password · clickhouse-prometheus-password · clickhouse-tls-{ca,cert,key}.pem · preflight/ · skopeo-auth.json · langfuse-* secrets · grafana-admin-password · grafana-clickhouse-password'],
         align='start', icon_name='folder-closed', tsize=10, lsize=8))
 
-    o.append(legend(20, 760, [('aws', 'CloudFormation stack'), ('be', 'K8s / Helm (operator)'), ('db', 'Helm (cluster)'),
+    o.append(legend(20, 960, [('aws', 'CloudFormation stack'), ('be', 'K8s / Helm (operator)'), ('db', 'Helm (cluster)'),
                                ('gen', 'Check / tooling'), ('bus', 'Image mirror'), ('sec', 'IAM / teardown'),
-                               (('dashbox', 'fe'), 'Optional (Langfuse)')]))
+                               (('dashbox', 'fe'), 'Optional (Langfuse)'), (('dashbox', 'aws'), 'Optional (Grafana)')]))
     cards = [
         ('orange', 'Airgap', [
             'The only cross-account traffic is Step 2: skopeo reads ClickHouse\'s ECR and writes yours',
-            'Third-party images (kube-rbac-proxy, Chainguard Postgres/Valkey, Langfuse) are mirrored the same way',
+            'Third-party images (kube-rbac-proxy, Chainguard Postgres/Valkey, Langfuse, Grafana/awscli via dhi.io) are mirrored the same way',
             'The operator\'s image base path is overridden, so the debug/init pods it generates also pull from your ECR',
         ], ['skopeo', 'OCI charts']),
         ('sunrise', 'Where state lives', [
-            'AWS infrastructure: one CloudFormation stack per infra step (vpc, eks, nodegroups, irsa, langfuse-irsa)',
-            'Kubernetes: Helm releases (operator, cluster, langfuse), the preflight chart via <code>helm template</code>, plus direct objects (StorageClass, LB Service, Secrets)',
+            'AWS infrastructure: one CloudFormation stack per infra step (vpc, eks, nodegroups, irsa, langfuse-irsa, grafana-irsa)',
+            'Kubernetes: Helm releases (operator, cluster, langfuse, grafana), the preflight chart via <code>helm template</code>, plus direct objects (StorageClass, LB Service, Secrets)',
             'Local: <code>state/</code> holds every generated secret; lose it and you lose the admin password',
-        ], ['5 stacks', '3 Helm releases']),
+        ], ['6 stacks', '4 Helm releases']),
         ('red', 'Cost meter', [
             'Everything up: about $2.34/hr (8 EC2 nodes, EKS, NAT)',
             '<code>down.sh</code>: about $0.15/hr, the EKS control plane plus NAT; back in ~15 min with <code>up.sh --from nodes</code>',
@@ -651,7 +688,7 @@ def deploy_view():
     ]
     page('deployment-pipeline.html', 'Deployment Pipeline',
          'How <code>up.sh</code> builds the stack step by step, the airgap image hop, and the teardown order <code>down.sh</code> enforces',
-         1360, 790, '\n'.join(o), cards, FOOTER)
+         1360, 990, '\n'.join(o), cards, FOOTER)
 
 
 def overview_view():
