@@ -1,7 +1,241 @@
 ---
-# Step 16: Grafana's S3 bucket + IRSA role, and the ClickHouse-datasource
-# plugin mirror. Scaffold only -- replaced with real tasks by a later task
-# in this plan. Kept as an empty task list so ansible-playbook deploy.yml
-# --syntax-check resolves this role (Ansible resolves static role names at
-# parse time regardless of `when:`), whether grafana.enabled is true or false.
-[]
+# Step 16 (optional Grafana capability): the S3 bucket holding the mirrored
+# grafana-clickhouse-datasource plugin zip, and the IRSA role Grafana's own
+# pod (Step 18) assumes to read it -- no static AWS credentials anywhere,
+# same as every other cross-service credential in this repo.
+#
+# A mirror of Step 13 (langfuse_storage) and its langfuse-irsa.yaml.j2
+# template, with one deliberate divergence: langfuse_storage's bucket holds
+# Langfuse's own event/media data and is NEVER deleted by teardown (deleting
+# it would be data loss). This bucket holds exactly one re-downloadable
+# artifact -- the plugin zip -- so `grafana_storage_state=absent` deletes it
+# for real too. There is no data to lose, and leaving an orphaned bucket
+# behind after a disable/re-enable cycle has no upside. See "absent" below.
+#
+# The IAM policy is also the narrowest per-consumer policy in this project:
+# s3:GetObject on plugins/* only. No ListBucket, no Put, no Delete on the
+# runtime role -- see grafana-irsa.yaml.j2's own comment for why.
+#
+# Teardown: ansible-playbook deploy.yml --tags gf-storage -e grafana_storage_state=absent
+#   (the bucket IS deleted here -- see above, and contrast langfuse_storage)
+
+- name: Preconditions and inputs (skipped on teardown)
+  # The OIDC provider is the precondition for the role being assumable, and
+  # the OIDC lookup needs an EKS cluster that may already be gone on
+  # teardown. Same reasoning as langfuse_storage's identical block.
+  when: (grafana_storage_state | default('present')) != 'absent'
+  block:
+    # --- the OIDC issuer this cluster's tokens are signed by ------------------
+
+    - name: Look up the cluster's OIDC issuer
+      ansible.builtin.command:
+        argv:
+          - aws
+          - eks
+          - describe-cluster
+          - --name={{ infrastructure.eks_cluster_name }}
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+          - --query=cluster.identity.oidc.issuer
+          - --output=text
+      register: _gf_oidc_issuer
+      changed_when: false
+      check_mode: false
+
+    - name: Derive the issuer host and provider ARN
+      # The condition keys in an IRSA trust policy are named after the issuer
+      # with the scheme stripped; the provider ARN is that same host under
+      # iam::<account>:oidc-provider/.
+      ansible.builtin.set_fact:
+        _gf_oidc_issuer_host: "{{ _gf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
+        _gf_oidc_provider_arn: >-
+          arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+            _gf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
+
+    - name: Confirm the OIDC provider is registered in IAM
+      # Step 4 registers it. Without it the role below would be created happily
+      # and then fail at runtime with "Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity" -- a much later, much vaguer failure.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - iam
+          - get-open-id-connect-provider
+          - --open-id-connect-provider-arn={{ _gf_oidc_provider_arn }}
+          - --profile={{ aws.target_profile }}
+          - --query=Url
+          - --output=text
+      register: _gf_oidc_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if IRSA was never set up
+      ansible.builtin.assert:
+        that: _gf_oidc_check.rc == 0
+        fail_msg: >-
+          No IAM OIDC provider for {{ _gf_oidc_issuer_host }}. Run:
+          ansible-playbook deploy.yml --tags eks
+        success_msg: "OIDC provider present for {{ _gf_oidc_issuer_host }}"
+
+# --- absent ------------------------------------------------------------------
+# Both the role stack AND the bucket go -- see the header comment for why
+# that diverges deliberately from langfuse_storage/storage_iam.
+
+- name: Remove the Grafana IRSA role stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-grafana-irsa"
+    state: absent
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  when: (grafana_storage_state | default('present')) == 'absent'
+
+- name: Delete the plugin-mirror bucket
+  amazon.aws.s3_bucket:
+    name: "{{ grafana.bucket_name }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    state: absent
+    # The bucket holds exactly one object (the plugin zip); force empties it
+    # first so deletion succeeds in one step rather than failing on a
+    # non-empty bucket.
+    force: true
+  when: (grafana_storage_state | default('present')) == 'absent'
+
+- name: Report the teardown
+  ansible.builtin.debug:
+    msg:
+      - "absent: CloudFormation stack {{ infrastructure.environment_name }}-grafana-irsa (and the role in it)"
+      - "absent: bucket {{ grafana.bucket_name }} -- re-downloadable, actually deleted (see this role's header comment)"
+  when: (grafana_storage_state | default('present')) == 'absent'
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: (grafana_storage_state | default('present')) == 'absent'
+
+# --- the role ------------------------------------------------------------------
+
+- name: Deploy the Grafana IRSA role stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-grafana-irsa"
+    state: present
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    # lookup('template', ...) not lookup('file', ...): the issuer has to be
+    # baked in as a literal map key. See the comment at the top of the
+    # template for why CloudFormation cannot do this itself.
+    template_body: "{{ lookup('template', role_path ~ '/templates/grafana-irsa.yaml.j2') }}"
+    template_parameters:
+      BucketName: "{{ grafana.bucket_name }}"
+    capabilities:
+      - CAPABILITY_IAM
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  register: _gf_irsa_stack
+
+- name: Record the role ARN
+  # Step 18 does not rely on this fact; it reads the stack output itself so it
+  # works when run alone with --tags gf-app. This is for the report below and
+  # for the bucket/plugin-mirror tasks that follow.
+  ansible.builtin.set_fact:
+    _gf_s3_role_arn: "{{ _gf_irsa_stack.stack_outputs.GrafanaS3RoleArn }}"
+  when: _gf_irsa_stack.stack_outputs is defined
+
+# --- the bucket --------------------------------------------------------------
+# Managed with the s3_bucket module rather than CloudFormation, for the same
+# reason as the ClickHouse and Langfuse buckets: the module is idempotent, so
+# an existing bucket is simply adopted. Plain SSE-S3 (AES256), no customer-
+# managed KMS key -- this bucket holds one public, re-downloadable plugin
+# artifact, not sensitive data, so the KMS machinery the FIPS-hardened
+# buckets carry would add cost and a second IAM policy for no benefit here.
+- name: Create the plugin-mirror bucket
+  amazon.aws.s3_bucket:
+    name: "{{ grafana.bucket_name }}"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    state: present
+    encryption: "AES256"
+    # Nothing about this bucket should ever be public. This blocks it at
+    # the bucket level, independent of any policy or ACL applied later.
+    public_access:
+      block_public_acls: true
+      block_public_policy: true
+      ignore_public_acls: true
+      restrict_public_buckets: true
+    # Versioning stays OFF: one object, replaced in place on a version bump.
+    versioning: false
+    tags:
+      Project: clickhouse-private
+      ManagedBy: ansible
+  when: _gf_s3_role_arn is defined
+
+- name: Report the bucket and IRSA wiring
+  ansible.builtin.debug:
+    msg:
+      - "bucket: {{ grafana.bucket_name }} ({{ aws.target_region }})"
+      - "grafana role: {{ _gf_s3_role_arn }}"
+      - "  assumable only by system:serviceaccount:{{ grafana.namespace }}:{{ grafana.release }}"
+      - "  may GetObject on {{ grafana.bucket_name }}/plugins/* only -- no ListBucket/Put/Delete"
+  when: _gf_s3_role_arn is defined
+
+# --- the plugin mirror ---------------------------------------------------
+# Fetched once (pinned version, SHA256-verified by get_url itself) and
+# uploaded once; re-runs check S3 first and skip both steps once the object
+# is there, mirroring image_sync/tasks/main.yml:104-124's "check what's
+# already there before acting" idiom. No credentials are handled by any task
+# below -- aws/get_url auth is entirely profile- and public-URL-based, so
+# there is nothing here that needs no_log (unlike image_sync's registry
+# logins or grafana_clickhouse's password-bearing tasks).
+
+- name: Name the plugin artifact
+  ansible.builtin.set_fact:
+    _gf_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
+  when: _gf_s3_role_arn is defined
+
+- name: Check whether the plugin zip is already mirrored
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3api
+      - head-object
+      - --bucket={{ grafana.bucket_name }}
+      - --key=plugins/{{ _gf_plugin_zip_name }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _gf_plugin_head
+  changed_when: false
+  failed_when: false      # "not found" is an expected, meaningful answer
+  check_mode: false
+  when: _gf_plugin_zip_name is defined
+
+- name: Fetch the pinned, SHA256-verified plugin zip
+  ansible.builtin.get_url:
+    url: "https://grafana.com/api/plugins/grafana-clickhouse-datasource/versions/{{ versions.grafana_clickhouse_plugin_version }}/download"
+    dest: "{{ state_dir }}/{{ _gf_plugin_zip_name }}"
+    checksum: "sha256:{{ versions.grafana_clickhouse_plugin_sha256 }}"
+    mode: "0600"
+  # get_url is idempotent on its own (skips the download once dest matches
+  # the checksum), so forcing it to run for real under --check never mutates
+  # anything on a second pass -- same convention langfuse_clickhouse's DDL
+  # tasks use ("there is no way to dry-run this safely, so just run it").
+  check_mode: false
+  when: _gf_plugin_head is defined and _gf_plugin_head.rc != 0
+
+- name: Upload the plugin zip to S3
+  amazon.aws.s3_object:
+    bucket: "{{ grafana.bucket_name }}"
+    object: "plugins/{{ _gf_plugin_zip_name }}"
+    src: "{{ state_dir }}/{{ _gf_plugin_zip_name }}"
+    mode: put
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+  check_mode: false
+  when: _gf_plugin_head is defined and _gf_plugin_head.rc != 0
+
+- name: Report the plugin mirror
+  ansible.builtin.debug:
+    msg: >-
+      plugin: s3://{{ grafana.bucket_name }}/plugins/{{ _gf_plugin_zip_name }}
+      {{ '(uploaded just now)' if (_gf_plugin_head is defined and _gf_plugin_head.rc != 0) else '(already present)' }}
+  when: _gf_plugin_zip_name is defined
