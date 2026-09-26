@@ -30,7 +30,7 @@
 #      - extraInitContainers is a real value (chart values.yaml:393) --
 #        a raw templated container list appended after the chart's own
 #        init containers (templates/_pod.tpl:591).
-#      - extraContainerVolumes is a real value (values.yaml:614) for a
+#      - extraContainerVolumes is a real value (values.yaml:414) for a
 #        volume the initContainers need but the main container does not.
 #      - With persistence.enabled: false (the "no PVC" constraint), the
 #        chart itself creates an emptyDir volume named `storage`, mounted at
@@ -752,6 +752,7 @@
                   } | combine({'tlsAuthWithCACert': true} if fips else {}) }}
                 secureJsonData: >-
                   {{ {'password': _gf_ch_pw} | combine({'tlsCACert': _gf_ch_ca} if fips else {}) }}
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
 - name: Wait for the Grafana Deployment to be Available
   block:
