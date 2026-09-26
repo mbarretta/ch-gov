@@ -210,6 +210,26 @@ versions:
   # whatever digest `latest` resolves to on first copy. Bump the tag to re-mirror.
   chainguard_postgres_tag: "pg18-cg"        # source cgr.dev/chainguard/postgres:latest
   chainguard_valkey_tag:   "valkey9-cg-dev" # source cgr.dev/chainguard/valkey:latest-dev (needs the shell)
+  # --- Grafana (optional Steps 16-18; see the grafana: block at the end) ---
+  # grafana_app/awscli_app are DHI catalog tags (dhi.io/grafana, dhi.io/awscli).
+  # DHI requires an entitled Docker Hub login (dhi_username/dhi_token below)
+  # to even resolve tags, so these pins mirror the current public
+  # grafana/grafana and amazon/aws-cli tags as the best available proxy --
+  # confirm against the real DHI catalog at the first `--tags sync` run
+  # (image_sync's dhi.io login step). Deliberately no fips_suffix on either
+  # (documented gap; see the endpoint-coverage matrix above and
+  # docs/part-8-grafana.md).
+  grafana_chart: "10.5.15"    # helm chart from grafana.github.io/helm-charts;
+                              # upstream deprecated (frozen) this chart on
+                              # 2026-01-30 in favor of grafana-community/
+                              # helm-charts, but the approved plan pins this
+                              # exact source and it still installs cleanly.
+  grafana_app: "13.2.2"       # DHI grafana image tag
+  awscli_app: "2.37.4"        # DHI awscli image tag (initContainer)
+  # Pinned + SHA256-verified against grafana.com's plugin API (2026-09-25):
+  # https://grafana.com/api/plugins/grafana-clickhouse-datasource/versions/4.21.3/download
+  grafana_clickhouse_plugin_version: "4.21.3"
+  grafana_clickhouse_plugin_sha256: "ab1fb90979e5b915e797e2987e19f58a346cfc8ad3120cbbef8d0b3cc894e104"
 
 # ---------------------------------------------------------------------------
 # Derived values -- do not edit; change `fips` or `versions` instead.
@@ -326,10 +346,34 @@ langfuse_images:
 langfuse_charts:
   - {repo: helm/langfuse, tag: "{{ versions.langfuse_chart }}", source: "https://langfuse.github.io/langfuse-k8s", kind: helm-http}
 
+# Grafana (optional Steps 16-18). Mirrored only when grafana.enabled is true.
+# DHI (Docker Hardened Images) is a paid, authenticated catalog -- unlike
+# Chainguard's anonymous cgr.dev pulls above, dhi.io needs a real login
+# (dhi_username/dhi_token below), which image_sync performs only when one of
+# these entries is actually in play.
+grafana_images:
+  - {repo: grafana, tag: "{{ versions.grafana_app }}", source: "dhi.io"}
+  - {repo: awscli,  tag: "{{ versions.awscli_app }}",  source: "dhi.io"}
+# Same helm-http mechanism as langfuse_charts: grafana/helm-charts is a plain
+# Helm HTTP repository, not an OCI registry, so skopeo cannot copy it.
+grafana_charts:
+  - {repo: helm/grafana, tag: "{{ versions.grafana_chart }}", source: "https://grafana.github.io/helm-charts", kind: helm-http}
+
 # Everything that must exist in your ECR before images can be copied in.
-# The Langfuse artifacts join the list only when the switch is on.
+# The Langfuse/Grafana artifacts join the list only when their switch is on.
 all_artifacts: "{{ container_images + helm_charts + third_party_images
-                   + (langfuse_images + langfuse_charts if (langfuse.enabled | bool) else []) }}"
+                   + (langfuse_images + langfuse_charts if (langfuse.enabled | bool) else [])
+                   + (grafana_images + grafana_charts if (grafana.enabled | bool) else []) }}"
+
+# Docker Hardened Images login (grafana.enabled only). Resolved from the
+# environment ONLY -- never hardcoded here, never written to group_vars or
+# any committed file. The resulting skopeo login lands in the same gitignored
+# state/ authfile below that every other registry already uses (image_sync
+# handles the actual `skopeo login dhi.io`; this task only wires the lookup).
+#   export DHI_USERNAME=<Docker Hub username entitled to the DHI catalog>
+#   export DHI_TOKEN=<personal access token>
+dhi_username: "{{ lookup('ansible.builtin.env', 'DHI_USERNAME') }}"
+dhi_token: "{{ lookup('ansible.builtin.env', 'DHI_TOKEN') }}"
 
 # skopeo credentials are written here, not to ~/.config/containers, so the
 # project stays self-contained. Gitignored -- it holds real registry tokens.
@@ -386,6 +430,16 @@ langfuse_state_files:
   # file clients trust (curl --cacert). Kept on teardown like the rest.
   tls_cert_file:            "{{ state_dir }}/langfuse-tls-cert.pem"
   tls_key_file:             "{{ state_dir }}/langfuse-tls-key.pem"
+
+# Grafana's generated secrets (Steps 16-18), kept under state/ exactly like
+# Langfuse's above.
+grafana_state_files:
+  admin_password_file:      "{{ state_dir }}/grafana-admin-password"
+  clickhouse_password_file: "{{ state_dir }}/grafana-clickhouse-password"
+  # The self-signed key and certificate the grafana role generates when
+  # grafana.load_balancer.tls is true, same convention as langfuse's pair.
+  tls_cert_file:             "{{ state_dir }}/grafana-tls-cert.pem"
+  tls_key_file:              "{{ state_dir }}/grafana-tls-key.pem"
 
 # ---------------------------------------------------------------------------
 # Langfuse (optional Steps 13-15) -- an LLM tracing server that stores its
@@ -503,3 +557,63 @@ langfuse:
   # that may sit on a public address.
   telemetry_enabled: false
   signup_disabled: true
+
+# ---------------------------------------------------------------------------
+# Grafana (optional Steps 16-18) -- a dashboard/query UI wired to ClickHouse
+# Private as its datasource, via a hardened DHI image and the
+# grafana-clickhouse-datasource plugin (mirrored through S3, loaded by an
+# IRSA-authenticated initContainer -- see grafana_storage/tasks/main.yml and
+# grafana/tasks/main.yml). Off by default; with enabled: false nothing in
+# Steps 1-15 changes.
+#
+# This block must stay the LAST top-level key in the file -- same reason
+# langfuse: had to be (see the warning comment above langfuse:): scripts/up.sh
+# and scripts/down.sh do first-match awk scrapes of the clickhouse: block,
+# and both langfuse: and grafana: use their own block-scoped `awk
+# '/^<key>:/{f=1} f && ...'` readers instead. Nothing may be appended after
+# this block.
+# ---------------------------------------------------------------------------
+grafana:
+  # The switch. false = Steps 16-18 do nothing (and their artifacts are not
+  # mirrored); true = up.sh runs them after Langfuse's Steps 13-15, so the
+  # blanket ClickHouse grant below already covers langfuse.* when both
+  # capabilities are on.
+  enabled: false
+  namespace: "grafana"
+  # The Helm release name. Step 18 passes it as the chart's fullnameOverride.
+  release: "grafana"
+  # The read-only ClickHouse user created by Step 17. GRANT SELECT ON *.* --
+  # a deliberate ease-of-use choice for demos/workshops, not least privilege;
+  # it also covers langfuse.* automatically, with no separate grant.
+  clickhouse_user: "grafana"
+  # Holds exactly one object (the mirrored plugin zip) under plugins/. Same
+  # no-periods naming rule as clickhouse.bucket_name/langfuse.bucket_name.
+  # Unlike those two, this bucket IS deleted on grafana_storage_state=absent
+  # (see grafana_storage's header comment) -- one re-downloadable artifact,
+  # no data-loss risk.
+  bucket_name: "grafana-{{ aws.target_account_id }}-{{ aws.target_region }}"
+  # URL override. Empty derives it from the load balancer hostname below (or
+  # http://localhost:3000 for type none, reached by port-forward).
+  url: ""
+
+  # --- how browsers reach Grafana ---
+  # Same shape and rules as clickhouse.load_balancer / langfuse.load_balancer.
+  load_balancer:
+    type: "internal"
+    allowed_cidrs: []
+    port: 3000          # Grafana's own default UI port.
+    cross_zone: true
+    tls: false
+    tls_cert_days: 825
+
+  # --- pod sizing ---
+  # Requests AND limits. Runs on the operator node group, same as Langfuse --
+  # no PVC, no persistence: the datasource is config-as-code (see the chart's
+  # datasources: values block in grafana/tasks/main.yml).
+  pod:
+    replicas: 1
+    cpu: "500m"
+    memory: "512Mi"
+
+  # Airgap posture: no phone-home.
+  telemetry_enabled: false

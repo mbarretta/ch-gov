@@ -1,0 +1,7 @@
+---
+# Step 17: the read-only ClickHouse user Grafana's datasource authenticates
+# as. Scaffold only -- replaced with real tasks by a later task in this plan.
+# Kept as an empty task list so ansible-playbook deploy.yml --syntax-check
+# resolves this role (Ansible resolves static role names at parse time
+# regardless of `when:`), whether grafana.enabled is true or false.
+[]

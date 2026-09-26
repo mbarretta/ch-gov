@@ -1,0 +1,7 @@
+---
+# Step 16: Grafana's S3 bucket + IRSA role, and the ClickHouse-datasource
+# plugin mirror. Scaffold only -- replaced with real tasks by a later task
+# in this plan. Kept as an empty task list so ansible-playbook deploy.yml
+# --syntax-check resolves this role (Ansible resolves static role names at
+# parse time regardless of `when:`), whether grafana.enabled is true or false.
+[]

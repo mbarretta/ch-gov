@@ -1,0 +1,8 @@
+---
+# Step 18: the Grafana Helm release, IRSA service-account wiring, the plugin
+# initContainer, and the ClickHouse datasource. Scaffold only -- replaced
+# with real tasks by a later task in this plan. Kept as an empty task list
+# so ansible-playbook deploy.yml --syntax-check resolves this role (Ansible
+# resolves static role names at parse time regardless of `when:`), whether
+# grafana.enabled is true or false.
+[]
