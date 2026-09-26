@@ -1,7 +1,426 @@
 ---
-# Step 17: the read-only ClickHouse user Grafana's datasource authenticates
-# as. Scaffold only -- replaced with real tasks by a later task in this plan.
-# Kept as an empty task list so ansible-playbook deploy.yml --syntax-check
-# resolves this role (Ansible resolves static role names at parse time
-# regardless of `when:`), whether grafana.enabled is true or false.
-[]
+# Step 17: the read-only ClickHouse user Grafana's datasource (Step 18) and
+# scripts/grafana-smoke.sh (task 7) both authenticate as.
+#
+# Unlike Step 14's Langfuse user, this role creates no database: the whole
+# point of Grafana here is ad-hoc exploration across whatever exists in the
+# cluster, not a scoped app schema, so the grant below is deliberately
+# GRANT SELECT ON *.* -- a demos/workshops ease-of-use choice, not least
+# privilege (see the grafana: block's own comment in group_vars/all.yml). It
+# also covers langfuse.* automatically when Langfuse is on, with no separate
+# grant.
+#
+# Every statement runs through `kubectl exec -i` in one server pod, mirroring
+# langfuse_clickhouse/tasks/main.yml:48-62 exactly: the admin password
+# travels on stdin, never on argv, into a shell that reads it as the first
+# line and passes it to clickhouse-client. (That inner shell still hands the
+# password to clickhouse-client's own --password argument inside the pod --
+# a real gap langfuse_clickhouse's own header comment already flags, and
+# this plan's deferral ledger (d1 / plan-review pr7) carries a fix spanning
+# both roles to a dedicated hardening pass rather than diverging one-sided
+# here. This role deliberately mirrors the existing pattern as-is.) The user
+# is created `IDENTIFIED WITH sha256_hash`, so the SQL carries the sha256 of
+# the Grafana ClickHouse password and the password itself only ever exists
+# in state/ (where Step 18 reads it into the datasource's secureJsonData)
+# and in the Grafana pod.
+#
+# No `ON CLUSTER` anywhere: the user directory is replicated through Keeper,
+# so a user created on one replica exists on all of them.
+#
+# Idempotency: system.users does not expose password hashes (auth_params is
+# `{}` for password-based methods), so "is the stored hash still ours?" is
+# answered the same way Step 14 answers it (mirror
+# langfuse_clickhouse/tasks/main.yml:327-345): authenticate as the grafana
+# user, over HTTP, with the password from state/. Auth succeeds: nothing to
+# do. Auth fails: ALTER USER to the current hash.
+#
+# --check runs the (idempotent) SQL for real, as Step 11 and Step 14 do;
+# there is no way to dry-run a DDL statement through kubectl exec.
+#
+# Cost: nothing. A user in ClickHouse Private is metadata in Keeper.
+#
+# Teardown: ansible-playbook deploy.yml --tags gf-db -e grafana_db_state=absent
+#   DROP USER IF EXISTS grafana only (ac4) -- no database was ever created
+#   for Grafana, so there is nothing to DROP DATABASE.
+
+- name: Name the pieces
+  ansible.builtin.set_fact:
+    _gfdb_user: "{{ grafana.clickhouse_user }}"
+    # The in-cluster Service in front of every server replica -- the same
+    # path Step 14's Langfuse user and Step 18's datasource both use.
+    _gfdb_host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc"
+    _gfdb_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
+    # $0 = user, $1 = query; the password is the first line of stdin, exactly
+    # as langfuse_clickhouse/tasks/main.yml:58-62 (ac1).
+    _gfdb_sh: >-
+      IFS= read -r pw;
+      exec clickhouse-client --user "$0" --password "$pw"
+      {{ '--secure --port 9440' if fips else '' }}
+      --multiquery --query "$1" </dev/null
+    # $0 = user, $1 = host, $2 = attempts; mirrors
+    # langfuse_clickhouse/tasks/main.yml:100-128 exactly, including the
+    # fips-aware CA-trust and OpenSSL-provider workarounds (see that role's
+    # header comment for the two wget/FIPS defects this works around) --
+    # this role's HTTP idempotency check (ac2) and final proof run through
+    # the same ClickHouse HTTP listener that fips: true relocates.
+    _gfdb_http_sh: |
+      IFS= read -r pw
+      {% if fips %}
+      cat >/tmp/ch-ca.crt
+      cat /tmp/ch-ca.crt >>/etc/ssl/certs/ca-certificates.crt
+      cat >/tmp/wget-openssl.cnf <<'EOF'
+      .include /etc/ssl/fipsmodule.cnf
+      [openssl_init]
+      providers = provider_sect
+      ssl_conf = ssl_sect
+      [ssl_sect]
+      system_default = system_default_sect
+      [system_default_sect]
+      CipherString = DEFAULT:@SECLEVEL=2
+      Groups = X25519:P-256:P-384
+      [provider_sect]
+      fips = fips_sect
+      default = default_sect
+      [default_sect]
+      activate = 1
+      EOF
+      export OPENSSL_CONF=/tmp/wget-openssl.cnf
+      {% endif %}
+      i=1
+      while ! wget -qO- --timeout=10 --header="X-ClickHouse-User: $0" --header="X-ClickHouse-Key: $pw" "{{ 'https' if fips else 'http' }}://$1:{{ 8443 if fips else 8123 }}/?query=SELECT%201"; do
+        [ "$i" -ge "$2" ] && exit 1
+        i=$((i+1))
+        sleep 5
+      done
+
+- name: Preconditions and inputs (skipped on teardown)
+  # Nothing here applies when purging, and the Ready wait would turn a purge
+  # against a half-down cluster into a five-minute stall.
+  when: (grafana_db_state | default('present')) != 'absent'
+  block:
+    - name: Wait for every server pod to be Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - wait
+          - --namespace={{ clickhouse.namespace }}
+          - --for=condition=Ready
+          - --timeout=300s
+          - pod
+          - --selector=app.kubernetes.io/name=clickhouse-server
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gfdb_ready
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if the cluster is not up
+      ansible.builtin.assert:
+        that: _gfdb_ready.rc == 0
+        fail_msg: >-
+          No Ready ClickHouse server pod in {{ clickhouse.namespace }}
+          ({{ _gfdb_ready.stderr | default('') | trim }}). Run --tags cluster first,
+          or --tags nodes if the node groups are down.
+
+    - name: List the running server pods
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - --field-selector=status.phase=Running
+          - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gfdb_pods
+      changed_when: false
+      check_mode: false
+
+    - name: Pick a server pod
+      # Any one will do: DDL and grants replicate through Keeper.
+      ansible.builtin.set_fact:
+        _gfdb_pod: "{{ _gfdb_pods.stdout_lines | first }}"
+
+    - name: Read the admin password
+      ansible.builtin.set_fact:
+        _gfdb_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Ensure the state directory exists
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate (or reuse) the Grafana ClickHouse password
+      # The password lookup writes the file on first use and reads it back on
+      # every run after, so the hash below is stable across runs. 32
+      # alphanumerics, as for the admin and Langfuse passwords (ac5).
+      ansible.builtin.set_fact:
+        _gfdb_pw: "{{ lookup('ansible.builtin.password', grafana_state_files.clickhouse_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Tighten permissions on the password file
+      ansible.builtin.file:
+        path: "{{ grafana_state_files.clickhouse_password_file }}"
+        mode: "0600"
+
+    - name: Hash the password
+      # ClickHouse stores sha256(password) for sha256_password users and
+      # accepts the hex directly with IDENTIFIED WITH sha256_hash, so the
+      # plaintext never enters a query (and so never system.query_log).
+      ansible.builtin.set_fact:
+        _gfdb_pw_hash: "{{ _gfdb_pw | hash('sha256') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Decide the CA to append after the password on every _gfdb_http_sh call
+      # fips: true only (empty otherwise, so the non-fips stdin is unchanged
+      # from before this task) -- same reasoning as
+      # langfuse_clickhouse/tasks/main.yml's equivalent fact.
+      ansible.builtin.set_fact:
+        _gfdb_ca_stdin: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) if fips else '' }}"
+
+# --- teardown ---------------------------------------------------------------
+# ac4: DROP USER IF EXISTS only -- no database was ever created here.
+
+- name: Teardown (grafana_db_state=absent)
+  when: (grafana_db_state | default('present')) == 'absent'
+  block:
+    - name: Find a running server pod to drop the user through
+      # Own precondition, gentler than the install's: no pod means the
+      # cluster is gone or going, and the user went with it.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ clickhouse.namespace }}
+          - --selector=app.kubernetes.io/name=clickhouse-server
+          - --field-selector=status.phase=Running
+          - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gfdb_td_pods
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Note when there is nothing to drop
+      ansible.builtin.debug:
+        msg: "no Running ClickHouse server pod in {{ clickhouse.namespace }}: the {{ _gfdb_user }} user lives inside the cluster and goes away with it -- nothing to do"
+      when: _gfdb_td_pods.stdout_lines | default([]) | length == 0
+
+    - name: Stop here when there is nothing to drop
+      ansible.builtin.meta: end_play
+      when: _gfdb_td_pods.stdout_lines | default([]) | length == 0
+
+    - name: Read the admin password
+      ansible.builtin.set_fact:
+        _gfdb_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Count what is there to drop
+      # So the DROP below can report changed=0 when a previous teardown
+      # already ran.
+      ansible.builtin.command:
+        argv: "{{ _gfdb_exec + [_gfdb_td_pods.stdout_lines | first, '--', 'sh', '-c', _gfdb_sh, clickhouse.admin_username, _q] }}"
+        stdin: "{{ _gfdb_admin_pw }}\n"
+      vars:
+        _q: "SELECT count() FROM system.users WHERE name = '{{ _gfdb_user }}' FORMAT TSV"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gfdb_td_before
+      changed_when: false
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Drop the Grafana ClickHouse user
+      # ac4: no DROP DATABASE anywhere in this role -- one was never created.
+      ansible.builtin.command:
+        argv: "{{ _gfdb_exec + [_gfdb_td_pods.stdout_lines | first, '--', 'sh', '-c', _gfdb_sh, clickhouse.admin_username, _q] }}"
+        stdin: "{{ _gfdb_admin_pw }}\n"
+      vars:
+        _q: "DROP USER IF EXISTS {{ _gfdb_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: (_gfdb_td_before.stdout | trim | int) > 0
+      check_mode: false
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Teardown summary
+      ansible.builtin.debug:
+        msg:
+          - "user {{ _gfdb_user }} removed from ClickHouse Private"
+          - "no database was ever created for Grafana (ac4) -- nothing else to drop"
+          - "{{ grafana_state_files.clickhouse_password_file | realpath }} is kept; the next --tags gf-db reuses it if the user is recreated"
+
+    - name: Stop here when tearing down
+      ansible.builtin.meta: end_play
+
+# --- the user -----------------------------------------------------------------
+
+- name: Read the user's entry in system.users
+  # auth_type and auth_params for the report. The hash is not in there (see
+  # the header), so the "is it still ours?" test is the HTTP probe below.
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _gfdb_admin_pw }}\n"
+  vars:
+    _q: "SELECT auth_type, auth_params FROM system.users WHERE name = '{{ _gfdb_user }}' FORMAT TSV"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_user_row
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Remember whether the user already existed
+  ansible.builtin.set_fact:
+    _gfdb_user_existed: "{{ (_gfdb_user_row.stdout | trim) != '' }}"
+    _gfdb_user_auth: "{{ _gfdb_user_row.stdout | trim | replace('\t', ' / ') | default('(no such user)', true) }}"
+
+- name: Check whether the stored hash is still ours
+  # One attempt, as the grafana user, with the password from state/. Mirrors
+  # langfuse_clickhouse/tasks/main.yml:327-345 (ac2): a failure here is the
+  # normal outcome when the password file was regenerated or the user
+  # predates this role, and is what triggers the ALTER USER below.
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_http_sh, _gfdb_user, _gfdb_host, '1'] }}"
+    stdin: "{{ _gfdb_pw }}\n{{ _gfdb_ca_stdin }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_auth_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+  when: _gfdb_user_existed | bool
+
+- name: Decide whether the hash needs rotating
+  ansible.builtin.set_fact:
+    _gfdb_rotate: "{{ (_gfdb_user_existed | bool) and not ((_gfdb_auth_before.rc | default(1)) == 0 and (_gfdb_auth_before.stdout | default('') | trim) == '1') }}"
+
+- name: Create the user
+  # $0 = admin user, $1 = user, $2 = sha256 hex, $3 = rotate|keep. The check
+  # runs server-side so the marker says what actually happened. No database
+  # anywhere in this task (ac4): this role's whole point is Grafana reading
+  # across whatever exists, so there is nothing to CREATE DATABASE.
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_ensure_sh, clickhouse.admin_username, _gfdb_user, _gfdb_pw_hash, ('rotate' if _gfdb_rotate | bool else 'keep')] }}"
+    stdin: "{{ _gfdb_admin_pw }}\n"
+  vars:
+    _gfdb_ensure_sh: |
+      set -eu
+      IFS= read -r pw
+      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      if [ "$(ch "SELECT count() FROM system.users WHERE name = '$1'")" = 1 ]; then
+        if [ "$3" = rotate ]; then
+          ch "ALTER USER $1 IDENTIFIED WITH sha256_hash BY '$2'"
+          echo "user: updated"
+        else
+          echo "user: exists"
+        fi
+      else
+        ch "CREATE USER IF NOT EXISTS $1 IDENTIFIED WITH sha256_hash BY '$2'"
+        echo "user: created"
+      fi
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_ensure
+  changed_when: "'created' in _gfdb_ensure.stdout or 'updated' in _gfdb_ensure.stdout"
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- the grant -----------------------------------------------------------------
+
+- name: Grant the deliberate full-read privilege
+  # Exactly GRANT SELECT ON *.* TO grafana (ac3) -- the ease-of-use choice
+  # recorded in group_vars/all.yml's grafana: block, not least privilege. It
+  # also covers langfuse.* automatically when Langfuse is on, with no
+  # separate grant. GRANT is idempotent, so the marker comes from comparing
+  # SHOW GRANTS before and after.
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_grant_sh, clickhouse.admin_username, _gfdb_user] }}"
+    stdin: "{{ _gfdb_admin_pw }}\n"
+  vars:
+    # $0 = admin user, $1 = user.
+    _gfdb_grant_sh: |
+      set -eu
+      IFS= read -r pw
+      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      before=$(ch "SHOW GRANTS FOR $1")
+      ch "GRANT SELECT ON *.* TO $1"
+      after=$(ch "SHOW GRANTS FOR $1")
+      if [ "$before" = "$after" ]; then echo "grants: unchanged"; else echo "grants: updated"; fi
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_grants_apply
+  changed_when: "'grants: updated' in _gfdb_grants_apply.stdout"
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- prove it -----------------------------------------------------------------
+
+- name: Read the grants back
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_sh, clickhouse.admin_username, 'SHOW GRANTS FOR ' ~ _gfdb_user] }}"
+    stdin: "{{ _gfdb_admin_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_grants
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: The grant must be exactly GRANT SELECT ON *.*
+  ansible.builtin.assert:
+    that:
+      - _gfdb_grants.stdout is search('GRANT SELECT ON \\*\\.\\* TO ' ~ _gfdb_user)
+    fail_msg: "SHOW GRANTS FOR {{ _gfdb_user }} does not show the expected GRANT SELECT ON *.*: {{ _gfdb_grants.stdout_lines }}"
+
+- name: Connect as the Grafana user over HTTP
+  # The path Step 18's datasource and scripts/grafana-smoke.sh (task 7) both
+  # take: user + password over HTTP(S) through the server-any Service. A few
+  # attempts, because a hash rotated a moment ago reaches the other replicas
+  # through Keeper with a small lag.
+  ansible.builtin.command:
+    argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_http_sh, _gfdb_user, _gfdb_host, '6'] }}"
+    stdin: "{{ _gfdb_pw }}\n{{ _gfdb_ca_stdin }}"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gfdb_auth
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: SELECT 1 as the Grafana user must succeed
+  ansible.builtin.assert:
+    that:
+      - _gfdb_auth.rc == 0
+      - (_gfdb_auth.stdout | trim) == '1'
+    fail_msg: >-
+      SELECT 1 as {{ _gfdb_user }} over {{ 'https' if fips else 'http' }}://{{ _gfdb_host }}:{{ 8443 if fips else 8123 }} from {{ _gfdb_pod }}
+      failed after 6 attempts (wget rc {{ _gfdb_auth.rc }}). ClickHouse answers 516
+      to a wrong password, and the stored hash {{ 'was just rotated to' if _gfdb_rotate | bool else 'already matched' }}
+      the sha256 of {{ grafana_state_files.clickhouse_password_file | realpath }} -- so check that the
+      server-any Service resolves inside the cluster, then re-run with -e show_secrets=true.
+
+# --- report -------------------------------------------------------------------
+
+- name: Grants held by the Grafana user
+  ansible.builtin.debug:
+    msg: "{{ _gfdb_grants.stdout_lines }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "user:      {{ _gfdb_user }} -- {{ 'created' if 'user: created' in _gfdb_ensure.stdout else ('existed, hash rotated to match the password file' if 'user: updated' in _gfdb_ensure.stdout else 'existed, hash already matched the password file') }}"
+      - "before:    system.users auth_type / auth_params = {{ _gfdb_user_auth }}"
+      - "grants:    {{ 'updated' if 'grants: updated' in _gfdb_grants_apply.stdout else 'unchanged' }} -- GRANT SELECT ON *.* (covers langfuse.* automatically when Langfuse is on)"
+      - "verified:  SELECT 1 as {{ _gfdb_user }} over {{ 'https' if fips else 'http' }}://{{ _gfdb_host }}:{{ 8443 if fips else 8123 }} from {{ _gfdb_pod }}"
+      - "password:  {{ grafana_state_files.clickhouse_password_file | realpath }} (Step 18 puts it in the datasource's secureJsonData)"
+      - "teardown:  ansible-playbook deploy.yml --tags gf-db -e grafana_db_state=absent  (DROP USER {{ _gfdb_user }} only; no database was ever created)"
