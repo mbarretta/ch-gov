@@ -27,6 +27,11 @@
 #     PVCs, so removing it needs the operator and the EBS CSI driver alive --
 #     i.e. the cluster and the nodes still up. Only what exists is torn down;
 #     a ClickHouse-only stack runs none of these steps.
+#   * Grafana (optional Steps 16-18) goes BEFORE ClickHouse too, for the same
+#     NLB-before-EKS reason as Langfuse above. Unlike Langfuse it holds no
+#     PVC-backed storage (no persistence, by design), so its namespace
+#     deletion does not need the nodes-alive guard below -- it works even
+#     with zero nodes. Only what exists is torn down, same as Langfuse.
 #
 # What each mode leaves behind and what it costs:
 #   --nodes-only  VPC, EKS, IRSA, operator, StorageClass, cluster objects (Pending),
@@ -56,21 +61,26 @@ CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
 BUCKET_ACCOUNT="$(awk -F'"' '/^  target_account_id:/ {print $2; exit}' "$CH_GROUP_VARS")"
 REGION="$(awk -F'"' '/^  target_region:/ {print $2; exit}' "$CH_GROUP_VARS")"
 ENVIRONMENT_NAME="$(awk -F'"' '/^infrastructure:/{f=1} f && /^  environment_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
-# lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
-# scrapes above keep landing on the ClickHouse keys.
+# lf_var/gf_var (lib/common.sh) are block-scoped to langfuse:/grafana:, so
+# the first-match scrapes above keep landing on the ClickHouse keys.
 LF_NAMESPACE="$(lf_var '  namespace:')"
 LF_RELEASE="$(lf_var '  release:')"
+GF_NAMESPACE="$(gf_var '  namespace:')"
+GF_RELEASE="$(gf_var '  release:')"
 
 # tag:state-variable pairs, in teardown order. lf-db (the Langfuse database
-# and user inside ClickHouse) is deliberately NOT in the default plan:
-# cluster_state=absent takes the whole cluster with it anyway, and keeping it
-# out means "drop only Langfuse, keep the cluster" stays an explicit
-# `scripts/play.sh --tags lf-db -e langfuse_db_state=absent`.
+# and user inside ClickHouse) and gf-db (the Grafana ClickHouse user, Step
+# 17) are deliberately NOT in the default plan: cluster_state=absent takes
+# the whole cluster with it anyway, and keeping them out means "drop only
+# Langfuse/Grafana's ClickHouse object, keep the cluster" stays an explicit
+# `scripts/play.sh --tags lf-db -e langfuse_db_state=absent` (or gf-db /
+# grafana_db_state).
 case "$MODE" in
   nodes)   PLAN=(nodes:nodegroups_state) ;;
-  default) PLAN=(lf-app:langfuse_state lb:lb_state cluster:cluster_state nodes:nodegroups_state) ;;
-  all)     PLAN=(lf-app:langfuse_state lf-db:langfuse_db_state lb:lb_state cluster:cluster_state
-                 operator:operator_state prereqs:prereqs_state lf-storage:langfuse_storage_state
+  default) PLAN=(lf-app:langfuse_state gf-app:grafana_state lb:lb_state cluster:cluster_state nodes:nodegroups_state) ;;
+  all)     PLAN=(lf-app:langfuse_state lf-db:langfuse_db_state gf-app:grafana_state gf-db:grafana_db_state
+                 lb:lb_state cluster:cluster_state
+                 operator:operator_state prereqs:prereqs_state lf-storage:langfuse_storage_state gf-storage:grafana_storage_state
                  nodes:nodegroups_state storage:storage_state eks:eks_state vpc:vpc_state) ;;
 esac
 
@@ -92,6 +102,22 @@ lf_storage_exists() {
   aws cloudformation describe-stacks --stack-name "${ENVIRONMENT_NAME}-langfuse-irsa" \
     --profile "$TARGET_PROFILE" --region "$REGION" >/dev/null 2>&1
 }
+
+# --- Grafana: keep only the gf-* steps whose object actually exists ----------
+# Same reasoning as Langfuse above: deploy.yml tears Grafana down whenever
+# its *_state is absent, whether or not grafana.enabled is still true, so a
+# previously-deployed-then-disabled Grafana still gets removed. gf-app checks
+# all three of release, NLB Service and namespace, so a run that died between
+# creating the NLB and installing the chart still gets cleaned up.
+gf_app_exists() {
+  helm status -n "$GF_NAMESPACE" "$GF_RELEASE" >/dev/null 2>&1 \
+    || kubectl get service grafana-lb -n "$GF_NAMESPACE" >/dev/null 2>&1 \
+    || kubectl get namespace "$GF_NAMESPACE" >/dev/null 2>&1
+}
+gf_storage_exists() {
+  aws cloudformation describe-stacks --stack-name "${ENVIRONMENT_NAME}-grafana-irsa" \
+    --profile "$TARGET_PROFILE" --region "$REGION" >/dev/null 2>&1
+}
 LF_STORAGE=0
 kept=()
 for entry in "${PLAN[@]}"; do
@@ -99,6 +125,9 @@ for entry in "${PLAN[@]}"; do
     lf-app)     lf_app_exists || continue ;;
     lf-db)      kubectl get namespace "$LF_NAMESPACE" >/dev/null 2>&1 || continue ;;
     lf-storage) lf_storage_exists || continue; LF_STORAGE=1 ;;
+    gf-app)     gf_app_exists || continue ;;
+    gf-db)      kubectl get namespace "$GF_NAMESPACE" >/dev/null 2>&1 || continue ;;
+    gf-storage) gf_storage_exists || continue ;;
   esac
   kept+=("$entry")
 done

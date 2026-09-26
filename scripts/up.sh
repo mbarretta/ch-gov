@@ -29,6 +29,14 @@ STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb
 LF_ENABLED="$(lf_var '  enabled:')"
 [[ "$LF_ENABLED" == true ]] && STEPS+=(lf-storage lf-db lf-app)
 
+# Grafana (Steps 16-18) is optional and joins the list only when switched on,
+# after Langfuse's own three -- so a run with both on reaches the blanket
+# ClickHouse grant only once Langfuse's data already exists. gf_var
+# (lib/common.sh) is block-scoped to grafana:, so the first-match scrapes
+# below keep landing on the ClickHouse keys.
+GF_ENABLED="$(gf_var '  enabled:')"
+[[ "$GF_ENABLED" == true ]] && STEPS+=(gf-storage gf-db gf-app)
+
 YES=0; SKIP_IMAGES=0; FROM=""
 while (($#)); do
   case "$1" in
@@ -53,6 +61,7 @@ step "Bringing up: ${TAGS[*]}"
 info "compute starts at Step 5 (nodes): ~\$2.32/hr while up, ~\$0.15/hr with nodes down"
 info "load balancer type from group_vars: ${LB_TYPE:-none}"
 [[ "$LF_ENABLED" == true ]] && info "langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~\$0.02/hr for its NLB)"
+[[ "$GF_ENABLED" == true ]] && info "grafana: enabled -- Steps 16-18 run after Langfuse (adds ~\$0.02/hr for its NLB)"
 info "each step is idempotent; anything already in place is left alone"
 if ((!YES)); then
   read -r -p "  Proceed? [y/N] " ans; [[ "$ans" =~ ^[Yy]$ ]] || die "aborted"
@@ -84,6 +93,24 @@ if ((rc == 0)); then
       warn "langfuse: could not read the $LF_LB_TYPE NLB hostname; try: kubectl get service langfuse-lb -n $LF_NS"
     fi
     ok "          scripts/langfuse-smoke.sh       (posts a trace and reads it back from ClickHouse)"
+  fi
+  if [[ "$GF_ENABLED" == true ]]; then
+    # Same rule gf_url and the grafana role's GF_SERVER_ROOT_URL agree on:
+    # grafana.url if set; else the grafana-lb NLB hostname via gf_url
+    # (https with the port appended unless it is 443 when gf_tls; otherwise
+    # http with the port appended unless it is 80); else the fixed
+    # 3000:3000 port-forward for load_balancer.type: none.
+    GF_NS="$(gf_var '  namespace:')"; GF_RELEASE="$(gf_var '  release:')"; GF_URL="$(gf_var '  url:')"; GF_LB_TYPE="$(gf_var '    type:')"
+    if [[ -n "$GF_URL" ]]; then
+      ok "grafana:  $GF_URL   (grafana.url from group_vars; login: admin / state/grafana-admin-password)"
+    elif [[ "${GF_LB_TYPE:-none}" == none ]]; then
+      ok "grafana:  kubectl port-forward -n $GF_NS svc/$GF_RELEASE 3000:3000, then http://localhost:3000"
+    elif GF_URL="$(gf_url)"; then
+      ok "grafana:  $GF_URL   (via the $GF_LB_TYPE NLB; login: admin / state/grafana-admin-password)"
+    else
+      warn "grafana:  could not read the $GF_LB_TYPE NLB hostname; try: kubectl get service grafana-lb -n $GF_NS"
+    fi
+    ok "          scripts/grafana-smoke.sh        (checks the ClickHouse datasource health and a live query)"
   fi
   info "meter:    ~\$2.32/hr. Stop it with scripts/down.sh (keeps VPC/EKS, ~\$0.15/hr) or scripts/down.sh --all"
 else
