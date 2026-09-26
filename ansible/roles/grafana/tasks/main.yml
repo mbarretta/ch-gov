@@ -1,8 +1,959 @@
 ---
-# Step 18: the Grafana Helm release, IRSA service-account wiring, the plugin
-# initContainer, and the ClickHouse datasource. Scaffold only -- replaced
-# with real tasks by a later task in this plan. Kept as an empty task list
-# so ansible-playbook deploy.yml --syntax-check resolves this role (Ansible
-# resolves static role names at parse time regardless of `when:`), whether
-# grafana.enabled is true or false.
-[]
+# Step 18 (optional Grafana capability): the Grafana Helm release itself, the
+# IRSA ServiceAccount wiring that lets its plugin initContainer read the Step
+# 16 bucket, and the ClickHouse datasource pointed at the Step 17 user.
+#
+# A mirror of Step 15 (langfuse role) wherever the shape is the same:
+# preconditions (langfuse/tasks/main.yml:55-102), the load-balancer-before-
+# release ordering, the TLS-at-NLB dance (langfuse/tasks/main.yml:622-795),
+# the airgap assertion (langfuse/tasks/main.yml:1281-1290) and the explicit
+# teardown branch (langfuse/tasks/main.yml:308-384). Two things have no
+# precedent there:
+#
+# 1. The ServiceAccount annotation is deliberately split into two moments
+#    (ac1): the CloudFormation lookup of the Step 16 role ARN happens early,
+#    in the preconditions block below (mirroring
+#    langfuse/tasks/main.yml:117-136), but the actual
+#    eks.amazonaws.com/role-arn annotation is only applied later, inside the
+#    Helm serviceAccount.annotations values block (mirroring
+#    langfuse/tasks/main.yml:880-887) -- the two are not contiguous because
+#    the lookup is an input the whole role needs early (it also gates
+#    whether Step 16 has run at all) while the annotation is one value among
+#    many the release itself needs.
+#
+# 2. The plugin. grafana-clickhouse-datasource is not baked into any image
+#    and cannot be fetched from grafana.com at pod startup in an airgapped
+#    cluster, so Step 16 mirrors the pinned zip into S3 and this role loads
+#    it via two chained initContainers on the pulled 10.5.15 grafana/grafana
+#    chart (confirmed against the pulled chart, not assumed from any
+#    illustrative YAML -- ac4):
+#      - extraInitContainers is a real value (chart values.yaml:393) --
+#        a raw templated container list appended after the chart's own
+#        init containers (templates/_pod.tpl:591).
+#      - extraContainerVolumes is a real value (values.yaml:614) for a
+#        volume the initContainers need but the main container does not.
+#      - With persistence.enabled: false (the "no PVC" constraint), the
+#        chart itself creates an emptyDir volume named `storage`, mounted at
+#        /var/lib/grafana in the main container AND already available by
+#        name to any extraInitContainers entry that mounts it
+#        (templates/_pod.tpl:1590-1605, :1275) -- so the plugin lands at
+#        /var/lib/grafana/plugins (GF_PATHS_PLUGINS's default,
+#        values.yaml:888) with no extra volume of our own.
+#    The S3 object itself is a private, GetObject-only IAM policy (Step 16's
+#    grafana-irsa.yaml.j2: s3:GetObject on plugins/* only, no ListBucket).
+#    The DHI awscli image's actual toolset cannot be inspected in this
+#    environment (DHI needs a real, entitled Docker Hub login -- see
+#    versions.grafana_app's comment), so this role never assumes it has
+#    unzip or python3: the first initContainer (awscli) only ever runs
+#    `aws s3 presign`, a purely local SigV4 computation needing no network
+#    call of its own, and writes the resulting short-lived HTTPS URL to a
+#    small shared emptyDir. The second initContainer is the grafana image
+#    itself -- guaranteed, since it is the exact image the main container
+#    runs -- and uses `grafana cli --pluginUrl <url> plugins install
+#    <plugin-id> <version>` (confirmed against grafana/grafana's own
+#    pkg/cmd/grafana-cli/commands/install_command.go and
+#    pkg/plugins/repo/client.go: --pluginUrl is fetched with a plain Go
+#    http.Client, so it must be a real HTTP(S) URL, never a local file://
+#    path -- this is why the presigned-URL relay exists at all, not a local
+#    volume handoff of the raw zip) to download and unzip it with Grafana's
+#    own internal Go zip handling. No unzip binary, no python, on either
+#    image, is ever assumed.
+#
+# datasource TLS (ac5): the grafana-clickhouse-datasource plugin's own
+# config schema (confirmed by reading
+# github.com/grafana/clickhouse-datasource's src/types/config.ts:
+# tlsAuthWithCACert on CHConfig, tlsCACert on the secure-config side) accepts
+# jsonData.tlsAuthWithCACert / secureJsonData.tlsCACert directly, so this
+# role takes that path rather than Langfuse's NODE_EXTRA_CA_CERTS/mounted-CA-
+# Secret fallback (langfuse/tasks/main.yml:478-504 + 908-918) -- recorded
+# here as the choice actually made, per ac5.
+#
+# Credentials: the datasource's password and the plugin-install relay URL
+# never touch a ConfigMap. The chart's own datasources.<key>.secret
+# mechanism (confirmed in the pulled chart's templates/configSecret.yaml
+# and _config.tpl: any datasources entry carrying a `secret:` sub-key is
+# rendered into a Kubernetes Secret, <release>-config-secret, instead of the
+# plain ConfigMap the same key would otherwise land in) is what this role
+# relies on for the ClickHouse password -- not a second, redundant Secret of
+# our own. The admin password (ac7) DOES need a Secret of our own, because
+# it must be the one Ansible generates into state/ and reuses, not whatever
+# random value the chart would generate for itself.
+#
+# No dashboard-provisioning sidecar or starter dashboards (plan constraint);
+# no PVC (persistence.enabled stays false, the chart's own default); no
+# fips_suffix anywhere in the grafana/awscli tag construction (ac6 -- a
+# documented gap, see versions.grafana_app's comment and docs/part-8-grafana.md).
+#
+# Teardown: ansible-playbook deploy.yml --tags gf-app -e grafana_state=absent
+#   Removes the NLB Service, the ACM certificate (with tls), the release and
+#   the namespace. Independent of every install-time fact (ac8): reachable
+#   even when grafana.enabled is false, and tolerant of every step already
+#   being gone. state/grafana-admin-password and the TLS key/certificate
+#   stay; the ClickHouse user (Step 17), the plugin bucket and the IRSA
+#   stack (Step 16) are left to their own roles' teardown.
+
+- name: Preconditions and inputs (skipped on teardown)
+  # Everything the install needs to know or check. None of it applies when
+  # removing Grafana -- and checking it would make teardown impossible after
+  # the ClickHouse cluster or the Step 16 stack are already gone.
+  when: (grafana_state | default('present')) != 'absent'
+  block:
+    # --- exposure --------------------------------------------------------------
+
+    - name: Validate the load balancer type
+      ansible.builtin.assert:
+        that: grafana.load_balancer.type in ['none', 'internal', 'public']
+        fail_msg: "grafana.load_balancer.type must be none, internal or public (got '{{ grafana.load_balancer.type }}')"
+
+    - name: Decide whether the load balancer Service should exist, and whether it terminates TLS
+      ansible.builtin.set_fact:
+        _gf_present: "{{ grafana.load_balancer.type != 'none' }}"
+        # Same rule as langfuse's _lf_tls (Phase 4c): grafana.load_balancer.tls,
+        # OR'd with fips so a single fips: true does not silently leave the
+        # NLB in plaintext. type: none never terminates TLS regardless of
+        # either value -- there is no NLB to terminate it on.
+        _gf_tls: "{{ grafana.load_balancer.type != 'none' and ((grafana.load_balancer.tls | bool) or (fips | bool)) }}"
+        _gf_tls_policy: "{{ 'ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04' if fips else 'ELBSecurityPolicy-TLS13-1-2-2021-06' }}"
+
+    - name: Resolve who may connect
+      ansible.builtin.set_fact:
+        _gf_sources: >-
+          {{ grafana.load_balancer.allowed_cidrs
+             if grafana.load_balancer.allowed_cidrs | length > 0
+             else ([infrastructure.vpc_cidr] if grafana.load_balancer.type == 'internal' else []) }}
+
+    - name: A public load balancer needs an explicit allow list
+      ansible.builtin.assert:
+        that:
+          - _gf_sources | length > 0
+          - "'0.0.0.0/0' not in _gf_sources or (allow_open_internet | default(false) | bool)"
+        fail_msg: >-
+          grafana.load_balancer.type is 'public' but allowed_cidrs is
+          {{ 'empty' if _gf_sources | length == 0 else 'the whole internet' }}.
+          Set allowed_cidrs to the CIDRs that should reach Grafana
+          (your office/VPN egress, e.g. "203.0.113.7/32"). To really open port
+          {{ grafana.load_balancer.port }} to everyone, add -e allow_open_internet=true
+          {{ '-- and note this is plain HTTP: TLS is not configured in this deployment.' if not _gf_tls else '' }}
+      when: grafana.load_balancer.type == 'public'
+
+    # --- inputs from earlier steps ---------------------------------------------
+
+    - name: Look for the ClickHouse password Step 17 generated
+      ansible.builtin.stat:
+        path: "{{ grafana_state_files.clickhouse_password_file }}"
+      register: _gf_ch_pw_file
+      check_mode: false
+
+    - name: Fail clearly if Step 17 has not run
+      ansible.builtin.assert:
+        that: _gf_ch_pw_file.stat.exists
+        fail_msg: "{{ grafana_state_files.clickhouse_password_file }} is missing. Run: ansible-playbook deploy.yml --tags gf-db"
+
+    - name: Look up the IRSA role ARN from the Step 16 stack
+      # Read from CloudFormation rather than a fact set by the grafana_storage
+      # role, so this works when run alone with --tags gf-app.
+      amazon.aws.cloudformation_info:
+        stack_name: "{{ infrastructure.environment_name }}-grafana-irsa"
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _gf_irsa_info
+      check_mode: false
+
+    - name: Fail clearly if Step 16 has not run
+      ansible.builtin.assert:
+        that: (infrastructure.environment_name ~ '-grafana-irsa') in _gf_irsa_info.cloudformation
+        fail_msg: "No CloudFormation stack {{ infrastructure.environment_name }}-grafana-irsa. Run: ansible-playbook deploy.yml --tags gf-storage"
+
+    - name: Extract the role ARN
+      ansible.builtin.set_fact:
+        _gf_s3_role_arn: >-
+          {{ _gf_irsa_info.cloudformation[infrastructure.environment_name ~ '-grafana-irsa']
+             .stack_outputs.GrafanaS3RoleArn }}
+
+    - name: Name the plugin artifact and the ClickHouse endpoint
+      # Same construction as grafana_storage's own _gf_plugin_zip_name and
+      # grafana_clickhouse's own _gfdb_host -- independently reconstructed
+      # here (not a cross-role fact) so this role also works standalone.
+      ansible.builtin.set_fact:
+        _gf_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
+        _gf_ch_host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local"
+
+    - name: Read the Grafana ClickHouse user's password
+      ansible.builtin.set_fact:
+        _gf_ch_pw: "{{ lookup('ansible.builtin.file', grafana_state_files.clickhouse_password_file) }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Read the ClickHouse native-TLS CA (fips only -- the datasource's tlsCACert)
+      # Not sensitive (a CA certificate signs, it does not authenticate as
+      # anything), so no no_log -- same reasoning as langfuse's equivalent
+      # CA Secret task.
+      ansible.builtin.set_fact:
+        _gf_ch_ca: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) if fips else '' }}"
+
+    # --- generated secrets -----------------------------------------------------
+
+    - name: Ensure the state directory exists
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate (or reuse) the Grafana admin password
+      # The lookup writes the file on first use and reads it back on every
+      # run after, so re-runs are idempotent and the Secret below converges.
+      ansible.builtin.set_fact:
+        _gf_admin_pw: "{{ lookup('ansible.builtin.password', grafana_state_files.admin_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Tighten permissions on the admin password file
+      ansible.builtin.file:
+        path: "{{ grafana_state_files.admin_password_file }}"
+        mode: "0600"
+
+# --- teardown ---------------------------------------------------------------
+# Here, before anything is built, the way langfuse's own teardown branch
+# does (langfuse/tasks/main.yml:308-384): with grafana_state=absent the
+# install flow below never runs (the facts it uses were never set), and
+# nothing here needs the ClickHouse cluster or the Step 16 stack to still
+# exist. The load balancer Service goes first, then (with tls) the ACM
+# certificate that NLB was using, then the release, then the namespace.
+# The ClickHouse user (Step 17), the plugin bucket and the IRSA stack
+# (Step 16) are deliberately left alone -- that is their own roles'
+# teardown -- and so is the admin password under state/ (ac8).
+
+- name: Teardown (grafana_state=absent)
+  when: (grafana_state | default('present')) == 'absent'
+  block:
+    - name: Recompute the effective TLS state (the install-time facts above never ran)
+      ansible.builtin.set_fact:
+        _gf_tls: "{{ grafana.load_balancer.type != 'none' and ((grafana.load_balancer.tls | bool) or (fips | bool)) }}"
+
+    - name: Remove the load balancer Service
+      # The cloud controller removes the NLB when the Service goes, and the
+      # Service stays until that finalizer clears. Takes ~1 minute.
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Service
+        name: grafana-lb
+        namespace: "{{ grafana.namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+
+    - name: Delete the ACM certificate
+      # After the Service, because ACM refuses to delete a certificate a
+      # listener still uses (ResourceInUseException) and the NLB goes a
+      # little after the Service's finalizer clears -- hence the bounded
+      # retries on exactly that error. Only with the effective TLS state
+      # (_gf_tls, recomputed above): a plain-HTTP deployment never imported
+      # anything.
+      community.aws.acm_certificate:
+        name_tag: "{{ infrastructure.environment_name }}-grafana-lb"
+        state: absent
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _gf_acm_del
+      until: >-
+        _gf_acm_del is not failed
+        or ('ResourceInUseException' not in (_gf_acm_del.msg | default(''))
+            and (_gf_acm_del.error.code | default('')) != 'ResourceInUseException')
+      retries: 18
+      delay: 10
+      when: _gf_tls
+
+    - name: Uninstall the release
+      # Idempotent: a release that is not there is not an error.
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: "{{ grafana.release }}"
+        release_namespace: "{{ grafana.namespace }}"
+        release_state: absent
+        wait: true
+
+    - name: Remove the namespace and everything left in it
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        kind: Namespace
+        name: "{{ grafana.namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+
+    - name: Teardown summary
+      ansible.builtin.debug:
+        msg:
+          - "Grafana removed: Service grafana-lb (and its NLB), release {{ grafana.release }}, namespace {{ grafana.namespace }}"
+          - "the ClickHouse user {{ grafana.clickhouse_user }} is kept; purge it with --tags gf-db -e grafana_db_state=absent"
+          - "the Step 16 bucket and IRSA stack are not touched (--tags gf-storage -e grafana_storage_state=absent); {{ grafana_state_files.admin_password_file | realpath }} is kept and reused by the next --tags gf-app{{ '; the ACM certificate ' ~ infrastructure.environment_name ~ '-grafana-lb is deleted, the TLS key and certificate under state/ are kept and re-imported by the next --tags gf-app' if _gf_tls else '' }}"
+
+    - name: Stop here when tearing down
+      ansible.builtin.meta: end_play
+
+# --- namespace and Secret ---------------------------------------------------
+# Only one Secret of our own: the admin password, which must be the value
+# Ansible generated into state/, not whatever the chart would generate for
+# itself. The ClickHouse password never gets a Secret of its own -- it rides
+# in the chart's own datasources.<key>.secret mechanism below, which the
+# pulled chart renders into its own Secret (<release>-config-secret).
+
+- name: Create the namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ grafana.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+
+- name: Write the admin Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: grafana-admin
+        namespace: "{{ grafana.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data:
+        admin-user: "{{ 'admin' | b64encode }}"
+        admin-password: "{{ _gf_admin_pw | b64encode }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+# --- the load balancer -------------------------------------------------------
+# Before the release, same reasoning as langfuse's NEXTAUTH_URL: the address
+# people type is baked into GF_SERVER_ROOT_URL, and the NLB hostname must be
+# known first. The selector matches the chart's own pod labels
+# (grafana.selectorLabels, confirmed in the pulled chart's _helpers.tpl),
+# targeting the pod directly on its UI port, same as langfuse-lb.
+
+- name: Create or update the load balancer Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana-lb
+        namespace: "{{ grafana.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+          app.kubernetes.io/part-of: grafana
+        annotations: >-
+          {{ {
+            'service.beta.kubernetes.io/aws-load-balancer-type': 'nlb',
+            'service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled':
+              grafana.load_balancer.cross_zone | bool | string | lower
+          } | combine(
+            {'service.beta.kubernetes.io/aws-load-balancer-internal': 'true'}
+            if grafana.load_balancer.type == 'internal' else {}
+          ) }}
+      spec:
+        type: LoadBalancer
+        selector:
+          app.kubernetes.io/name: grafana
+          app.kubernetes.io/instance: "{{ grafana.release }}"
+        externalTrafficPolicy: Local
+        loadBalancerSourceRanges: "{{ _gf_sources }}"
+        ports:
+          - name: http
+            protocol: TCP
+            port: "{{ grafana.load_balancer.port | int }}"
+            targetPort: 3000
+  when: _gf_present
+
+- name: Wait for the cloud controller to assign a hostname
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - service
+      - grafana-lb
+      - --namespace={{ grafana.namespace }}
+      - -o=jsonpath={.status.loadBalancer.ingress[0].hostname}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gf_lb_host
+  until: _gf_lb_host.stdout | trim | length > 0
+  retries: 24
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: _gf_present
+
+- name: Note the load balancer hostname
+  ansible.builtin.set_fact:
+    _gf_host: "{{ (_gf_lb_host.stdout | default('')) | trim }}"
+
+- name: Find the NLB behind that hostname
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-load-balancers
+      - --query=LoadBalancers[?DNSName=='{{ _gf_host }}'].LoadBalancerArn | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _gf_lb_arn
+  until: _gf_lb_arn.stdout | trim not in ['', 'None']
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when: _gf_present
+
+# --- TLS at the load balancer (skipped unless _gf_tls: grafana.load_balancer.tls, or fips: true with load_balancer.type not none) -----
+# Identical mechanism to langfuse/tasks/main.yml:622-795, renamed. The
+# openssl CLI rather than community.crypto: the venv has no cryptography
+# module.
+
+- name: Terminate TLS at the load balancer
+  when: _gf_tls
+  block:
+    - name: Read the openssl version
+      ansible.builtin.command:
+        argv: [openssl, version]
+      register: _gf_openssl
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if it is not OpenSSL 3+
+      ansible.builtin.assert:
+        that: _gf_openssl.rc == 0 and _gf_openssl.stdout is match('OpenSSL [3-9]')
+        fail_msg: "openssl on PATH is '{{ _gf_openssl.stdout | default('') | trim }}' (rc {{ _gf_openssl.rc }}); NLB TLS (grafana.load_balancer.tls, or fips: true with load_balancer.type not none) needs OpenSSL 3 -- brew install openssl@3 and put /opt/homebrew/bin first on PATH"
+
+    - name: Read the SAN of the certificate already there, if any
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ grafana_state_files.tls_cert_file }}", -noout, -ext, subjectAltName]
+      register: _gf_tls_san
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Look for the private key
+      ansible.builtin.stat:
+        path: "{{ grafana_state_files.tls_key_file }}"
+      register: _gf_tls_key
+      check_mode: false
+
+    - name: Read the RSA key size of the certificate already there, if any
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ grafana_state_files.tls_cert_file }}", -noout, -text]
+      register: _gf_tls_keysize
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Note that key size as an integer (0 when unknown)
+      ansible.builtin.set_fact:
+        _gf_tls_key_bits: "{{ (_gf_tls_keysize.stdout | regex_search('Public-Key: \\((\\d+) bit\\)', '\\1') | default(['0'], true) | first) | int }}"
+
+    - name: Generate the key and the self-signed certificate (missing, naming another hostname, or under-strength for fips)
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - "rsa:{{ tls_rsa_bits }}"
+          - -noenc
+          - -keyout
+          - "{{ grafana_state_files.tls_key_file }}"
+          - -out
+          - "{{ grafana_state_files.tls_cert_file }}"
+          - -days
+          - "{{ grafana.load_balancer.tls_cert_days | int }}"
+          - -subj
+          - /CN=grafana
+          - -addext
+          - "subjectAltName=DNS:{{ _gf_host }}"
+      when: >-
+        not _gf_tls_key.stat.exists
+        or _gf_tls_san.rc != 0
+        or ('DNS:' ~ _gf_host) not in _gf_tls_san.stdout
+        or (fips and _gf_tls_key_bits < (tls_rsa_bits | int))
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Keep the key owner-readable only
+      ansible.builtin.file:
+        path: "{{ grafana_state_files.tls_key_file }}"
+        mode: "0600"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Import the certificate into ACM (or find it there)
+      community.aws.acm_certificate:
+        name_tag: "{{ infrastructure.environment_name }}-grafana-lb"
+        certificate: "{{ lookup('ansible.builtin.file', grafana_state_files.tls_cert_file) }}"
+        private_key: "{{ lookup('ansible.builtin.file', grafana_state_files.tls_key_file) }}"
+        state: present
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+      register: _gf_acm
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+    - name: Note the certificate ARN
+      ansible.builtin.set_fact:
+        _gf_tls_cert_arn: "{{ _gf_acm.certificate.arn }}"
+
+    - name: Point the load balancer Service at the certificate
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: patched
+        kind: Service
+        name: grafana-lb
+        namespace: "{{ grafana.namespace }}"
+        definition:
+          metadata:
+            annotations:
+              service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "{{ _gf_tls_cert_arn }}"
+              service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "{{ grafana.load_balancer.port | int | string }}"
+              service.beta.kubernetes.io/aws-load-balancer-ssl-negotiation-policy: "{{ _gf_tls_policy }}"
+
+    - name: Read the listener on the TLS port
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - describe-listeners
+          - --load-balancer-arn={{ _gf_lb_arn.stdout | trim }}
+          - --query=Listeners[?Port==`{{ grafana.load_balancer.port | int }}`].[ListenerArn, Protocol, Certificates[0].CertificateArn] | [0]
+          - --output=text
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+      register: _gf_listener
+      changed_when: false
+      check_mode: false
+
+    - name: The controller built a listener on that port
+      ansible.builtin.assert:
+        that: _gf_listener.stdout.split() | length == 3 and _gf_listener.stdout.split()[0] is match('^arn:')
+        fail_msg: "no listener on port {{ grafana.load_balancer.port }} of {{ _gf_host }} (got '{{ _gf_listener.stdout | trim }}'); see: kubectl describe service grafana-lb -n {{ grafana.namespace }}"
+
+    - name: Switch the listener to TLS with the certificate (the cloud controller cannot)
+      # Same reasoning as langfuse/tasks/main.yml's equivalent task: the
+      # in-tree cloud controller cannot change a listener's protocol once
+      # created (DuplicateListener on every retry), so this role does it.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - modify-listener
+          - --listener-arn={{ _gf_listener.stdout.split()[0] }}
+          - --protocol=TLS
+          - --ssl-policy={{ _gf_tls_policy }}
+          - --certificates=CertificateArn={{ _gf_tls_cert_arn }}
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+      when: _gf_listener.stdout.split()[1:] != ['TLS', _gf_tls_cert_arn]
+
+- name: Settle the address people will use
+  # GF_SERVER_ROOT_URL. grafana.url if set; else the NLB hostname -- https
+  # with tls, the port appended unless it is the scheme's default (443 or
+  # 80); else, with no load balancer, http://localhost:3000 -- what a
+  # port-forward of svc/{{ grafana.release }} 3000:3000 gives you.
+  ansible.builtin.set_fact:
+    _gf_url: >-
+      {{ grafana.url if grafana.url
+         else (('https://' ~ _gf_host ~ ('' if (grafana.load_balancer.port | int) == 443 else ':' ~ grafana.load_balancer.port))
+               if _gf_tls else
+               ('http://' ~ _gf_host ~ ('' if (grafana.load_balancer.port | int) == 80 else ':' ~ grafana.load_balancer.port)))
+         if _gf_present else 'http://localhost:3000' }}
+
+- name: Report the address
+  ansible.builtin.debug:
+    msg: "GF_SERVER_ROOT_URL: {{ _gf_url }}{{ '' if _gf_present else '  (no load balancer: kubectl port-forward -n ' ~ grafana.namespace ~ ' svc/' ~ grafana.release ~ ' 3000:3000)' }}"
+
+# --- the release -------------------------------------------------------------
+
+- name: Log in to the ECR Helm registry
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ecr
+      - get-login-password
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _gf_ecr_token
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdout IS the credential
+
+- name: Authenticate helm against ECR
+  ansible.builtin.command:
+    argv:
+      - helm
+      - registry
+      - login
+      - --username=AWS
+      - --password-stdin
+      - "{{ target_registry }}"
+    stdin: "{{ _gf_ecr_token.stdout }}"
+  changed_when: false
+  check_mode: false
+  no_log: true            # stdin carries the credential
+
+- name: Install or upgrade Grafana
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    name: "{{ grafana.release }}"
+    chart_ref: "oci://{{ target_registry }}/helm/grafana"
+    chart_version: "{{ versions.grafana_chart }}"
+    release_namespace: "{{ grafana.namespace }}"
+    # No helm wait: the plugin initContainers can take a few seconds for the
+    # presign + fetch + install round trip, and this role does its own,
+    # more informative wait (with initContainer logs on failure) below.
+    wait: false
+    force_conflicts: true
+    values:
+      # Pins the chart's fullname -- the Deployment, the chart's own
+      # ClusterIP Service and the ServiceAccount -- to the release name.
+      # Step 16's IRSA trust policy is bound to
+      # system:serviceaccount:{{ grafana.namespace }}:{{ grafana.release }}
+      # exactly, so this must not drift from that.
+      fullnameOverride: "{{ grafana.release }}"
+      replicas: "{{ grafana.pod.replicas | int }}"
+      resources:
+        limits:   {cpu: "{{ grafana.pod.cpu }}", memory: "{{ grafana.pod.memory }}"}
+        requests: {cpu: "{{ grafana.pod.cpu }}", memory: "{{ grafana.pod.memory }}"}
+      # No PVC, no persistence (plan constraint): the datasource is
+      # config-as-code below, and the plugin is reloaded by the
+      # initContainers on every pod start -- there is nothing here that
+      # needs to survive a restart.
+      persistence:
+        enabled: false
+      image:
+        registry: "{{ target_registry }}"
+        repository: grafana
+        tag: "{{ versions.grafana_app }}"
+        pullPolicy: IfNotPresent   # tags are immutable in our ECR
+      serviceAccount:
+        create: true
+        annotations:
+          # The IRSA wiring (ac1, part two -- see this role's header). Pods
+          # running as the chart's ServiceAccount (named after the release
+          # by fullnameOverride above; Step 16's trust policy names the same
+          # thing) get AWS_ROLE_ARN and a projected token from this one
+          # annotation.
+          eks.amazonaws.com/role-arn: "{{ _gf_s3_role_arn }}"
+      env:
+        GF_SERVER_ROOT_URL: "{{ _gf_url }}"
+      admin:
+        existingSecret: grafana-admin
+        userKey: admin-user
+        passwordKey: admin-password
+      "grafana.ini":
+        analytics:
+          reporting_enabled: "{{ grafana.telemetry_enabled | bool }}"
+          check_for_updates: "{{ grafana.telemetry_enabled | bool }}"
+      # The plugin (ac4 -- see this role's header for why two initContainers
+      # and why neither assumes unzip/python on the DHI awscli image).
+      # gf-plugin-url is init-container-only: the main container never sees
+      # it (extraContainerVolumes, confirmed in the pulled chart's
+      # values.yaml/templates/_pod.tpl -- not mounted to the Deployment's
+      # own container). The plugin itself lands on the chart's own `storage`
+      # emptyDir (created because persistence.enabled is false above),
+      # already mounted at /var/lib/grafana in the main container, so no
+      # volume of our own is needed for it.
+      extraContainerVolumes:
+        - name: gf-plugin-url
+          emptyDir: {}
+      extraInitContainers:
+        - name: gf-plugin-presign
+          image: "{{ target_registry }}/awscli:{{ versions.awscli_app }}"
+          # A short-lived (5 minute) presigned GET URL for the exact,
+          # already-known key -- no ListBucket call, matching the
+          # GetObject-only IRSA policy Step 16 created. Computing a
+          # presigned URL is a purely local SigV4 signature (no network
+          # call), so this never depends on the image having anything but
+          # the aws binary and a shell to redirect its stdout.
+          command: ["sh", "-c"]
+          args:
+            - >-
+              aws s3 presign
+              s3://{{ grafana.bucket_name }}/plugins/{{ _gf_plugin_zip_name }}
+              --region {{ aws.target_region }}
+              --expires-in 300
+              > /gf-plugin/url
+          # allowPrivilegeEscalation/capabilities only, no runAsUser
+          # override: Kubernetes has no per-container way to opt out of the
+          # pod's own securityContext.runAsUser (472 -- the chart's own
+          # top-level securityContext values, applied pod-wide; an unset
+          # field here is a no-op, not a fallback to the image's own USER
+          # directive). So this container also runs as uid/gid 472, same as
+          # the chart's own optional init containers (init-chown-data,
+          # download-dashboards) already do when enabled. That is a real,
+          # unconfirmed-in-this-sandbox assumption about the DHI awscli
+          # image (see this role's header): `aws s3 presign` needs no
+          # $HOME-dependent lookup (credentials come from AWS_ROLE_ARN and
+          # the projected token via IRSA, never ~/.aws/config), so an
+          # arbitrary UID with no matching /etc/passwd entry is expected to
+          # work, but this has not been verified against the real,
+          # entitled DHI image.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: gf-plugin-url, mountPath: /gf-plugin}
+        - name: gf-plugin-install
+          # The grafana image itself -- guaranteed to have `grafana cli`,
+          # since it is the exact image the main container below runs, so
+          # this one keeps the pod's default securityContext (uid 472, the
+          # image's own grafana user) rather than overriding it.
+          image: "{{ target_registry }}/grafana:{{ versions.grafana_app }}"
+          command: ["sh", "-c"]
+          args:
+            - >-
+              grafana cli --pluginsDir=/var/lib/grafana/plugins
+              --pluginUrl="$(cat /gf-plugin/url)"
+              plugins install grafana-clickhouse-datasource {{ versions.grafana_clickhouse_plugin_version }}
+          volumeMounts:
+            - {name: gf-plugin-url, mountPath: /gf-plugin, readOnly: true}
+            - {name: storage, mountPath: /var/lib/grafana}
+      # The ClickHouse datasource (ac5, ac7): config-as-code, not the
+      # dashboard/datasource sidecar (plan constraint: no sidecar). uid:
+      # clickhouse is fixed -- scripts/grafana-smoke.sh (task 7) and the
+      # live-verification task both depend on it. The whole entry carries a
+      # `secret:` sub-key so the pulled chart renders it into its own
+      # Secret (<release>-config-secret) instead of the plain ConfigMap
+      # every other provisioning key here would land in (confirmed in
+      # templates/configSecret.yaml and _config.tpl) -- the password, and
+      # under fips the CA certificate, never reach a ConfigMap.
+      datasources:
+        datasources.yaml:
+          secret:
+            apiVersion: 1
+            datasources:
+              - name: ClickHouse
+                type: grafana-clickhouse-datasource
+                uid: clickhouse
+                access: proxy
+                isDefault: true
+                jsonData: >-
+                  {{ {
+                    'host': _gf_ch_host,
+                    'port': (8443 if fips else 8123) | int,
+                    'protocol': 'http',
+                    'secure': fips | bool,
+                    'username': grafana.clickhouse_user,
+                    'defaultDatabase': 'default'
+                  } | combine({'tlsAuthWithCACert': true} if fips else {}) }}
+                secureJsonData: >-
+                  {{ {'password': _gf_ch_pw} | combine({'tlsCACert': _gf_ch_ca} if fips else {}) }}
+
+- name: Wait for the Grafana Deployment to be Available
+  block:
+    - name: Wait for the pod to exist
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pods
+          - --namespace={{ grafana.namespace }}
+          - --selector=app.kubernetes.io/name=grafana,app.kubernetes.io/instance={{ grafana.release }}
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gf_pod_exists
+      until: _gf_pod_exists.stdout_lines | length > 0
+      retries: 24
+      delay: 5
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for the rollout (the plugin initContainers run first)
+      # By name, not --selector: the chart puts app.kubernetes.io/name on
+      # the pod template only, so a Deployment selector match is unreliable
+      # -- a missing Deployment by name is a loud "not found" instead.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - rollout
+          - status
+          - deployment/{{ grafana.release }}
+          - --namespace={{ grafana.namespace }}
+          - --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: false
+      check_mode: false
+
+  rescue:
+    - name: Show every pod in the namespace
+      ansible.builtin.command:
+        argv: [kubectl, get, pods, "--namespace={{ grafana.namespace }}", -o=wide]
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gf_rescue_pods
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the scheduler's and kubelet's reasons
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - events
+          - --namespace={{ grafana.namespace }}
+          - --field-selector=type=Warning
+          - --sort-by=.lastTimestamp
+          - -o=custom-columns=LAST:.lastTimestamp,OBJECT:.involvedObject.name,REASON:.reason,MESSAGE:.message
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _gf_rescue_events
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Show the plugin initContainers' and the main container's logs
+      # -c (not --selector/--all-containers): initContainer logs are not
+      # included in a plain `kubectl logs` for the pod, and this is exactly
+      # the mechanism most likely to fail first (S3 reachability, the IRSA
+      # trust policy, the presign/plugin-install relay).
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - logs
+          - --namespace={{ grafana.namespace }}
+          - --selector=app.kubernetes.io/name=grafana,app.kubernetes.io/instance={{ grafana.release }}
+          - -c={{ item }}
+          - --tail=40
+          - --prefix
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      loop: [gf-plugin-presign, gf-plugin-install, grafana]
+      register: _gf_rescue_logs
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Grafana did not come up
+      ansible.builtin.fail:
+        msg:
+          - "failed at: {{ ansible_failed_task.name }} -- {{ ansible_failed_result.msg | default('') }}"
+          - "--- pods ---"
+          - "{{ _gf_rescue_pods.stdout_lines | default([]) }}"
+          - "--- warning events (newest last) ---"
+          - "{{ _gf_rescue_events.stdout_lines | default([]) }}"
+          - "--- gf-plugin-presign log tail ---"
+          - "{{ _gf_rescue_logs.results[0].stdout_lines | default([]) }}"
+          - "--- gf-plugin-install log tail ---"
+          - "{{ _gf_rescue_logs.results[1].stdout_lines | default([]) }}"
+          - "--- grafana log tail ---"
+          - "{{ _gf_rescue_logs.results[2].stdout_lines | default([]) }}"
+          - "The release is still installed; fix the cause and re-run --tags gf-app, or tear down with -e grafana_state=absent."
+
+# --- prove it -----------------------------------------------------------------
+
+- name: List every container image in the namespace
+  # Init containers too -- ac6 covers the plugin initContainers as well as
+  # the main container.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ grafana.namespace }}
+      - -o=jsonpath={range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _gf_images
+  changed_when: false
+  check_mode: false
+
+- name: Assert no container pulls from outside your registry
+  ansible.builtin.assert:
+    that: _gf_images.stdout_lines | reject('search', '^' ~ target_registry) | list | length == 0
+    fail_msg: >-
+      These Grafana containers do not come from {{ target_registry }}:
+      {{ _gf_images.stdout_lines | reject('search', '^' ~ target_registry) | list | join(', ') }}.
+      Each one needs a Helm override and a mirrored image.
+    success_msg: >-
+      all {{ _gf_images.stdout_lines | length }} containers in {{ grafana.namespace }}
+      pull from {{ target_registry }}
+
+# --- the load balancer's view (skipped when type is none) ----------------------
+
+- name: List the target groups (one, for the http port)
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-groups
+      - --load-balancer-arn={{ _gf_lb_arn.stdout | trim }}
+      - --query=TargetGroups[].TargetGroupArn
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _gf_lb_tgs
+  changed_when: false
+  check_mode: false
+  when: _gf_present
+
+- name: Wait for the listener to terminate TLS
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-listeners
+      - --load-balancer-arn={{ _gf_lb_arn.stdout | trim }}
+      - --query=Listeners[?Port==`{{ grafana.load_balancer.port | int }}`].Protocol | [0]
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  register: _gf_lb_listener
+  until: _gf_lb_listener.stdout | trim == 'TLS'
+  retries: 30
+  delay: 10
+  changed_when: false
+  check_mode: false
+  when: _gf_tls
+
+- name: Wait for the pod(s) to pass the NLB health check
+  ansible.builtin.command:
+    argv:
+      - aws
+      - elbv2
+      - describe-target-health
+      - --target-group-arn={{ item }}
+      - --query=length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])
+      - --output=text
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+  loop: "{{ _gf_lb_tgs.stdout.split() if _gf_present else [] }}"
+  register: _gf_lb_health
+  until: (_gf_lb_health.stdout | trim | int) >= (grafana.pod.replicas | int)
+  retries: 30
+  delay: 10
+  changed_when: false
+  check_mode: false
+  when: _gf_present
+
+# --- report -------------------------------------------------------------------
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "url:        {{ _gf_url }}"
+      - "exposure:   {{ ('no load balancer -- kubectl port-forward -n ' ~ grafana.namespace ~ ' svc/' ~ grafana.release ~ ' 3000:3000, then open ' ~ _gf_url)
+                        if not _gf_present else
+                        (grafana.load_balancer.type ~ ' NLB ' ~ _gf_host ~ ', allowed from ' ~ (_gf_sources | join(', ')) ~ '; '
+                         ~ (_gf_lb_health.results | map(attribute='stdout') | map('trim') | join('/')) ~ ' healthy target(s)'
+                         ~ ('; TLS terminated at the NLB with a self-signed certificate -- clients trust ' ~ (grafana_state_files.tls_cert_file | realpath) ~ ' (curl --cacert)' if _gf_tls else '')) }}"
+      - "login:      admin -- password in {{ grafana_state_files.admin_password_file | realpath }}"
+      - "datasource: uid clickhouse, ClickHouse Private at {{ _gf_ch_host }}:{{ 8443 if fips else 8123 }} ({{ 'TLS, CA-verified' if fips else 'plaintext' }}) as {{ grafana.clickhouse_user }}"
+      - "smoke test: scripts/grafana-smoke.sh   (checks the datasource health and a live query)"
+      - "teardown:   ansible-playbook deploy.yml --tags gf-app -e grafana_state=absent   (keeps the ClickHouse user; --tags gf-db -e grafana_db_state=absent purges it)"
