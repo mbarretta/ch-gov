@@ -99,6 +99,59 @@
   loop_control:
     label: "{{ item.name }}"
 
+# --- dhi.io login (grafana.enabled only) ------------------------------------
+# DHI (Docker Hardened Images) is a paid, entitled Docker Hub catalog, unlike
+# the ECR registries above and the anonymous/public registries other
+# artifacts pull from. Only logged into when something in all_artifacts
+# actually sources from it (grafana_images, gated on grafana.enabled), so a
+# Grafana-less run never asks for DHI_USERNAME/DHI_TOKEN and behaves exactly
+# as it did before this block existed.
+
+- name: Determine whether any artifact sources from dhi.io
+  ansible.builtin.set_fact:
+    _dhi_required: >-
+      {{ (all_artifacts | selectattr('source', 'defined')
+                         | selectattr('source', 'equalto', 'dhi.io')
+                         | list | length) > 0 }}
+
+- name: Fail early and clearly if DHI credentials are required but missing
+  ansible.builtin.assert:
+    that:
+      - dhi_username | length > 0
+      - dhi_token | length > 0
+    fail_msg: >-
+      An artifact sources from dhi.io but DHI_USERNAME/DHI_TOKEN are not set
+      in the environment. Export both (a Docker Hub account entitled to the
+      DHI catalog) and re-run.
+    success_msg: "DHI credentials present"
+  when: _dhi_required
+
+- name: Log in to dhi.io (Docker Hardened Images)
+  ansible.builtin.command:
+    argv:
+      - skopeo
+      - login
+      - --username={{ dhi_username }}
+      - --password-stdin
+      - --authfile={{ skopeo_authfile }}
+      - dhi.io
+    stdin: "{{ dhi_token }}"
+  register: _dhi_login
+  changed_when: false
+  failed_when: false    # checked below, so we can report clearly
+  check_mode: false
+  no_log: true           # stdin carries the credential
+  when: _dhi_required
+
+- name: Verify the dhi.io login succeeded
+  ansible.builtin.assert:
+    that: _dhi_login.rc == 0
+    fail_msg: >-
+      skopeo login failed for dhi.io registry, rc={{ _dhi_login.rc }}:
+      {{ _dhi_login.stderr | default('no stderr', true) }}
+    success_msg: "logged in to dhi.io"
+  when: _dhi_required
+
 # --- the copy itself -------------------------------------------------------
 
 - name: Check which tags already exist in the target registry
@@ -153,8 +206,12 @@
       # source_tag lets a floating upstream tag (Chainguard's `latest`) land
       # under our own fixed tag: ECR tags are immutable and the existence
       # check above skips present tags, so the digest is resolved once and
-      # frozen until someone bumps the tag in group_vars.
-      - "docker://{{ item.item.source | default(source_registry) }}/{{ item.item.repo }}:{{ item.item.source_tag | default(item.item.tag) }}"
+      # frozen until someone bumps the tag in group_vars. source_repo is the
+      # same idea for the repo path itself: it lets a source registry (e.g.
+      # dhi.io) name an artifact under a different path than the one it lands
+      # under in our own ECR. Defaulting to item.repo makes it a no-op for
+      # every artifact that doesn't set it.
+      - "docker://{{ item.item.source | default(source_registry) }}/{{ item.item.source_repo | default(item.item.repo) }}:{{ item.item.source_tag | default(item.item.tag) }}"
       - "docker://{{ target_registry }}/{{ item.item.repo }}:{{ item.item.tag }}"
   loop: "{{ _skopeo_results }}"
   loop_control:
