@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deployment Pipeline</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      /* ClickHouse design tokens (dark theme) — see colors_and_type.css */
+      --ch-color-bg: #1f1f1c;
+      --ch-color-bg-muted: #282828;
+      --ch-color-stroke: #323232;
+      --ch-color-stroke-intense: #414141;
+      --ch-color-text: #ffffff;
+      --ch-color-text-muted: #b3b6bd;
+      --ch-color-accent: #faff69;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--ch-color-bg);
+      min-height: 100vh;
+      padding: 2rem;
+      color: var(--ch-color-text);
+    }
+
+    .container {
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+
+    .header {
+      margin-bottom: 2rem;
+    }
+
+    .header-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .ch-mark {
+      width: 20px;
+      height: 20px;
+      color: var(--ch-color-text);
+      flex-shrink: 0;
+    }
+
+    .pulse-dot {
+      width: 10px;
+      height: 10px;
+      background: var(--ch-color-accent);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--ch-color-text-muted);
+      font-size: 0.875rem;
+      margin-left: 2rem;
+    }
+
+    .diagram-container {
+      background: rgba(40, 40, 40, 0.6);
+      border-radius: 0.5rem;
+      border: 1px solid var(--ch-color-stroke);
+      padding: 1.5rem;
+      overflow-x: auto;
+    }
+
+    svg {
+      width: 100%;
+      min-width: 900px;
+      display: block;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 2rem;
+    }
+
+    .card {
+      background: rgba(40, 40, 40, 0.6);
+      border-radius: 0.5rem;
+      border: 1px solid var(--ch-color-stroke);
+      padding: 1.25rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .card-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .card-dot.babyblue { background: #00cbeb; }
+    .card-dot.teal     { background: #6df8e1; }
+    .card-dot.violet   { background: #bb33ff; }
+    .card-dot.sunrise  { background: #ffc300; }
+    .card-dot.red      { background: #ff2323; }
+    .card-dot.orange   { background: #ff7729; }
+    .card-dot.slate    { background: #9a9ea7; }
+
+    /* Badge pills (Click UI .ch-badge pattern) — optional tag row under a card */
+    .badges { display: flex; gap: 0.375rem; flex-wrap: wrap; margin-top: 0.75rem; }
+    .badge {
+      display: inline-flex; align-items: center; border-radius: 9999px;
+      padding: 0.125rem 0.5rem; font-size: 0.6875rem; font-family: 'JetBrains Mono', monospace;
+    }
+    .badge.babyblue { background: rgba(0, 203, 235, 0.16); color: #00cbeb; }
+    .badge.teal      { background: rgba(109, 248, 225, 0.14); color: #6df8e1; }
+    .badge.violet    { background: rgba(187, 51, 255, 0.16); color: #bb33ff; }
+    .badge.sunrise   { background: rgba(255, 195, 0, 0.14); color: #ffc300; }
+    .badge.red       { background: rgba(255, 35, 35, 0.16); color: #ff2323; }
+    .badge.orange    { background: rgba(255, 119, 41, 0.16); color: #ff7729; }
+    .badge.slate     { background: rgba(154, 158, 167, 0.18); color: #9a9ea7; }
+
+    .card h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+    }
+
+    .card ul {
+      list-style: none;
+      color: var(--ch-color-text-muted);
+      font-size: 0.75rem;
+    }
+
+    .card li {
+      margin-bottom: 0.375rem;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 1.5rem;
+      color: var(--ch-color-text-muted);
+      font-size: 0.75rem;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 0.5rem;
+      margin-left: auto;
+      flex-shrink: 0;
+      align-items: center;
+    }
+    .toolbar-toggle {
+      background: transparent;
+      border: none;
+      color: var(--ch-color-text-muted);
+      cursor: pointer;
+      font-size: 1.25rem;
+      line-height: 1;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: color 0.2s, background 0.2s;
+    }
+    .toolbar-toggle:hover { color: var(--ch-color-text); background: rgba(50, 50, 50, 0.6); }
+    .toolbar-actions {
+      display: none;
+      gap: 0.5rem;
+    }
+    .toolbar.expanded .toolbar-actions { display: flex; }
+    .toolbar-actions button {
+      background: rgba(50, 50, 50, 0.8);
+      border: 1px solid var(--ch-color-stroke);
+      color: var(--ch-color-text-muted);
+      padding: 0.375rem 0.75rem;
+      border-radius: 0.25rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .toolbar-actions button:hover {
+      background: rgba(65, 65, 65, 0.8);
+      color: var(--ch-color-text);
+      border-color: var(--ch-color-stroke-intense);
+    }
+
+    @media print {
+      body { background: var(--ch-color-bg); padding: 1rem; }
+      .toolbar { display: none !important; }
+    }
+      .ch-mark { min-width: 0; }
+    .nav { margin-top: 0.35rem; font-size: 0.8rem; }
+    .nav a { color: #00cbeb; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .nav strong { color: #faff69; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container" id="report-container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-row">
+        <svg class="ch-mark" viewBox="0 0 54 54" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="12" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="24.001" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="35.998" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="48.001" y="21.0005" width="5.9998" height="11.9996" rx="1.45943" fill="currentColor"></rect>
+        </svg>
+        <div class="pulse-dot"></div>
+        <h1>Deployment Pipeline</h1>
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button onclick="copyAsImage(this)">📋 Copy</button>
+            <button onclick="downloadPNG(this)">🖼️ PNG</button>
+            <button onclick="downloadPDF(this)">📄 PDF</button>
+          </div>
+          <button class="toolbar-toggle" onclick="this.parentElement.classList.toggle('expanded')" title="Export options" aria-label="Export options">⋯</button>
+        </div>
+      </div>
+      <p class="subtitle">How <code>up.sh</code> builds the stack step by step, the airgap image hop, and the teardown order <code>down.sh</code> enforces</p>
+      <p class="subtitle nav">Views: <a href="overview.html">Overview</a> · <a href="aws-infrastructure.html">AWS infrastructure</a> · <a href="clickhouse-components.html">ClickHouse components</a> · <strong>Deployment & airgap pipeline</strong></p>
+    </div>
+
+    <!-- Main Diagram -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1360 790" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="arr-fe" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#00cbeb"/></marker><marker id="arr-be" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#6df8e1"/></marker><marker id="arr-db" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#bb33ff"/></marker><marker id="arr-aws" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ffc300"/></marker><marker id="arr-sec" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ff2323"/></marker><marker id="arr-bus" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ff7729"/></marker><marker id="arr-gen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#9a9ea7"/></marker><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#323232" stroke-width="0.5"/></pattern></defs><rect width="100%" height="100%" fill="url(#grid)"/>
+<rect x="15" y="60" width="1330" height="330" rx="12" fill="rgba(250, 255, 105, 0.03)" stroke="#faff69" stroke-width="1" stroke-dasharray="8,4"/>
+<text x="27" y="77" fill="#faff69" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">scripts/up.sh → ansible-playbook deploy.yml  (every step idempotent · resume with --from &lt;tag&gt;)</text>
+<path d="M 231 150 L 251 150" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="35" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="35" y="100" width="196" height="110" rx="4" fill="rgba(255, 119, 41, 0.16)" stroke="#ff7729" stroke-width="1.5"/>
+<text x="45" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">1–2 · Images</text>
+<text x="45" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">ecr_setup · image_sync</text>
+<text x="45" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: images</text>
+<text x="45" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">ECR repos + skopeo copy</text>
+<text x="45" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">server/keeper/operator</text>
+<text x="45" y="184" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">+ 3 Helm charts</text>
+<path d="M 449 150 L 469 150" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="253" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="253" y="100" width="196" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="263" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">3 · VPC</text>
+<text x="263" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">vpc</text>
+<text x="263" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: vpc</text>
+<text x="263" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">stack -vpc</text>
+<text x="263" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">3 AZ · NAT · S3 GW</text>
+<path d="M 667 150 L 687 150" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="471" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="471" y="100" width="196" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="481" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">4 · EKS</text>
+<text x="481" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">eks_cluster</text>
+<text x="481" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: eks</text>
+<text x="481" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">stack -eks</text>
+<text x="481" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">control plane · OIDC</text>
+<text x="481" y="184" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">KMS secrets key</text>
+<path d="M 885 150 L 905 150" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="689" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="689" y="100" width="196" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="699" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">5 · Node groups</text>
+<text x="699" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">eks_nodegroups</text>
+<text x="699" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: nodes</text>
+<text x="699" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">stack -nodegroups</text>
+<text x="699" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">keeper · server · operator</text>
+<text x="699" y="184" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">NVMe launch template</text>
+<path d="M 1103 150 L 1123 150" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="907" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="907" y="100" width="196" height="110" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="917" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">6 · S3 + IRSA</text>
+<text x="917" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">storage_iam</text>
+<text x="917" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: storage</text>
+<text x="917" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">stack -irsa</text>
+<text x="917" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">bucket · CH/EBS roles</text>
+<text x="917" y="184" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">KMS CMKs</text>
+<rect x="1125" y="100" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="1125" y="100" width="196" height="110" rx="4" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1.5"/>
+<text x="1135" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">7 · K8s prereqs</text>
+<text x="1135" y="132" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">k8s_prereqs</text>
+<text x="1135" y="145" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: prereqs</text>
+<text x="1135" y="158" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">snapshot CRDs</text>
+<text x="1135" y="171" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">EBS CSI add-on</text>
+<text x="1135" y="184" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">gp3-encrypted class</text>
+<path d="M 1223.0 210 L 1223.0 235 L 133.0 235 L 133.0 258" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<path d="M 231 310 L 251 310" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="35" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="35" y="260" width="196" height="110" rx="4" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1.5"/>
+<text x="45" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">8 · Operator</text>
+<text x="45" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">clickhouse_operator</text>
+<text x="45" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: operator</text>
+<text x="45" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">helm: clickhouse-</text>
+<text x="45" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  operator-helm</text>
+<text x="45" y="344" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">webhooks off</text>
+<path d="M 449 310 L 469 310" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="253" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="253" y="260" width="196" height="110" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<text x="263" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">9 · Cluster</text>
+<text x="263" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">clickhouse_cluster</text>
+<text x="263" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: cluster</text>
+<text x="263" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">helm: onprem-</text>
+<text x="263" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  clickhouse-cluster</text>
+<text x="263" y="344" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">passwords · TLS (fips)</text>
+<path d="M 667 310 L 687 310" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="471" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="471" y="260" width="196" height="110" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="481" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">10 · Preflight</text>
+<text x="481" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">clickhouse_preflight</text>
+<text x="481" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: preflight</text>
+<text x="481" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">kubectl preflight</text>
+<text x="481" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">node size · cache</text>
+<text x="481" y="344" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">storage class</text>
+<path d="M 885 310 L 905 310" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="689" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="689" y="260" width="196" height="110" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="699" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">11 · Verify</text>
+<text x="699" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">clickhouse_verify</text>
+<text x="699" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: verify</text>
+<text x="699" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">write on replica A</text>
+<text x="699" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">read on replica B</text>
+<path d="M 1103 310 L 1123 310" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="907" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="907" y="260" width="196" height="110" rx="4" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1.5"/>
+<text x="917" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">12 · Load balancer</text>
+<text x="917" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">clickhouse_loadbalancer</text>
+<text x="917" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: lb</text>
+<text x="917" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">svc default-us-01-lb</text>
+<text x="917" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">none|internal|public</text>
+<text x="917" y="344" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">probe via NLB</text>
+<rect x="1125" y="260" width="196" height="110" rx="4" fill="#282828"/>
+<rect x="1125" y="260" width="196" height="110" rx="4" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="1135" y="278" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">13–15 · Langfuse (opt.)</text>
+<text x="1135" y="292" fill="white" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">langfuse_* (3 roles)</text>
+<text x="1135" y="305" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tags: langfuse</text>
+<text x="1135" y="318" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">stack -langfuse-irsa</text>
+<text x="1135" y="331" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">CH db + user</text>
+<text x="1135" y="344" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">helm langfuse 2.1.0</text>
+<text x="787.0" y="228" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" font-style="italic" text-anchor="middle">Steps 1–12 follow ClickHouse's deploy-aws tutorial one-to-one</text>
+<rect x="15" y="420" width="830" height="250" rx="10" fill="rgba(255, 119, 41, 0.03)" stroke="#ff7729" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="27" y="437" fill="#ff7729" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">Airgap supply chain — the one hop across accounts</text>
+<path d="M 225 505 L 318 505" fill="none" stroke="#ff7729" stroke-width="1.8" marker-end="url(#arr-bus)"/>
+<path d="M 225 600 L 318 560" fill="none" stroke="#ff7729" stroke-width="1.8" stroke-dasharray="5,4" marker-end="url(#arr-bus)"/>
+<path d="M 530 530 L 598 530" fill="none" stroke="#ff7729" stroke-width="1.8" marker-end="url(#arr-bus)"/>
+<path d="M 705 580 L 705 612" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="254.2" y="483" width="31.5" height="14" rx="7" fill="#1f1f1c"/><rect x="254.2" y="483" width="31.5" height="14" rx="7" fill="rgba(255, 119, 41, 0.16)"/><text x="270" y="493" fill="#ff7729" font-size="8" font-family="JetBrains Mono" text-anchor="middle">read</text>
+<rect x="545.8" y="508" width="36.4" height="14" rx="7" fill="#1f1f1c"/><rect x="545.8" y="508" width="36.4" height="14" rx="7" fill="rgba(255, 119, 41, 0.16)"/><text x="564" y="518" fill="#ff7729" font-size="8" font-family="JetBrains Mono" text-anchor="middle">write</text>
+<rect x="30" y="460" width="195" height="90" rx="4" fill="#282828"/>
+<rect x="30" y="460" width="195" height="90" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="38" y="467" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20.7682 28.7733C20.7682 29.3908 20.8361 29.8915 20.955 30.2587C21.0909 30.6258 21.2608 31.0264 21.4986 31.4603C21.5835 31.5938 21.6175 31.7273 21.6175 31.8442C21.6175 32.0111 21.5156 32.178 21.2948 32.3449L20.2246 33.0458C20.0718 33.146 19.9189 33.196 19.783 33.196C19.6131 33.196 19.4433 33.1126 19.2734 32.9624C19.0356 32.712 18.8318 32.445 18.6619 32.178C18.4921 31.8942 18.3222 31.5771 18.1354 31.1933C16.8105 32.7287 15.1458 33.4964 13.1415 33.4964C11.7146 33.4964 10.5766 33.0959 9.74427 32.2948C8.91196 31.4937 8.4873 30.4256 8.4873 29.0904C8.4873 27.6718 8.99689 26.5202 10.033 25.6523C11.0692 24.7845 12.445 24.3506 14.1946 24.3506C14.7721 24.3506 15.3666 24.4006 15.9951 24.4841C16.6236 24.5675 17.2691 24.701 17.9485 24.8512V23.6329C17.9485 22.3645 17.6767 21.4799 17.1502 20.9626C16.6066 20.4452 15.6894 20.1948 14.3815 20.1948C13.7869 20.1948 13.1754 20.2616 12.547 20.4118C11.9185 20.562 11.307 20.7456 10.7125 20.9793C10.4407 21.0961 10.2369 21.1628 10.118 21.1962C9.99906 21.2296 9.91413 21.2463 9.84619 21.2463C9.60838 21.2463 9.48948 21.0794 9.48948 20.7289V19.9111C9.48948 19.6441 9.52345 19.4438 9.60838 19.327C9.69331 19.2102 9.84619 19.0933 10.084 18.9765C10.6785 18.6761 11.3919 18.4258 12.2242 18.2255C13.0565 18.0085 13.9398 17.9084 14.874 17.9084C16.8954 17.9084 18.3732 18.359 19.3244 19.2602C20.2586 20.1615 20.7342 21.53 20.7342 23.3659V28.7733H20.7682ZM13.8719 31.3101C14.4324 31.3101 15.0099 31.21 15.6214 31.0097C16.2329 30.8094 16.7765 30.4422 17.2351 29.9416C17.5069 29.6245 17.7107 29.274 17.8126 28.8734C17.9145 28.4729 17.9825 27.9889 17.9825 27.4214V26.7205C17.4899 26.6036 16.9633 26.5035 16.4198 26.4367C15.8762 26.37 15.3497 26.3366 14.8231 26.3366C13.685 26.3366 12.8527 26.5536 12.2922 27.0042C11.7316 27.4548 11.4599 28.089 11.4599 28.9235C11.4599 29.7079 11.6637 30.292 12.0883 30.6926C12.496 31.1098 13.0905 31.3101 13.8719 31.3101ZM27.5116 33.1126C27.2059 33.1126 27.0021 33.0625 26.8662 32.9457C26.7303 32.8455 26.6114 32.6119 26.5095 32.2948L22.5178 19.3938C22.4158 19.06 22.3649 18.843 22.3649 18.7262C22.3649 18.4591 22.5008 18.3089 22.7725 18.3089H24.4372C24.7599 18.3089 24.9807 18.359 25.0996 18.4758C25.2355 18.576 25.3374 18.8096 25.4394 19.1267L28.293 30.1752L30.9428 19.1267C31.0278 18.7929 31.1297 18.576 31.2656 18.4758C31.4014 18.3757 31.6392 18.3089 31.945 18.3089H33.3039C33.6266 18.3089 33.8474 18.359 33.9833 18.4758C34.1192 18.576 34.2381 18.8096 34.3061 19.1267L36.9898 30.3087L39.9284 19.1267C40.0303 18.7929 40.1492 18.576 40.2681 18.4758C40.404 18.3757 40.6249 18.3089 40.9306 18.3089H42.5103C42.7821 18.3089 42.9349 18.4424 42.9349 18.7262C42.9349 18.8096 42.918 18.8931 42.901 18.9932C42.884 19.0933 42.85 19.2269 42.7821 19.4104L38.6884 32.3115C38.5865 32.6453 38.4676 32.8622 38.3317 32.9624C38.1959 33.0625 37.975 33.1293 37.6863 33.1293H36.2255C35.9027 33.1293 35.6819 33.0792 35.546 32.9624C35.4101 32.8455 35.2912 32.6286 35.2233 32.2948L32.5905 21.53L29.9746 32.2781C29.8897 32.6119 29.7878 32.8288 29.6519 32.9457C29.516 33.0625 29.2782 33.1126 28.9724 33.1126H27.5116ZM49.3387 33.5632C48.4554 33.5632 47.5721 33.4631 46.7228 33.2628C45.8735 33.0625 45.2111 32.8455 44.7694 32.5952C44.4977 32.445 44.3108 32.2781 44.2429 32.1279C44.1749 31.9777 44.141 31.8108 44.141 31.6606V30.8094C44.141 30.4589 44.2768 30.292 44.5316 30.292C44.6336 30.292 44.7355 30.3087 44.8374 30.3421C44.9393 30.3755 45.0922 30.4422 45.262 30.509C45.8396 30.7593 46.468 30.9596 47.1305 31.0931C47.8099 31.2267 48.4724 31.2934 49.1518 31.2934C50.222 31.2934 51.0543 31.1098 51.6318 30.7427C52.2093 30.3755 52.5151 29.8414 52.5151 29.1571C52.5151 28.6898 52.3622 28.306 52.0564 27.9889C51.7507 27.6718 51.1732 27.3881 50.3409 27.121L47.8779 26.37C46.6379 25.9861 45.7207 25.4187 45.1601 24.6677C44.5996 23.9333 44.3108 23.1155 44.3108 22.2477C44.3108 21.5467 44.4637 20.9292 44.7694 20.3951C45.0752 19.8611 45.4829 19.3938 45.9924 19.0266C46.502 18.6427 47.0795 18.359 47.759 18.1587C48.4384 17.9584 49.1518 17.875 49.8992 17.875C50.2729 17.875 50.6636 17.8917 51.0373 17.9418C51.428 17.9918 51.7847 18.0586 52.1414 18.1253C52.4811 18.2088 52.8038 18.2922 53.1096 18.3924C53.4153 18.4925 53.6531 18.5927 53.823 18.6928C54.0608 18.8263 54.2307 18.9598 54.3326 19.11C54.4345 19.2435 54.4854 19.4271 54.4854 19.6608V20.4452C54.4854 20.7957 54.3496 20.9793 54.0948 20.9793C53.9589 20.9793 53.7381 20.9125 53.4493 20.779C52.4811 20.3451 51.394 20.1281 50.188 20.1281C49.2198 20.1281 48.4554 20.2783 47.9288 20.5954C47.4023 20.9125 47.1305 21.3965 47.1305 22.0808C47.1305 22.5481 47.3004 22.9486 47.6401 23.2657C47.9798 23.5828 48.6083 23.8999 49.5085 24.1837L51.9206 24.9347C53.1435 25.3185 54.0268 25.8526 54.5534 26.5369C55.08 27.2212 55.3347 28.0056 55.3347 28.8734C55.3347 29.5911 55.1819 30.242 54.8931 30.8094C54.5874 31.3769 54.1797 31.8775 53.6531 32.2781C53.1266 32.6953 52.4981 32.9957 51.7677 33.2127C51.0033 33.4464 50.205 33.5632 49.3387 33.5632Z" fill="white" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M52.5484 41.6741C46.96 45.7297 38.8407 47.8827 31.8595 47.8827C22.0755 47.8827 13.2598 44.3278 6.60126 38.4197C6.07469 37.9524 6.5503 37.3182 7.17878 37.6853C14.3809 41.791 23.2645 44.2777 32.454 44.2777C38.6539 44.2777 45.4653 43.0093 51.7331 40.4057C52.6674 39.9885 53.4657 41.0066 52.5484 41.6741Z" fill="#FF9900" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M54.8755 39.0706C54.1621 38.1693 50.1534 38.6366 48.3359 38.8536C47.7923 38.9204 47.7074 38.453 48.2 38.1026C51.3934 35.8995 56.6421 36.5337 57.2536 37.2681C57.8651 38.0191 57.0837 43.1762 54.0942 45.6463C53.6355 46.0301 53.1939 45.8298 53.3977 45.3292C54.0772 43.6769 55.5889 39.9551 54.8755 39.0706Z" fill="#FF9900" /></svg>
+<text x="56" y="478" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Source ECR</text>
+<text x="56" y="492" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">ClickHouse <SOURCE_ECR_ACCOUNT_ID></text>
+<text x="56" y="504" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">profile private-us (SSO)</text>
+<text x="56" y="516" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">ClickHouseAirgapECR-</text>
+<text x="56" y="528" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  PullRole · read-only</text>
+<rect x="30" y="570" width="195" height="72" rx="4" fill="#282828"/>
+<rect x="30" y="570" width="195" height="72" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="38" y="577" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path d="M21 12C21 16.9706 16.9706 21 12 21M21 12C21 7.02944 16.9706 3 12 3M21 12H3M12 21C7.02944 21 3 16.9706 3 12M12 21C14.2512 18.5355 15.5305 15.3372 15.6 12C15.5305 8.66283 14.2512 5.46452 12 3M12 21C9.74885 18.5355 8.46952 15.3372 8.4 12C8.46952 8.66283 9.74885 5.46452 12 3M3 12C3 7.02944 7.02944 3 12 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="56" y="588" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Public registries</text>
+<text x="56" y="602" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">registry.k8s.io</text>
+<text x="56" y="614" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">cgr.dev · docker.langfuse.com</text>
+<text x="56" y="626" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">langfuse charts (helm-http)</text>
+<rect x="320" y="470" width="210" height="120" rx="4" fill="#282828"/>
+<rect x="320" y="470" width="210" height="120" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="328" y="477" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 9H3M8.62 9v12" /> <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2Z" clip-rule="evenodd" /></svg>
+<text x="346" y="488" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">skopeo on workstation</text>
+<text x="346" y="502" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">state/skopeo-auth.json</text>
+<text x="346" y="515" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  (short-lived tokens)</text>
+<text x="346" y="528" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">container images → ECR</text>
+<text x="346" y="541" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">Helm charts as OCI artifacts</text>
+<text x="346" y="554" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">tag gains -fips when fips</text>
+<text x="346" y="567" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">--tags images to rerun</text>
+<rect x="600" y="470" width="210" height="110" rx="4" fill="#282828"/>
+<rect x="600" y="470" width="210" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="608" y="477" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20.7682 28.7733C20.7682 29.3908 20.8361 29.8915 20.955 30.2587C21.0909 30.6258 21.2608 31.0264 21.4986 31.4603C21.5835 31.5938 21.6175 31.7273 21.6175 31.8442C21.6175 32.0111 21.5156 32.178 21.2948 32.3449L20.2246 33.0458C20.0718 33.146 19.9189 33.196 19.783 33.196C19.6131 33.196 19.4433 33.1126 19.2734 32.9624C19.0356 32.712 18.8318 32.445 18.6619 32.178C18.4921 31.8942 18.3222 31.5771 18.1354 31.1933C16.8105 32.7287 15.1458 33.4964 13.1415 33.4964C11.7146 33.4964 10.5766 33.0959 9.74427 32.2948C8.91196 31.4937 8.4873 30.4256 8.4873 29.0904C8.4873 27.6718 8.99689 26.5202 10.033 25.6523C11.0692 24.7845 12.445 24.3506 14.1946 24.3506C14.7721 24.3506 15.3666 24.4006 15.9951 24.4841C16.6236 24.5675 17.2691 24.701 17.9485 24.8512V23.6329C17.9485 22.3645 17.6767 21.4799 17.1502 20.9626C16.6066 20.4452 15.6894 20.1948 14.3815 20.1948C13.7869 20.1948 13.1754 20.2616 12.547 20.4118C11.9185 20.562 11.307 20.7456 10.7125 20.9793C10.4407 21.0961 10.2369 21.1628 10.118 21.1962C9.99906 21.2296 9.91413 21.2463 9.84619 21.2463C9.60838 21.2463 9.48948 21.0794 9.48948 20.7289V19.9111C9.48948 19.6441 9.52345 19.4438 9.60838 19.327C9.69331 19.2102 9.84619 19.0933 10.084 18.9765C10.6785 18.6761 11.3919 18.4258 12.2242 18.2255C13.0565 18.0085 13.9398 17.9084 14.874 17.9084C16.8954 17.9084 18.3732 18.359 19.3244 19.2602C20.2586 20.1615 20.7342 21.53 20.7342 23.3659V28.7733H20.7682ZM13.8719 31.3101C14.4324 31.3101 15.0099 31.21 15.6214 31.0097C16.2329 30.8094 16.7765 30.4422 17.2351 29.9416C17.5069 29.6245 17.7107 29.274 17.8126 28.8734C17.9145 28.4729 17.9825 27.9889 17.9825 27.4214V26.7205C17.4899 26.6036 16.9633 26.5035 16.4198 26.4367C15.8762 26.37 15.3497 26.3366 14.8231 26.3366C13.685 26.3366 12.8527 26.5536 12.2922 27.0042C11.7316 27.4548 11.4599 28.089 11.4599 28.9235C11.4599 29.7079 11.6637 30.292 12.0883 30.6926C12.496 31.1098 13.0905 31.3101 13.8719 31.3101ZM27.5116 33.1126C27.2059 33.1126 27.0021 33.0625 26.8662 32.9457C26.7303 32.8455 26.6114 32.6119 26.5095 32.2948L22.5178 19.3938C22.4158 19.06 22.3649 18.843 22.3649 18.7262C22.3649 18.4591 22.5008 18.3089 22.7725 18.3089H24.4372C24.7599 18.3089 24.9807 18.359 25.0996 18.4758C25.2355 18.576 25.3374 18.8096 25.4394 19.1267L28.293 30.1752L30.9428 19.1267C31.0278 18.7929 31.1297 18.576 31.2656 18.4758C31.4014 18.3757 31.6392 18.3089 31.945 18.3089H33.3039C33.6266 18.3089 33.8474 18.359 33.9833 18.4758C34.1192 18.576 34.2381 18.8096 34.3061 19.1267L36.9898 30.3087L39.9284 19.1267C40.0303 18.7929 40.1492 18.576 40.2681 18.4758C40.404 18.3757 40.6249 18.3089 40.9306 18.3089H42.5103C42.7821 18.3089 42.9349 18.4424 42.9349 18.7262C42.9349 18.8096 42.918 18.8931 42.901 18.9932C42.884 19.0933 42.85 19.2269 42.7821 19.4104L38.6884 32.3115C38.5865 32.6453 38.4676 32.8622 38.3317 32.9624C38.1959 33.0625 37.975 33.1293 37.6863 33.1293H36.2255C35.9027 33.1293 35.6819 33.0792 35.546 32.9624C35.4101 32.8455 35.2912 32.6286 35.2233 32.2948L32.5905 21.53L29.9746 32.2781C29.8897 32.6119 29.7878 32.8288 29.6519 32.9457C29.516 33.0625 29.2782 33.1126 28.9724 33.1126H27.5116ZM49.3387 33.5632C48.4554 33.5632 47.5721 33.4631 46.7228 33.2628C45.8735 33.0625 45.2111 32.8455 44.7694 32.5952C44.4977 32.445 44.3108 32.2781 44.2429 32.1279C44.1749 31.9777 44.141 31.8108 44.141 31.6606V30.8094C44.141 30.4589 44.2768 30.292 44.5316 30.292C44.6336 30.292 44.7355 30.3087 44.8374 30.3421C44.9393 30.3755 45.0922 30.4422 45.262 30.509C45.8396 30.7593 46.468 30.9596 47.1305 31.0931C47.8099 31.2267 48.4724 31.2934 49.1518 31.2934C50.222 31.2934 51.0543 31.1098 51.6318 30.7427C52.2093 30.3755 52.5151 29.8414 52.5151 29.1571C52.5151 28.6898 52.3622 28.306 52.0564 27.9889C51.7507 27.6718 51.1732 27.3881 50.3409 27.121L47.8779 26.37C46.6379 25.9861 45.7207 25.4187 45.1601 24.6677C44.5996 23.9333 44.3108 23.1155 44.3108 22.2477C44.3108 21.5467 44.4637 20.9292 44.7694 20.3951C45.0752 19.8611 45.4829 19.3938 45.9924 19.0266C46.502 18.6427 47.0795 18.359 47.759 18.1587C48.4384 17.9584 49.1518 17.875 49.8992 17.875C50.2729 17.875 50.6636 17.8917 51.0373 17.9418C51.428 17.9918 51.7847 18.0586 52.1414 18.1253C52.4811 18.2088 52.8038 18.2922 53.1096 18.3924C53.4153 18.4925 53.6531 18.5927 53.823 18.6928C54.0608 18.8263 54.2307 18.9598 54.3326 19.11C54.4345 19.2435 54.4854 19.4271 54.4854 19.6608V20.4452C54.4854 20.7957 54.3496 20.9793 54.0948 20.9793C53.9589 20.9793 53.7381 20.9125 53.4493 20.779C52.4811 20.3451 51.394 20.1281 50.188 20.1281C49.2198 20.1281 48.4554 20.2783 47.9288 20.5954C47.4023 20.9125 47.1305 21.3965 47.1305 22.0808C47.1305 22.5481 47.3004 22.9486 47.6401 23.2657C47.9798 23.5828 48.6083 23.8999 49.5085 24.1837L51.9206 24.9347C53.1435 25.3185 54.0268 25.8526 54.5534 26.5369C55.08 27.2212 55.3347 28.0056 55.3347 28.8734C55.3347 29.5911 55.1819 30.242 54.8931 30.8094C54.5874 31.3769 54.1797 31.8775 53.6531 32.2781C53.1266 32.6953 52.4981 32.9957 51.7677 33.2127C51.0033 33.4464 50.205 33.5632 49.3387 33.5632Z" fill="white" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M52.5484 41.6741C46.96 45.7297 38.8407 47.8827 31.8595 47.8827C22.0755 47.8827 13.2598 44.3278 6.60126 38.4197C6.07469 37.9524 6.5503 37.3182 7.17878 37.6853C14.3809 41.791 23.2645 44.2777 32.454 44.2777C38.6539 44.2777 45.4653 43.0093 51.7331 40.4057C52.6674 39.9885 53.4657 41.0066 52.5484 41.6741Z" fill="#FF9900" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M54.8755 39.0706C54.1621 38.1693 50.1534 38.6366 48.3359 38.8536C47.7923 38.9204 47.7074 38.453 48.2 38.1026C51.3934 35.8995 56.6421 36.5337 57.2536 37.2681C57.8651 38.0191 57.0837 43.1762 54.0942 45.6463C53.6355 46.0301 53.1939 45.8298 53.3977 45.3292C54.0772 43.6769 55.5889 39.9551 54.8755 39.0706Z" fill="#FF9900" /></svg>
+<text x="626" y="488" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Target ECR</text>
+<text x="626" y="502" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start"><YOUR_ACCOUNT_ID> · us-east-1</text>
+<text x="626" y="514" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">clickhouse-server|keeper|</text>
+<text x="626" y="526" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  operator · kube-rbac-proxy</text>
+<text x="626" y="538" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">helm/* charts</text>
+<text x="626" y="550" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="start">fips: dkr-ecr-fips…on.aws</text>
+<rect x="600" y="614" width="210" height="44" rx="4" fill="#282828"/>
+<rect x="600" y="614" width="210" height="44" rx="4" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1.5"/>
+<text x="610" y="632" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">EKS nodes pull only from here</text>
+<text x="610" y="646" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">no route to ClickHouse after install</text>
+<rect x="870" y="420" width="475" height="250" rx="10" fill="rgba(255, 35, 35, 0.03)" stroke="#ff2323" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="882" y="437" fill="#ff2323" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">scripts/down.sh — teardown is not the reverse of bring-up</text>
+<path d="M 930 472 L 930 486" fill="none" stroke="#ff2323" stroke-width="1.5" marker-end="url(#arr-sec)"/>
+<rect x="885" y="452" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="452" width="90" height="20" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="930.0" y="466" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">lf-app</text>
+<text x="985" y="466" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">Langfuse first: its tables + PVCs need CH, operator, CSI</text>
+<path d="M 930 507 L 930 521" fill="none" stroke="#ff2323" stroke-width="1.5" marker-end="url(#arr-sec)"/>
+<rect x="885" y="487" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="487" width="90" height="20" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="930.0" y="501" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">lb</text>
+<text x="985" y="501" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">NLB before EKS, or it is orphaned and blocks VPC delete</text>
+<path d="M 930 542 L 930 556" fill="none" stroke="#ff2323" stroke-width="1.5" marker-end="url(#arr-sec)"/>
+<rect x="885" y="522" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="522" width="90" height="20" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="930.0" y="536" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">cluster</text>
+<text x="985" y="536" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">while nodes still run: operator + CSI clean up Keeper PVCs</text>
+<path d="M 930 577 L 930 591" fill="none" stroke="#ff2323" stroke-width="1.5" marker-end="url(#arr-sec)"/>
+<rect x="885" y="557" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="557" width="90" height="20" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="930.0" y="571" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">nodes</text>
+<text x="985" y="571" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">default mode stops here (~$0.15/hr floor)</text>
+<path d="M 930 612 L 930 626" fill="none" stroke="#ff2323" stroke-width="1.5" marker-end="url(#arr-sec)"/>
+<rect x="885" y="592" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="592" width="90" height="20" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<text x="930.0" y="606" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">--all</text>
+<text x="985" y="606" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">operator · prereqs · storage · eks · vpc</text>
+<rect x="885" y="627" width="90" height="20" rx="4" fill="#282828"/>
+<rect x="885" y="627" width="90" height="20" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="930.0" y="641" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">kept</text>
+<text x="985" y="641" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">S3 buckets (data) and ECR images — never deleted</text>
+<rect x="15" y="690" width="1330" height="50" rx="4" fill="#282828"/>
+<rect x="15" y="690" width="1330" height="50" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="23" y="697" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path stroke="currentColor" stroke-width="1.5" d="M19 19H3C2.44772 19 2 18.5523 2 18V6C2 5.44772 2.44772 5 3 5H6.62869C6.98835 5 7.32032 5.19315 7.49805 5.50583L8.34405 6.99417C8.52179 7.30685 8.85375 7.5 9.21342 7.5H19C19.5523 7.5 20 7.94772 20 8.5V9.5V18C20 18.5523 19.5523 19 19 19Z" /></svg>
+<text x="41" y="708" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">state/  (gitignored, back it up)</text>
+<text x="41" y="722" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">kubeconfig · clickhouse-admin-password · clickhouse-prometheus-password · clickhouse-tls-{ca,cert,key}.pem · preflight/ · skopeo-auth.json · langfuse-* secrets</text>
+<text x="20" y="768" fill="#faff69" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">Legend</text>
+<rect x="78" y="760" width="16" height="10" rx="2" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1"/>
+<text x="100" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">CloudFormation stack</text>
+<rect x="214.0" y="760" width="16" height="10" rx="2" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1"/>
+<text x="236.0" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">K8s / Helm (operator)</text>
+<rect x="354.6" y="760" width="16" height="10" rx="2" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1"/>
+<text x="376.6" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Helm (cluster)</text>
+<rect x="463.0" y="760" width="16" height="10" rx="2" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1"/>
+<text x="485.0" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Check / tooling</text>
+<rect x="576.0" y="760" width="16" height="10" rx="2" fill="rgba(255, 119, 41, 0.16)" stroke="#ff7729" stroke-width="1"/>
+<text x="598.0" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Image mirror</text>
+<rect x="675.2" y="760" width="16" height="10" rx="2" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1"/>
+<text x="697.2" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">IAM / teardown</text>
+<rect x="783.6" y="760" width="16" height="10" rx="2" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1" stroke-dasharray="3,2"/>
+<text x="805.6" y="768" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Optional (Langfuse)</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header"><div class="card-dot orange"></div><h3>Airgap</h3></div>
+        <ul>
+          <li>• The only cross-account traffic is Step 2: skopeo reads ClickHouse's ECR and writes yours</li>
+          <li>• Third-party images (kube-rbac-proxy, Chainguard Postgres/Valkey, Langfuse) are mirrored the same way</li>
+          <li>• The operator's image base path is overridden, so the debug/init pods it generates also pull from your ECR</li>
+        </ul>
+        <div class="badges"><span class="badge orange">skopeo</span><span class="badge orange">OCI charts</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot sunrise"></div><h3>Where state lives</h3></div>
+        <ul>
+          <li>• AWS infrastructure: one CloudFormation stack per infra step (vpc, eks, nodegroups, irsa, langfuse-irsa)</li>
+          <li>• Kubernetes: Helm releases (operator, cluster, langfuse), the preflight chart via <code>helm template</code>, plus direct objects (StorageClass, LB Service, Secrets)</li>
+          <li>• Local: <code>state/</code> holds every generated secret; lose it and you lose the admin password</li>
+        </ul>
+        <div class="badges"><span class="badge sunrise">5 stacks</span><span class="badge sunrise">3 Helm releases</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot red"></div><h3>Cost meter</h3></div>
+        <ul>
+          <li>• Everything up: about $2.34/hr (8 EC2 nodes, EKS, NAT)</li>
+          <li>• <code>down.sh</code>: about $0.15/hr, the EKS control plane plus NAT; back in ~15 min with <code>up.sh --from nodes</code></li>
+          <li>• <code>down.sh --all</code>: about $0, leaving only S3 data and ECR images</li>
+        </ul>
+        <div class="badges"><span class="badge red">up.sh</span><span class="badge red">down.sh</span><span class="badge red">--nodes-only</span></div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">ch-gov · ClickHouse Private on AWS EKS · generated from ansible/group_vars/all.yml defaults (fips: false unless noted)</p>
+  </div>
+
+  <script>
+    async function copyAsImage(btn) {
+      const orig = btn.textContent;
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        btn.textContent = '✓ Copied!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPNG(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const link = document.createElement('a');
+        link.download = 'deployment-pipeline.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPDF(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const imgData = canvas.toDataURL('image/png');
+        const { jsPDF } = window.jspdf;
+        const orientation = canvas.width > canvas.height ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height], hotfixes: ['px_scaling'] });
+        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+        pdf.save('deployment-pipeline.pdf');
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+  </script>
+</body>
+</html>

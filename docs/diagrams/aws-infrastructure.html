@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AWS Infrastructure</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      /* ClickHouse design tokens (dark theme) — see colors_and_type.css */
+      --ch-color-bg: #1f1f1c;
+      --ch-color-bg-muted: #282828;
+      --ch-color-stroke: #323232;
+      --ch-color-stroke-intense: #414141;
+      --ch-color-text: #ffffff;
+      --ch-color-text-muted: #b3b6bd;
+      --ch-color-accent: #faff69;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--ch-color-bg);
+      min-height: 100vh;
+      padding: 2rem;
+      color: var(--ch-color-text);
+    }
+
+    .container {
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+
+    .header {
+      margin-bottom: 2rem;
+    }
+
+    .header-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .ch-mark {
+      width: 20px;
+      height: 20px;
+      color: var(--ch-color-text);
+      flex-shrink: 0;
+    }
+
+    .pulse-dot {
+      width: 10px;
+      height: 10px;
+      background: var(--ch-color-accent);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--ch-color-text-muted);
+      font-size: 0.875rem;
+      margin-left: 2rem;
+    }
+
+    .diagram-container {
+      background: rgba(40, 40, 40, 0.6);
+      border-radius: 0.5rem;
+      border: 1px solid var(--ch-color-stroke);
+      padding: 1.5rem;
+      overflow-x: auto;
+    }
+
+    svg {
+      width: 100%;
+      min-width: 900px;
+      display: block;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 2rem;
+    }
+
+    .card {
+      background: rgba(40, 40, 40, 0.6);
+      border-radius: 0.5rem;
+      border: 1px solid var(--ch-color-stroke);
+      padding: 1.25rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .card-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .card-dot.babyblue { background: #00cbeb; }
+    .card-dot.teal     { background: #6df8e1; }
+    .card-dot.violet   { background: #bb33ff; }
+    .card-dot.sunrise  { background: #ffc300; }
+    .card-dot.red      { background: #ff2323; }
+    .card-dot.orange   { background: #ff7729; }
+    .card-dot.slate    { background: #9a9ea7; }
+
+    /* Badge pills (Click UI .ch-badge pattern) — optional tag row under a card */
+    .badges { display: flex; gap: 0.375rem; flex-wrap: wrap; margin-top: 0.75rem; }
+    .badge {
+      display: inline-flex; align-items: center; border-radius: 9999px;
+      padding: 0.125rem 0.5rem; font-size: 0.6875rem; font-family: 'JetBrains Mono', monospace;
+    }
+    .badge.babyblue { background: rgba(0, 203, 235, 0.16); color: #00cbeb; }
+    .badge.teal      { background: rgba(109, 248, 225, 0.14); color: #6df8e1; }
+    .badge.violet    { background: rgba(187, 51, 255, 0.16); color: #bb33ff; }
+    .badge.sunrise   { background: rgba(255, 195, 0, 0.14); color: #ffc300; }
+    .badge.red       { background: rgba(255, 35, 35, 0.16); color: #ff2323; }
+    .badge.orange    { background: rgba(255, 119, 41, 0.16); color: #ff7729; }
+    .badge.slate     { background: rgba(154, 158, 167, 0.18); color: #9a9ea7; }
+
+    .card h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+    }
+
+    .card ul {
+      list-style: none;
+      color: var(--ch-color-text-muted);
+      font-size: 0.75rem;
+    }
+
+    .card li {
+      margin-bottom: 0.375rem;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 1.5rem;
+      color: var(--ch-color-text-muted);
+      font-size: 0.75rem;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 0.5rem;
+      margin-left: auto;
+      flex-shrink: 0;
+      align-items: center;
+    }
+    .toolbar-toggle {
+      background: transparent;
+      border: none;
+      color: var(--ch-color-text-muted);
+      cursor: pointer;
+      font-size: 1.25rem;
+      line-height: 1;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: color 0.2s, background 0.2s;
+    }
+    .toolbar-toggle:hover { color: var(--ch-color-text); background: rgba(50, 50, 50, 0.6); }
+    .toolbar-actions {
+      display: none;
+      gap: 0.5rem;
+    }
+    .toolbar.expanded .toolbar-actions { display: flex; }
+    .toolbar-actions button {
+      background: rgba(50, 50, 50, 0.8);
+      border: 1px solid var(--ch-color-stroke);
+      color: var(--ch-color-text-muted);
+      padding: 0.375rem 0.75rem;
+      border-radius: 0.25rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .toolbar-actions button:hover {
+      background: rgba(65, 65, 65, 0.8);
+      color: var(--ch-color-text);
+      border-color: var(--ch-color-stroke-intense);
+    }
+
+    @media print {
+      body { background: var(--ch-color-bg); padding: 1rem; }
+      .toolbar { display: none !important; }
+    }
+      .ch-mark { min-width: 0; }
+    .nav { margin-top: 0.35rem; font-size: 0.8rem; }
+    .nav a { color: #00cbeb; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .nav strong { color: #faff69; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container" id="report-container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-row">
+        <svg class="ch-mark" viewBox="0 0 54 54" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="12" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="24.001" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="35.998" width="5.9998" height="53.9982" rx="1.45943" fill="currentColor"></rect>
+          <rect x="48.001" y="21.0005" width="5.9998" height="11.9996" rx="1.45943" fill="currentColor"></rect>
+        </svg>
+        <div class="pulse-dot"></div>
+        <h1>AWS Infrastructure</h1>
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button onclick="copyAsImage(this)">📋 Copy</button>
+            <button onclick="downloadPNG(this)">🖼️ PNG</button>
+            <button onclick="downloadPDF(this)">📄 PDF</button>
+          </div>
+          <button class="toolbar-toggle" onclick="this.parentElement.classList.toggle('expanded')" title="Export options" aria-label="Export options">⋯</button>
+        </div>
+      </div>
+      <p class="subtitle">Everything <code>scripts/up.sh</code> provisions in the target account, and which ClickHouse components run on which nodes</p>
+      <p class="subtitle nav">Views: <a href="overview.html">Overview</a> · <strong>AWS infrastructure</strong> · <a href="clickhouse-components.html">ClickHouse components</a> · <a href="deployment-pipeline.html">Deployment & airgap pipeline</a></p>
+    </div>
+
+    <!-- Main Diagram -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1360 950" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="arr-fe" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#00cbeb"/></marker><marker id="arr-be" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#6df8e1"/></marker><marker id="arr-db" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#bb33ff"/></marker><marker id="arr-aws" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ffc300"/></marker><marker id="arr-sec" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ff2323"/></marker><marker id="arr-bus" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#ff7729"/></marker><marker id="arr-gen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto-start-reverse"><polygon points="0 0, 10 3.5, 0 7" fill="#9a9ea7"/></marker><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#323232" stroke-width="0.5"/></pattern></defs><rect width="100%" height="100%" fill="url(#grid)"/>
+<rect x="240" y="30" width="1105" height="880" rx="12" fill="rgba(250, 255, 105, 0.03)" stroke="#faff69" stroke-width="1" stroke-dasharray="8,4"/>
+<text x="252" y="47" fill="#faff69" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">AWS account <YOUR_ACCOUNT_ID> · us-east-1 (target, profile sa)</text>
+<rect x="260" y="165" width="800" height="725" rx="10" fill="rgba(255, 195, 0, 0.02)" stroke="#ffc300" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="272" y="182" fill="#ffc300" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">VPC 10.20.0.0/16 · clickhouse-private-vpc</text>
+<rect x="275" y="210" width="246" height="668" rx="8" fill="none" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="4,4"/>
+<text x="287" y="227" fill="#9a9ea7" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">us-east-1a</text>
+<rect x="283" y="228" width="230" height="56" rx="6" fill="rgba(0, 203, 235, 0.05)" stroke="#00cbeb" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="291" y="242" fill="#00cbeb" font-size="8" font-family="JetBrains Mono" text-anchor="start">public subnet 10.20.192.0/20</text>
+<rect x="283" y="296" width="230" height="572" rx="6" fill="rgba(109, 248, 225, 0.03)" stroke="#6df8e1" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="291" y="310" fill="#6df8e1" font-size="8" font-family="JetBrains Mono" text-anchor="start">private subnet 10.20.0.0/18</text>
+<rect x="537" y="210" width="246" height="668" rx="8" fill="none" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="4,4"/>
+<text x="549" y="227" fill="#9a9ea7" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">us-east-1b</text>
+<rect x="545" y="228" width="230" height="56" rx="6" fill="rgba(0, 203, 235, 0.05)" stroke="#00cbeb" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="553" y="242" fill="#00cbeb" font-size="8" font-family="JetBrains Mono" text-anchor="start">public subnet 10.20.208.0/20</text>
+<rect x="545" y="296" width="230" height="572" rx="6" fill="rgba(109, 248, 225, 0.03)" stroke="#6df8e1" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="553" y="310" fill="#6df8e1" font-size="8" font-family="JetBrains Mono" text-anchor="start">private subnet 10.20.64.0/18</text>
+<rect x="799" y="210" width="246" height="668" rx="8" fill="none" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="4,4"/>
+<text x="811" y="227" fill="#9a9ea7" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">us-east-1c</text>
+<rect x="807" y="228" width="230" height="56" rx="6" fill="rgba(0, 203, 235, 0.05)" stroke="#00cbeb" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="815" y="242" fill="#00cbeb" font-size="8" font-family="JetBrains Mono" text-anchor="start">public subnet 10.20.224.0/20</text>
+<rect x="807" y="296" width="230" height="572" rx="6" fill="rgba(109, 248, 225, 0.03)" stroke="#6df8e1" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="815" y="310" fill="#6df8e1" font-size="8" font-family="JetBrains Mono" text-anchor="start">private subnet 10.20.128.0/18</text>
+<rect x="15" y="72" width="205" height="140" rx="8" fill="none" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="4,4"/>
+<text x="27" y="89" fill="#9a9ea7" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">ClickHouse Inc. account</text>
+<path d="M 210 132 L 258 110" fill="none" stroke="#ff7729" stroke-width="1.8" marker-end="url(#arr-bus)"/>
+<rect x="215.4" y="143" width="41.3" height="14" rx="7" fill="#1f1f1c"/><rect x="215.4" y="143" width="41.3" height="14" rx="7" fill="rgba(255, 119, 41, 0.16)"/><text x="236" y="153" fill="#ff7729" font-size="8" font-family="JetBrains Mono" text-anchor="middle">skopeo</text>
+<path d="M 210 280 L 250 280 L 250 56 L 790 56 L 790 70" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<path d="M 580 56 L 580 70" fill="none" stroke="#9a9ea7" stroke-width="1.5" marker-end="url(#arr-gen)"/>
+<rect x="388.4" y="49" width="163.3" height="14" rx="7" fill="#1f1f1c"/><rect x="388.4" y="49" width="163.3" height="14" rx="7" fill="rgba(154, 158, 167, 0.18)"/><text x="470" y="59" fill="#9a9ea7" font-size="8" font-family="JetBrains Mono" text-anchor="middle">cloudformation · helm · kubectl</text>
+<path d="M 430 144 L 430 160 L 670 160 L 670 174" fill="none" stroke="#9a9ea7" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arr-gen)" marker-start="url(#arr-gen)"/>
+<path d="M 640 202 L 640 206 L 470 206 L 470 240" fill="none" stroke="#9a9ea7" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arr-gen)" marker-start="url(#arr-gen)"/>
+<rect x="473.2" y="153" width="153.5" height="14" rx="7" fill="#1f1f1c"/><rect x="473.2" y="153" width="153.5" height="14" rx="7" fill="rgba(154, 158, 167, 0.18)"/><text x="550" y="163" fill="#9a9ea7" font-size="8" font-family="JetBrains Mono" text-anchor="middle">image pulls (ECR API via NAT)</text>
+<path d="M 210 440 L 250 440 L 250 340 L 283 340" fill="none" stroke="#00cbeb" stroke-width="1.5" marker-end="url(#arr-fe)"/>
+<path d="M 345 353 L 345 438" fill="none" stroke="#00cbeb" stroke-width="1.5" marker-end="url(#arr-fe)"/>
+<path d="M 607 353 L 607 438" fill="none" stroke="#00cbeb" stroke-width="1.5" marker-end="url(#arr-fe)"/>
+<path d="M 869 353 L 869 438" fill="none" stroke="#00cbeb" stroke-width="1.5" marker-end="url(#arr-fe)"/>
+<rect x="307.3" y="388" width="75.4" height="14" rx="7" fill="#1f1f1c"/><rect x="307.3" y="388" width="75.4" height="14" rx="7" fill="rgba(0, 203, 235, 0.16)"/><text x="345" y="398" fill="#00cbeb" font-size="8" font-family="JetBrains Mono" text-anchor="middle">:8123 · :9000</text>
+<path d="M 1023 470 L 1045 470" fill="none" stroke="#bb33ff" stroke-width="1.5" marker-end="url(#arr-db)"/>
+<path d="M 1132 470 L 1148 470" fill="none" stroke="#bb33ff" stroke-width="1.5" marker-end="url(#arr-db)"/>
+<rect x="1064.7" y="498" width="70.6" height="14" rx="7" fill="#1f1f1c"/><rect x="1064.7" y="498" width="70.6" height="14" rx="7" fill="rgba(187, 51, 255, 0.16)"/><text x="1100" y="508" fill="#bb33ff" font-size="8" font-family="JetBrains Mono" text-anchor="middle">HTTPS · IRSA</text>
+<rect x="260" y="72" width="200" height="70" rx="4" fill="#282828"/>
+<rect x="260" y="72" width="200" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="268" y="79" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20.7682 28.7733C20.7682 29.3908 20.8361 29.8915 20.955 30.2587C21.0909 30.6258 21.2608 31.0264 21.4986 31.4603C21.5835 31.5938 21.6175 31.7273 21.6175 31.8442C21.6175 32.0111 21.5156 32.178 21.2948 32.3449L20.2246 33.0458C20.0718 33.146 19.9189 33.196 19.783 33.196C19.6131 33.196 19.4433 33.1126 19.2734 32.9624C19.0356 32.712 18.8318 32.445 18.6619 32.178C18.4921 31.8942 18.3222 31.5771 18.1354 31.1933C16.8105 32.7287 15.1458 33.4964 13.1415 33.4964C11.7146 33.4964 10.5766 33.0959 9.74427 32.2948C8.91196 31.4937 8.4873 30.4256 8.4873 29.0904C8.4873 27.6718 8.99689 26.5202 10.033 25.6523C11.0692 24.7845 12.445 24.3506 14.1946 24.3506C14.7721 24.3506 15.3666 24.4006 15.9951 24.4841C16.6236 24.5675 17.2691 24.701 17.9485 24.8512V23.6329C17.9485 22.3645 17.6767 21.4799 17.1502 20.9626C16.6066 20.4452 15.6894 20.1948 14.3815 20.1948C13.7869 20.1948 13.1754 20.2616 12.547 20.4118C11.9185 20.562 11.307 20.7456 10.7125 20.9793C10.4407 21.0961 10.2369 21.1628 10.118 21.1962C9.99906 21.2296 9.91413 21.2463 9.84619 21.2463C9.60838 21.2463 9.48948 21.0794 9.48948 20.7289V19.9111C9.48948 19.6441 9.52345 19.4438 9.60838 19.327C9.69331 19.2102 9.84619 19.0933 10.084 18.9765C10.6785 18.6761 11.3919 18.4258 12.2242 18.2255C13.0565 18.0085 13.9398 17.9084 14.874 17.9084C16.8954 17.9084 18.3732 18.359 19.3244 19.2602C20.2586 20.1615 20.7342 21.53 20.7342 23.3659V28.7733H20.7682ZM13.8719 31.3101C14.4324 31.3101 15.0099 31.21 15.6214 31.0097C16.2329 30.8094 16.7765 30.4422 17.2351 29.9416C17.5069 29.6245 17.7107 29.274 17.8126 28.8734C17.9145 28.4729 17.9825 27.9889 17.9825 27.4214V26.7205C17.4899 26.6036 16.9633 26.5035 16.4198 26.4367C15.8762 26.37 15.3497 26.3366 14.8231 26.3366C13.685 26.3366 12.8527 26.5536 12.2922 27.0042C11.7316 27.4548 11.4599 28.089 11.4599 28.9235C11.4599 29.7079 11.6637 30.292 12.0883 30.6926C12.496 31.1098 13.0905 31.3101 13.8719 31.3101ZM27.5116 33.1126C27.2059 33.1126 27.0021 33.0625 26.8662 32.9457C26.7303 32.8455 26.6114 32.6119 26.5095 32.2948L22.5178 19.3938C22.4158 19.06 22.3649 18.843 22.3649 18.7262C22.3649 18.4591 22.5008 18.3089 22.7725 18.3089H24.4372C24.7599 18.3089 24.9807 18.359 25.0996 18.4758C25.2355 18.576 25.3374 18.8096 25.4394 19.1267L28.293 30.1752L30.9428 19.1267C31.0278 18.7929 31.1297 18.576 31.2656 18.4758C31.4014 18.3757 31.6392 18.3089 31.945 18.3089H33.3039C33.6266 18.3089 33.8474 18.359 33.9833 18.4758C34.1192 18.576 34.2381 18.8096 34.3061 19.1267L36.9898 30.3087L39.9284 19.1267C40.0303 18.7929 40.1492 18.576 40.2681 18.4758C40.404 18.3757 40.6249 18.3089 40.9306 18.3089H42.5103C42.7821 18.3089 42.9349 18.4424 42.9349 18.7262C42.9349 18.8096 42.918 18.8931 42.901 18.9932C42.884 19.0933 42.85 19.2269 42.7821 19.4104L38.6884 32.3115C38.5865 32.6453 38.4676 32.8622 38.3317 32.9624C38.1959 33.0625 37.975 33.1293 37.6863 33.1293H36.2255C35.9027 33.1293 35.6819 33.0792 35.546 32.9624C35.4101 32.8455 35.2912 32.6286 35.2233 32.2948L32.5905 21.53L29.9746 32.2781C29.8897 32.6119 29.7878 32.8288 29.6519 32.9457C29.516 33.0625 29.2782 33.1126 28.9724 33.1126H27.5116ZM49.3387 33.5632C48.4554 33.5632 47.5721 33.4631 46.7228 33.2628C45.8735 33.0625 45.2111 32.8455 44.7694 32.5952C44.4977 32.445 44.3108 32.2781 44.2429 32.1279C44.1749 31.9777 44.141 31.8108 44.141 31.6606V30.8094C44.141 30.4589 44.2768 30.292 44.5316 30.292C44.6336 30.292 44.7355 30.3087 44.8374 30.3421C44.9393 30.3755 45.0922 30.4422 45.262 30.509C45.8396 30.7593 46.468 30.9596 47.1305 31.0931C47.8099 31.2267 48.4724 31.2934 49.1518 31.2934C50.222 31.2934 51.0543 31.1098 51.6318 30.7427C52.2093 30.3755 52.5151 29.8414 52.5151 29.1571C52.5151 28.6898 52.3622 28.306 52.0564 27.9889C51.7507 27.6718 51.1732 27.3881 50.3409 27.121L47.8779 26.37C46.6379 25.9861 45.7207 25.4187 45.1601 24.6677C44.5996 23.9333 44.3108 23.1155 44.3108 22.2477C44.3108 21.5467 44.4637 20.9292 44.7694 20.3951C45.0752 19.8611 45.4829 19.3938 45.9924 19.0266C46.502 18.6427 47.0795 18.359 47.759 18.1587C48.4384 17.9584 49.1518 17.875 49.8992 17.875C50.2729 17.875 50.6636 17.8917 51.0373 17.9418C51.428 17.9918 51.7847 18.0586 52.1414 18.1253C52.4811 18.2088 52.8038 18.2922 53.1096 18.3924C53.4153 18.4925 53.6531 18.5927 53.823 18.6928C54.0608 18.8263 54.2307 18.9598 54.3326 19.11C54.4345 19.2435 54.4854 19.4271 54.4854 19.6608V20.4452C54.4854 20.7957 54.3496 20.9793 54.0948 20.9793C53.9589 20.9793 53.7381 20.9125 53.4493 20.779C52.4811 20.3451 51.394 20.1281 50.188 20.1281C49.2198 20.1281 48.4554 20.2783 47.9288 20.5954C47.4023 20.9125 47.1305 21.3965 47.1305 22.0808C47.1305 22.5481 47.3004 22.9486 47.6401 23.2657C47.9798 23.5828 48.6083 23.8999 49.5085 24.1837L51.9206 24.9347C53.1435 25.3185 54.0268 25.8526 54.5534 26.5369C55.08 27.2212 55.3347 28.0056 55.3347 28.8734C55.3347 29.5911 55.1819 30.242 54.8931 30.8094C54.5874 31.3769 54.1797 31.8775 53.6531 32.2781C53.1266 32.6953 52.4981 32.9957 51.7677 33.2127C51.0033 33.4464 50.205 33.5632 49.3387 33.5632Z" fill="white" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M52.5484 41.6741C46.96 45.7297 38.8407 47.8827 31.8595 47.8827C22.0755 47.8827 13.2598 44.3278 6.60126 38.4197C6.07469 37.9524 6.5503 37.3182 7.17878 37.6853C14.3809 41.791 23.2645 44.2777 32.454 44.2777C38.6539 44.2777 45.4653 43.0093 51.7331 40.4057C52.6674 39.9885 53.4657 41.0066 52.5484 41.6741Z" fill="#FF9900" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M54.8755 39.0706C54.1621 38.1693 50.1534 38.6366 48.3359 38.8536C47.7923 38.9204 47.7074 38.453 48.2 38.1026C51.3934 35.8995 56.6421 36.5337 57.2536 37.2681C57.8651 38.0191 57.0837 43.1762 54.0942 45.6463C53.6355 46.0301 53.1939 45.8298 53.3977 45.3292C54.0772 43.6769 55.5889 39.9551 54.8755 39.0706Z" fill="#FF9900" /></svg>
+<text x="286" y="90" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Target ECR (private)</text>
+<text x="286" y="104" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">&lt;acct&gt;.dkr.ecr.us-east-1…</text>
+<text x="286" y="116" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="start">fips: dkr-ecr-fips…on.aws</text>
+<text x="286" y="128" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">images + OCI Helm charts</text>
+<rect x="480" y="72" width="200" height="70" rx="4" fill="#282828"/>
+<rect x="480" y="72" width="200" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="488" y="79" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20.7682 28.7733C20.7682 29.3908 20.8361 29.8915 20.955 30.2587C21.0909 30.6258 21.2608 31.0264 21.4986 31.4603C21.5835 31.5938 21.6175 31.7273 21.6175 31.8442C21.6175 32.0111 21.5156 32.178 21.2948 32.3449L20.2246 33.0458C20.0718 33.146 19.9189 33.196 19.783 33.196C19.6131 33.196 19.4433 33.1126 19.2734 32.9624C19.0356 32.712 18.8318 32.445 18.6619 32.178C18.4921 31.8942 18.3222 31.5771 18.1354 31.1933C16.8105 32.7287 15.1458 33.4964 13.1415 33.4964C11.7146 33.4964 10.5766 33.0959 9.74427 32.2948C8.91196 31.4937 8.4873 30.4256 8.4873 29.0904C8.4873 27.6718 8.99689 26.5202 10.033 25.6523C11.0692 24.7845 12.445 24.3506 14.1946 24.3506C14.7721 24.3506 15.3666 24.4006 15.9951 24.4841C16.6236 24.5675 17.2691 24.701 17.9485 24.8512V23.6329C17.9485 22.3645 17.6767 21.4799 17.1502 20.9626C16.6066 20.4452 15.6894 20.1948 14.3815 20.1948C13.7869 20.1948 13.1754 20.2616 12.547 20.4118C11.9185 20.562 11.307 20.7456 10.7125 20.9793C10.4407 21.0961 10.2369 21.1628 10.118 21.1962C9.99906 21.2296 9.91413 21.2463 9.84619 21.2463C9.60838 21.2463 9.48948 21.0794 9.48948 20.7289V19.9111C9.48948 19.6441 9.52345 19.4438 9.60838 19.327C9.69331 19.2102 9.84619 19.0933 10.084 18.9765C10.6785 18.6761 11.3919 18.4258 12.2242 18.2255C13.0565 18.0085 13.9398 17.9084 14.874 17.9084C16.8954 17.9084 18.3732 18.359 19.3244 19.2602C20.2586 20.1615 20.7342 21.53 20.7342 23.3659V28.7733H20.7682ZM13.8719 31.3101C14.4324 31.3101 15.0099 31.21 15.6214 31.0097C16.2329 30.8094 16.7765 30.4422 17.2351 29.9416C17.5069 29.6245 17.7107 29.274 17.8126 28.8734C17.9145 28.4729 17.9825 27.9889 17.9825 27.4214V26.7205C17.4899 26.6036 16.9633 26.5035 16.4198 26.4367C15.8762 26.37 15.3497 26.3366 14.8231 26.3366C13.685 26.3366 12.8527 26.5536 12.2922 27.0042C11.7316 27.4548 11.4599 28.089 11.4599 28.9235C11.4599 29.7079 11.6637 30.292 12.0883 30.6926C12.496 31.1098 13.0905 31.3101 13.8719 31.3101ZM27.5116 33.1126C27.2059 33.1126 27.0021 33.0625 26.8662 32.9457C26.7303 32.8455 26.6114 32.6119 26.5095 32.2948L22.5178 19.3938C22.4158 19.06 22.3649 18.843 22.3649 18.7262C22.3649 18.4591 22.5008 18.3089 22.7725 18.3089H24.4372C24.7599 18.3089 24.9807 18.359 25.0996 18.4758C25.2355 18.576 25.3374 18.8096 25.4394 19.1267L28.293 30.1752L30.9428 19.1267C31.0278 18.7929 31.1297 18.576 31.2656 18.4758C31.4014 18.3757 31.6392 18.3089 31.945 18.3089H33.3039C33.6266 18.3089 33.8474 18.359 33.9833 18.4758C34.1192 18.576 34.2381 18.8096 34.3061 19.1267L36.9898 30.3087L39.9284 19.1267C40.0303 18.7929 40.1492 18.576 40.2681 18.4758C40.404 18.3757 40.6249 18.3089 40.9306 18.3089H42.5103C42.7821 18.3089 42.9349 18.4424 42.9349 18.7262C42.9349 18.8096 42.918 18.8931 42.901 18.9932C42.884 19.0933 42.85 19.2269 42.7821 19.4104L38.6884 32.3115C38.5865 32.6453 38.4676 32.8622 38.3317 32.9624C38.1959 33.0625 37.975 33.1293 37.6863 33.1293H36.2255C35.9027 33.1293 35.6819 33.0792 35.546 32.9624C35.4101 32.8455 35.2912 32.6286 35.2233 32.2948L32.5905 21.53L29.9746 32.2781C29.8897 32.6119 29.7878 32.8288 29.6519 32.9457C29.516 33.0625 29.2782 33.1126 28.9724 33.1126H27.5116ZM49.3387 33.5632C48.4554 33.5632 47.5721 33.4631 46.7228 33.2628C45.8735 33.0625 45.2111 32.8455 44.7694 32.5952C44.4977 32.445 44.3108 32.2781 44.2429 32.1279C44.1749 31.9777 44.141 31.8108 44.141 31.6606V30.8094C44.141 30.4589 44.2768 30.292 44.5316 30.292C44.6336 30.292 44.7355 30.3087 44.8374 30.3421C44.9393 30.3755 45.0922 30.4422 45.262 30.509C45.8396 30.7593 46.468 30.9596 47.1305 31.0931C47.8099 31.2267 48.4724 31.2934 49.1518 31.2934C50.222 31.2934 51.0543 31.1098 51.6318 30.7427C52.2093 30.3755 52.5151 29.8414 52.5151 29.1571C52.5151 28.6898 52.3622 28.306 52.0564 27.9889C51.7507 27.6718 51.1732 27.3881 50.3409 27.121L47.8779 26.37C46.6379 25.9861 45.7207 25.4187 45.1601 24.6677C44.5996 23.9333 44.3108 23.1155 44.3108 22.2477C44.3108 21.5467 44.4637 20.9292 44.7694 20.3951C45.0752 19.8611 45.4829 19.3938 45.9924 19.0266C46.502 18.6427 47.0795 18.359 47.759 18.1587C48.4384 17.9584 49.1518 17.875 49.8992 17.875C50.2729 17.875 50.6636 17.8917 51.0373 17.9418C51.428 17.9918 51.7847 18.0586 52.1414 18.1253C52.4811 18.2088 52.8038 18.2922 53.1096 18.3924C53.4153 18.4925 53.6531 18.5927 53.823 18.6928C54.0608 18.8263 54.2307 18.9598 54.3326 19.11C54.4345 19.2435 54.4854 19.4271 54.4854 19.6608V20.4452C54.4854 20.7957 54.3496 20.9793 54.0948 20.9793C53.9589 20.9793 53.7381 20.9125 53.4493 20.779C52.4811 20.3451 51.394 20.1281 50.188 20.1281C49.2198 20.1281 48.4554 20.2783 47.9288 20.5954C47.4023 20.9125 47.1305 21.3965 47.1305 22.0808C47.1305 22.5481 47.3004 22.9486 47.6401 23.2657C47.9798 23.5828 48.6083 23.8999 49.5085 24.1837L51.9206 24.9347C53.1435 25.3185 54.0268 25.8526 54.5534 26.5369C55.08 27.2212 55.3347 28.0056 55.3347 28.8734C55.3347 29.5911 55.1819 30.242 54.8931 30.8094C54.5874 31.3769 54.1797 31.8775 53.6531 32.2781C53.1266 32.6953 52.4981 32.9957 51.7677 33.2127C51.0033 33.4464 50.205 33.5632 49.3387 33.5632Z" fill="white" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M52.5484 41.6741C46.96 45.7297 38.8407 47.8827 31.8595 47.8827C22.0755 47.8827 13.2598 44.3278 6.60126 38.4197C6.07469 37.9524 6.5503 37.3182 7.17878 37.6853C14.3809 41.791 23.2645 44.2777 32.454 44.2777C38.6539 44.2777 45.4653 43.0093 51.7331 40.4057C52.6674 39.9885 53.4657 41.0066 52.5484 41.6741Z" fill="#FF9900" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M54.8755 39.0706C54.1621 38.1693 50.1534 38.6366 48.3359 38.8536C47.7923 38.9204 47.7074 38.453 48.2 38.1026C51.3934 35.8995 56.6421 36.5337 57.2536 37.2681C57.8651 38.0191 57.0837 43.1762 54.0942 45.6463C53.6355 46.0301 53.1939 45.8298 53.3977 45.3292C54.0772 43.6769 55.5889 39.9551 54.8755 39.0706Z" fill="#FF9900" /></svg>
+<text x="506" y="90" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">CloudFormation</text>
+<text x="506" y="104" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">-vpc · -eks · -nodegroups</text>
+<text x="506" y="116" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">-irsa · -langfuse-irsa (opt.)</text>
+<text x="506" y="128" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">one stack per infra step</text>
+<rect x="700" y="72" width="190" height="70" rx="4" fill="#282828"/>
+<rect x="700" y="72" width="190" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="708" y="79" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M54.7687 16.5728C54.4506 15.555 53.6872 14.728 52.733 14.2191L33.3305 4.93135C32.8216 4.6769 32.2491 4.61328 31.7402 4.61328C31.2313 4.61328 30.6587 4.61328 30.1498 4.74051L10.7474 14.0919C9.79315 14.5372 9.09339 15.3641 8.83894 16.4456L4.06784 37.3748C3.877 38.4562 4.13146 39.5377 4.7676 40.4283L18.1903 57.0317C18.9537 57.7951 20.0351 58.304 21.1165 58.3676H42.491C43.6361 58.4948 44.7175 57.9859 45.4173 57.0317L58.84 40.4283C59.4761 39.5377 59.7306 38.4562 59.6034 37.3748L54.7687 16.5728Z" fill="#326DE6" /> <path d="M51.7788 36.5481C51.7152 36.5481 51.6516 36.5481 51.6516 36.4845C51.6516 36.4209 51.5243 36.4209 51.3971 36.4209C51.1426 36.3573 50.8882 36.3573 50.6337 36.3573C50.5065 36.3573 50.3793 36.3573 50.252 36.2937H50.1884C49.4887 36.2301 48.7253 36.1028 48.0255 35.912C47.8347 35.8484 47.6438 35.6575 47.5802 35.4667C47.5802 35.4667 47.6438 35.4667 47.5802 35.4667L47.0713 35.3395C47.3258 33.4946 47.1985 31.5862 46.8168 29.7414C46.3715 27.8966 45.6082 26.1154 44.5903 24.525L44.972 24.1433V24.0797C44.972 23.8888 45.0356 23.6344 45.1629 23.5072C45.7354 22.9982 46.3079 22.6166 46.9441 22.2349C47.0713 22.1713 47.1985 22.1076 47.3258 22.044C47.5802 21.9168 47.7711 21.7896 48.0255 21.6623C48.0891 21.5987 48.1528 21.5987 48.2164 21.5351C48.28 21.4715 48.2164 21.4715 48.2164 21.4079C48.7889 20.9626 48.9161 20.1992 48.4708 19.6267C48.28 19.3722 47.8983 19.1814 47.5802 19.1814C47.2621 19.1814 46.9441 19.3086 46.6896 19.4994L46.626 19.5631C46.5624 19.6267 46.4988 19.6903 46.4352 19.6903C46.2443 19.8811 46.0535 20.072 45.9262 20.2628C45.8626 20.39 45.7354 20.4537 45.6718 20.5173C45.2265 21.0262 44.6539 21.5351 44.0814 21.9168C43.9542 21.9804 43.827 22.044 43.6997 22.044C43.6361 22.044 43.5089 22.044 43.4453 21.9804H43.3817L42.8727 22.2985C42.3638 21.7896 41.7913 21.2807 41.2824 20.7717C38.9286 18.9269 36.0024 17.7818 33.0125 17.4638L32.9489 16.9549V17.0185C32.758 16.8912 32.6944 16.7004 32.6308 16.5096C32.6308 15.8098 32.6308 15.11 32.758 14.3467V14.283C32.758 14.1558 32.8216 14.0286 32.8216 13.9014C32.8853 13.6469 32.8853 13.3924 32.9489 13.138V12.7563C33.0125 12.1202 32.5036 11.484 31.8674 11.4204C31.4857 11.3568 31.104 11.5476 30.786 11.8657C30.5315 12.1202 30.4043 12.4382 30.4043 12.7563V13.0744C30.4043 13.3288 30.4679 13.5833 30.5315 13.8377C30.5951 13.965 30.5951 14.0922 30.5951 14.2194V14.283C30.7224 14.9828 30.7224 15.6826 30.7224 16.4459C30.6587 16.6368 30.5951 16.8276 30.4043 16.9549V17.0821L30.3407 17.591C29.6409 17.6546 28.9412 17.7818 28.1778 17.9091C25.1879 18.5452 22.4525 20.1356 20.3532 22.3621L19.9715 22.1076H19.9079C19.8443 22.1076 19.7807 22.1713 19.6534 22.1713C19.5262 22.1713 19.399 22.1076 19.2717 22.044C18.6992 21.5987 18.1267 21.0898 17.6814 20.5809C17.6178 20.4537 17.4905 20.39 17.4269 20.3264C17.2361 20.1356 17.1088 19.9447 16.918 19.7539C16.8544 19.6903 16.7908 19.6903 16.7272 19.6267C16.6635 19.5631 16.6635 19.5631 16.6635 19.5631C16.4091 19.3722 16.091 19.245 15.7729 19.245C15.3913 19.245 15.0732 19.3722 14.8823 19.6903C14.5006 20.2628 14.6279 21.0262 15.1368 21.4715C15.2004 21.4715 15.2004 21.5351 15.2004 21.5351C15.2004 21.5351 15.3276 21.6623 15.3913 21.6623C15.5821 21.7896 15.8366 21.9168 16.091 22.044C16.2182 22.1076 16.3455 22.1713 16.4727 22.2349C17.1088 22.6166 17.745 22.9982 18.2539 23.5072C18.3811 23.6344 18.5084 23.8888 18.4447 24.0797V24.0161L18.8264 24.3978C18.7628 24.525 18.6992 24.5886 18.6356 24.7158C16.6635 27.833 15.8366 31.5226 16.4091 35.1486L15.9002 35.2759C15.9002 35.3395 15.8366 35.3395 15.8366 35.3395C15.7729 35.5303 15.5821 35.6575 15.3913 35.7848C14.6915 35.9756 13.9917 36.1028 13.2284 36.1665C13.1011 36.1665 12.9739 36.1665 12.8467 36.2301C12.5922 36.2301 12.3378 36.2937 12.0833 36.2937C12.0197 36.2937 11.9561 36.3573 11.8288 36.3573C11.7652 36.3573 11.7652 36.3573 11.7016 36.4209C11.0018 36.5481 10.5565 37.1843 10.6838 37.8841C10.811 38.4566 11.3835 38.8383 11.9561 38.7747C12.0833 38.7747 12.1469 38.7747 12.2741 38.711C12.3378 38.711 12.3378 38.711 12.3378 38.6474C12.3378 38.5838 12.5286 38.6474 12.5922 38.6474C12.8467 38.5838 13.1011 38.4566 13.292 38.393C13.4192 38.3294 13.5464 38.2657 13.6737 38.2657H13.7373C14.437 38.0113 15.0732 37.8204 15.8366 37.6932H15.9002C16.091 37.6932 16.2819 37.7568 16.4091 37.8841C16.4727 37.8841 16.4727 37.9477 16.4727 37.9477L17.0452 37.8841C17.9994 40.8103 19.7807 43.4185 22.2616 45.327C22.8342 45.7723 23.3431 46.1539 23.9792 46.472L23.6611 46.9173C23.6611 46.9809 23.7248 46.9809 23.7248 46.9809C23.852 47.1718 23.852 47.4262 23.7884 47.6171C23.5339 48.2532 23.1522 48.8894 22.7705 49.4619V49.5255C22.7069 49.6527 22.6433 49.7164 22.5161 49.8436C22.3889 49.9708 22.2616 50.2253 22.0708 50.4797C22.0072 50.5434 22.0072 50.607 21.9436 50.6706C21.9436 50.6706 21.9436 50.7342 21.8799 50.7342C21.5619 51.3703 21.8163 52.1337 22.3889 52.4518C22.5161 52.5154 22.7069 52.579 22.8342 52.579C23.3431 52.579 23.7884 52.2609 24.0428 51.8156C24.0428 51.8156 24.0428 51.752 24.1064 51.752C24.1064 51.6884 24.1701 51.6248 24.2337 51.5612C24.2973 51.3067 24.4245 51.1159 24.4881 50.8614L24.6154 50.4797C24.8062 49.78 25.1243 49.1438 25.4424 48.5077C25.5696 48.3168 25.7604 48.1896 25.9513 48.126C26.0149 48.126 26.0149 48.126 26.0149 48.0624L26.2693 47.5535C28.0505 48.2532 29.8954 48.5713 31.8038 48.5713C32.9489 48.5713 34.0939 48.4441 35.239 48.126C35.9388 47.9988 36.6385 47.7443 37.2747 47.5535L37.5291 47.9988C37.5927 47.9988 37.5927 47.9988 37.5927 48.0624C37.7836 48.126 37.9744 48.2532 38.1016 48.4441C38.4197 49.0802 38.7378 49.7164 38.9286 50.4161V50.4797L39.0559 50.8614C39.1195 51.1159 39.1831 51.3703 39.3103 51.5612C39.3739 51.6248 39.3739 51.6884 39.4376 51.752C39.4376 51.752 39.4376 51.8156 39.5012 51.8156C39.7556 52.2609 40.2009 52.579 40.7098 52.579C40.9007 52.579 41.0279 52.5154 41.2188 52.4518C41.4732 52.3246 41.7277 52.0701 41.7913 51.752C41.8549 51.434 41.8549 51.1159 41.7277 50.7978C41.7277 50.7342 41.6641 50.7342 41.6641 50.7342C41.6641 50.6706 41.6005 50.607 41.5368 50.5434C41.4096 50.2889 41.2824 50.098 41.0915 49.9072C41.0279 49.78 40.9643 49.7164 40.8371 49.5891V49.4619C40.3918 48.8894 40.0737 48.2532 39.8192 47.6171C39.7556 47.4262 39.7556 47.1718 39.8829 46.9809C39.8829 46.9173 39.9465 46.9173 39.9465 46.9173L39.7556 46.4084C43 44.4364 45.4809 41.3829 46.626 37.7568L47.1349 37.8204C47.1985 37.8204 47.1985 37.7568 47.1985 37.7568C47.3258 37.6296 47.5166 37.566 47.7074 37.566H47.7711C48.4708 37.6932 49.1706 37.8841 49.8067 38.1385H49.8703C49.9976 38.2021 50.1248 38.2657 50.252 38.2657C50.5065 38.393 50.6973 38.5202 50.9518 38.5838C51.0154 38.5838 51.079 38.6474 51.2062 38.6474C51.2699 38.6474 51.2699 38.6474 51.3335 38.711C51.4607 38.7747 51.5243 38.7747 51.6516 38.7747C52.2241 38.7747 52.733 38.393 52.9238 37.8841C52.8602 37.1843 52.3513 36.6754 51.7788 36.5481ZM33.3942 34.5761L31.6766 35.4031L29.959 34.5761L29.5137 32.7313L30.7224 31.2045H32.6308L33.8395 32.7313L33.3942 34.5761ZM43.7633 30.4411C44.0814 31.7771 44.145 33.113 44.0178 34.4489L37.9744 32.7313C37.4019 32.604 37.0838 32.0315 37.211 31.459C37.2747 31.2681 37.3383 31.1409 37.4655 31.0137L42.2366 26.6879C42.9364 27.833 43.4453 29.1052 43.7633 30.4411ZM40.3282 24.3342L35.1118 28.0238C34.6665 28.2783 34.0303 28.2146 33.7122 27.7693C33.585 27.6421 33.5214 27.5149 33.5214 27.324L33.1397 20.899C35.9388 21.217 38.4197 22.4257 40.3282 24.3342ZM28.8139 21.0898L30.0862 20.8353L29.7681 27.1968C29.7681 27.7693 29.2592 28.2146 28.6867 28.2146C28.4958 28.2146 28.3686 28.151 28.1778 28.0874L22.8978 24.3342C24.5517 22.7438 26.5874 21.5987 28.8139 21.0898ZM21.0529 26.6879L25.7604 30.8864C26.2057 31.2681 26.2693 31.9043 25.8877 32.3496C25.7604 32.5404 25.6332 32.604 25.3787 32.6677L19.2081 34.4489C19.0173 31.7771 19.6534 29.0416 21.0529 26.6879ZM19.9715 37.4388L26.2693 36.3573C26.7783 36.3573 27.2872 36.6754 27.3508 37.1843C27.4144 37.3751 27.4144 37.6296 27.2872 37.8204L24.8698 43.673C22.6433 42.2098 20.8621 39.9833 19.9715 37.4388ZM34.412 45.327C33.5214 45.5178 32.6308 45.645 31.6766 45.645C30.3407 45.645 28.9412 45.3906 27.6689 45.0089L30.786 39.3472C31.104 38.9655 31.613 38.8383 32.0583 39.0927C32.2491 39.22 32.3763 39.3472 32.5672 39.538L35.6207 45.0725C35.239 45.1361 34.8573 45.1997 34.412 45.327ZM42.173 39.7925C41.2188 41.3192 39.8829 42.6551 38.3561 43.6094L35.8751 37.6296C35.7479 37.1207 36.0024 36.6118 36.4477 36.4209C36.6385 36.3573 36.8294 36.2937 37.0202 36.2937L43.3817 37.3751C43.0636 38.2657 42.6819 39.0927 42.173 39.7925Z" fill="white" /></svg>
+<text x="726" y="90" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">EKS control plane</text>
+<text x="726" y="104" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">clickhouse-private-eks · 1.36</text>
+<text x="726" y="116" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">API: private + public endpoint</text>
+<text x="726" y="128" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">OIDC provider (IRSA)</text>
+<rect x="910" y="72" width="180" height="70" rx="4" fill="#282828"/>
+<rect x="910" y="72" width="180" height="70" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<svg x="918" y="79" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#ff2323" xmlns="http://www.w3.org/2000/svg"><path d="M15.0312 9.34226C15.0312 9.13526 14.8633 8.96826 14.6562 8.96826C14.4492 8.96926 14.2812 9.13726 14.2812 9.34426C14.2812 9.55126 14.4492 9.71926 14.6562 9.71826C14.8633 9.71826 15.0312 9.55026 15.0312 9.34326" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M12.499 14.7852L11.469 15.8172H9.637V17.2862H8.172V19.1222L6.798 20.5002H3.5V17.1952L9.223 11.4592C8.417 9.36524 8.849 6.90324 10.534 5.21424C12.814 2.92924 16.511 2.92924 18.791 5.21424C21.071 7.49924 21.071 11.2042 18.791 13.4902C17.089 15.1942 14.601 15.6242 12.499 14.7852Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="936" y="90" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">IAM roles</text>
+<text x="936" y="104" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">ClickHouseS3Role (IRSA)</text>
+<text x="936" y="116" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">EbsCsiDriverRole (IRSA)</text>
+<text x="936" y="128" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">EKS cluster + node roles</text>
+<rect x="1110" y="72" width="220" height="70" rx="4" fill="#282828"/>
+<rect x="1110" y="72" width="220" height="70" rx="4" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1.5"/>
+<svg x="1118" y="79" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#ff2323" xmlns="http://www.w3.org/2000/svg"><path d="M8.375 10.3306V7.23497V7.23497C8.375 4.95553 10.166 3.10742 12.375 3.10742V3.10742C14.584 3.10742 16.375 4.95553 16.375 7.23497V7.23497V10.3306" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path d="M12.375 14.458V17.5537" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M17.375 21.6813H7.375C6.27 21.6813 5.375 20.7578 5.375 19.6176V12.3943C5.375 11.2541 6.27 10.3306 7.375 10.3306H17.375C18.48 10.3306 19.375 11.2541 19.375 12.3943V19.6176C19.375 20.7578 18.48 21.6813 17.375 21.6813Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="1136" y="90" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">KMS keys</text>
+<text x="1136" y="104" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">EKS secrets envelope key</text>
+<text x="1136" y="116" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">CH bucket CMK · EBS CMK</text>
+<text x="1136" y="128" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">Langfuse bucket CMK (opt.)</text>
+<rect x="28" y="100" width="182" height="100" rx="4" fill="#282828"/>
+<rect x="28" y="100" width="182" height="100" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="36" y="107" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20.7682 28.7733C20.7682 29.3908 20.8361 29.8915 20.955 30.2587C21.0909 30.6258 21.2608 31.0264 21.4986 31.4603C21.5835 31.5938 21.6175 31.7273 21.6175 31.8442C21.6175 32.0111 21.5156 32.178 21.2948 32.3449L20.2246 33.0458C20.0718 33.146 19.9189 33.196 19.783 33.196C19.6131 33.196 19.4433 33.1126 19.2734 32.9624C19.0356 32.712 18.8318 32.445 18.6619 32.178C18.4921 31.8942 18.3222 31.5771 18.1354 31.1933C16.8105 32.7287 15.1458 33.4964 13.1415 33.4964C11.7146 33.4964 10.5766 33.0959 9.74427 32.2948C8.91196 31.4937 8.4873 30.4256 8.4873 29.0904C8.4873 27.6718 8.99689 26.5202 10.033 25.6523C11.0692 24.7845 12.445 24.3506 14.1946 24.3506C14.7721 24.3506 15.3666 24.4006 15.9951 24.4841C16.6236 24.5675 17.2691 24.701 17.9485 24.8512V23.6329C17.9485 22.3645 17.6767 21.4799 17.1502 20.9626C16.6066 20.4452 15.6894 20.1948 14.3815 20.1948C13.7869 20.1948 13.1754 20.2616 12.547 20.4118C11.9185 20.562 11.307 20.7456 10.7125 20.9793C10.4407 21.0961 10.2369 21.1628 10.118 21.1962C9.99906 21.2296 9.91413 21.2463 9.84619 21.2463C9.60838 21.2463 9.48948 21.0794 9.48948 20.7289V19.9111C9.48948 19.6441 9.52345 19.4438 9.60838 19.327C9.69331 19.2102 9.84619 19.0933 10.084 18.9765C10.6785 18.6761 11.3919 18.4258 12.2242 18.2255C13.0565 18.0085 13.9398 17.9084 14.874 17.9084C16.8954 17.9084 18.3732 18.359 19.3244 19.2602C20.2586 20.1615 20.7342 21.53 20.7342 23.3659V28.7733H20.7682ZM13.8719 31.3101C14.4324 31.3101 15.0099 31.21 15.6214 31.0097C16.2329 30.8094 16.7765 30.4422 17.2351 29.9416C17.5069 29.6245 17.7107 29.274 17.8126 28.8734C17.9145 28.4729 17.9825 27.9889 17.9825 27.4214V26.7205C17.4899 26.6036 16.9633 26.5035 16.4198 26.4367C15.8762 26.37 15.3497 26.3366 14.8231 26.3366C13.685 26.3366 12.8527 26.5536 12.2922 27.0042C11.7316 27.4548 11.4599 28.089 11.4599 28.9235C11.4599 29.7079 11.6637 30.292 12.0883 30.6926C12.496 31.1098 13.0905 31.3101 13.8719 31.3101ZM27.5116 33.1126C27.2059 33.1126 27.0021 33.0625 26.8662 32.9457C26.7303 32.8455 26.6114 32.6119 26.5095 32.2948L22.5178 19.3938C22.4158 19.06 22.3649 18.843 22.3649 18.7262C22.3649 18.4591 22.5008 18.3089 22.7725 18.3089H24.4372C24.7599 18.3089 24.9807 18.359 25.0996 18.4758C25.2355 18.576 25.3374 18.8096 25.4394 19.1267L28.293 30.1752L30.9428 19.1267C31.0278 18.7929 31.1297 18.576 31.2656 18.4758C31.4014 18.3757 31.6392 18.3089 31.945 18.3089H33.3039C33.6266 18.3089 33.8474 18.359 33.9833 18.4758C34.1192 18.576 34.2381 18.8096 34.3061 19.1267L36.9898 30.3087L39.9284 19.1267C40.0303 18.7929 40.1492 18.576 40.2681 18.4758C40.404 18.3757 40.6249 18.3089 40.9306 18.3089H42.5103C42.7821 18.3089 42.9349 18.4424 42.9349 18.7262C42.9349 18.8096 42.918 18.8931 42.901 18.9932C42.884 19.0933 42.85 19.2269 42.7821 19.4104L38.6884 32.3115C38.5865 32.6453 38.4676 32.8622 38.3317 32.9624C38.1959 33.0625 37.975 33.1293 37.6863 33.1293H36.2255C35.9027 33.1293 35.6819 33.0792 35.546 32.9624C35.4101 32.8455 35.2912 32.6286 35.2233 32.2948L32.5905 21.53L29.9746 32.2781C29.8897 32.6119 29.7878 32.8288 29.6519 32.9457C29.516 33.0625 29.2782 33.1126 28.9724 33.1126H27.5116ZM49.3387 33.5632C48.4554 33.5632 47.5721 33.4631 46.7228 33.2628C45.8735 33.0625 45.2111 32.8455 44.7694 32.5952C44.4977 32.445 44.3108 32.2781 44.2429 32.1279C44.1749 31.9777 44.141 31.8108 44.141 31.6606V30.8094C44.141 30.4589 44.2768 30.292 44.5316 30.292C44.6336 30.292 44.7355 30.3087 44.8374 30.3421C44.9393 30.3755 45.0922 30.4422 45.262 30.509C45.8396 30.7593 46.468 30.9596 47.1305 31.0931C47.8099 31.2267 48.4724 31.2934 49.1518 31.2934C50.222 31.2934 51.0543 31.1098 51.6318 30.7427C52.2093 30.3755 52.5151 29.8414 52.5151 29.1571C52.5151 28.6898 52.3622 28.306 52.0564 27.9889C51.7507 27.6718 51.1732 27.3881 50.3409 27.121L47.8779 26.37C46.6379 25.9861 45.7207 25.4187 45.1601 24.6677C44.5996 23.9333 44.3108 23.1155 44.3108 22.2477C44.3108 21.5467 44.4637 20.9292 44.7694 20.3951C45.0752 19.8611 45.4829 19.3938 45.9924 19.0266C46.502 18.6427 47.0795 18.359 47.759 18.1587C48.4384 17.9584 49.1518 17.875 49.8992 17.875C50.2729 17.875 50.6636 17.8917 51.0373 17.9418C51.428 17.9918 51.7847 18.0586 52.1414 18.1253C52.4811 18.2088 52.8038 18.2922 53.1096 18.3924C53.4153 18.4925 53.6531 18.5927 53.823 18.6928C54.0608 18.8263 54.2307 18.9598 54.3326 19.11C54.4345 19.2435 54.4854 19.4271 54.4854 19.6608V20.4452C54.4854 20.7957 54.3496 20.9793 54.0948 20.9793C53.9589 20.9793 53.7381 20.9125 53.4493 20.779C52.4811 20.3451 51.394 20.1281 50.188 20.1281C49.2198 20.1281 48.4554 20.2783 47.9288 20.5954C47.4023 20.9125 47.1305 21.3965 47.1305 22.0808C47.1305 22.5481 47.3004 22.9486 47.6401 23.2657C47.9798 23.5828 48.6083 23.8999 49.5085 24.1837L51.9206 24.9347C53.1435 25.3185 54.0268 25.8526 54.5534 26.5369C55.08 27.2212 55.3347 28.0056 55.3347 28.8734C55.3347 29.5911 55.1819 30.242 54.8931 30.8094C54.5874 31.3769 54.1797 31.8775 53.6531 32.2781C53.1266 32.6953 52.4981 32.9957 51.7677 33.2127C51.0033 33.4464 50.205 33.5632 49.3387 33.5632Z" fill="white" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M52.5484 41.6741C46.96 45.7297 38.8407 47.8827 31.8595 47.8827C22.0755 47.8827 13.2598 44.3278 6.60126 38.4197C6.07469 37.9524 6.5503 37.3182 7.17878 37.6853C14.3809 41.791 23.2645 44.2777 32.454 44.2777C38.6539 44.2777 45.4653 43.0093 51.7331 40.4057C52.6674 39.9885 53.4657 41.0066 52.5484 41.6741Z" fill="#FF9900" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M54.8755 39.0706C54.1621 38.1693 50.1534 38.6366 48.3359 38.8536C47.7923 38.9204 47.7074 38.453 48.2 38.1026C51.3934 35.8995 56.6421 36.5337 57.2536 37.2681C57.8651 38.0191 57.0837 43.1762 54.0942 45.6463C53.6355 46.0301 53.1939 45.8298 53.3977 45.3292C54.0772 43.6769 55.5889 39.9551 54.8755 39.0706Z" fill="#FF9900" /></svg>
+<text x="54" y="118" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Source ECR</text>
+<text x="54" y="132" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start"><SOURCE_ECR_ACCOUNT_ID> · us-east-1</text>
+<text x="54" y="143" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">clickhouse-server / keeper</text>
+<text x="54" y="154" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">clickhouse-operator · helm/*</text>
+<text x="54" y="165" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="start">read-only: profile private-us</text>
+<text x="54" y="176" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="start">ClickHouseAirgapECRPullRole</text>
+<rect x="15" y="240" width="195" height="110" rx="4" fill="#282828"/>
+<rect x="15" y="240" width="195" height="110" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="23" y="247" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 9H3M8.62 9v12" /> <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2Z" clip-rule="evenodd" /></svg>
+<text x="41" y="258" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Operator workstation</text>
+<text x="41" y="272" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">scripts/up.sh → ansible-playbook</text>
+<text x="41" y="284" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">aws · kubectl · helm · skopeo</text>
+<text x="41" y="296" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">.aws/config (project-local)</text>
+<text x="41" y="308" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">state/: kubeconfig, passwords,</text>
+<text x="41" y="320" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">        TLS keys (gitignored)</text>
+<rect x="15" y="410" width="195" height="62" rx="4" fill="#282828"/>
+<rect x="15" y="410" width="195" height="62" rx="4" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1.5"/>
+<svg x="23" y="417" width="12" height="12" viewBox="0 0 24 25" fill="none" color="#00cbeb" xmlns="http://www.w3.org/2000/svg"><path d="M15.2158 11.2407C17.0021 11.1757 18.42 9.71476 18.4314 7.92732C18.4038 6.17864 16.9645 4.78308 15.2158 4.80945" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M9.42753 11.2407C11.2138 11.1757 12.6317 9.71476 12.6432 7.92732C12.6156 6.17864 11.1762 4.78308 9.42753 4.80945C7.67884 4.78308 6.23952 6.17864 6.21191 7.92732C6.22292 9.71494 7.64104 11.1762 9.42753 11.2407V11.2407Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path d="M16.0015 20.816V18.8151C16.0015 16.6051 14.2099 14.8135 11.9998 14.8135H6.99776C4.7877 14.8135 2.99609 16.6051 2.99609 18.8151V20.816" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path d="M21.0042 20.816V17.8147C21.0042 16.1572 19.6605 14.8135 18.0029 14.8135" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="41" y="428" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">In-VPC / VPN clients</text>
+<text x="41" y="442" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">apps · BI · clickhouse-client</text>
+<text x="41" y="454" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">NLB is internal by default</text>
+<rect x="15" y="510" width="195" height="70" rx="4" fill="#282828"/>
+<rect x="15" y="510" width="195" height="70" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="23" y="517" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path d="M21 12C21 16.9706 16.9706 21 12 21M21 12C21 7.02944 16.9706 3 12 3M21 12H3M12 21C7.02944 21 3 16.9706 3 12M12 21C14.2512 18.5355 15.5305 15.3372 15.6 12C15.5305 8.66283 14.2512 5.46452 12 3M12 21C9.74885 18.5355 8.46952 15.3372 8.4 12C8.46952 8.66283 9.74885 5.46452 12 3M3 12C3 7.02944 7.02944 3 12 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="41" y="528" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">Public registries</text>
+<text x="41" y="542" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">registry.k8s.io (kube-rbac-proxy)</text>
+<text x="41" y="554" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">cgr.dev · docker.langfuse.com</text>
+<text x="41" y="566" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">(Langfuse, opt.) — also skopeo</text>
+<rect x="600" y="176" width="140" height="24" rx="4" fill="#282828"/>
+<rect x="600" y="176" width="140" height="24" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="670.0" y="192" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">Internet Gateway</text>
+<rect x="405" y="242" width="108" height="34" rx="4" fill="#282828"/>
+<rect x="405" y="242" width="108" height="34" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="459.0" y="255" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">NAT gateway</text>
+<text x="459.0" y="269" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="middle">nat_mode: single</text>
+<text x="553" y="262" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">no NAT (single mode) — per-az</text>
+<text x="553" y="272" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">mode adds one here</text>
+<text x="815" y="262" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">no NAT (single mode) — per-az</text>
+<text x="815" y="272" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">mode adds one here</text>
+<rect x="283" y="322" width="770" height="31" rx="4" fill="#282828"/>
+<rect x="283" y="322" width="770" height="31" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="668.0" y="335" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="middle">Internal NLB · svc default-us-01-lb · cross-zone</text>
+<text x="668" y="348" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="middle">TCP 8123 (HTTP) · 9000 (native)  —  fips: 8443 (HTTPS) · 9440 (native TLS)</text>
+<rect x="283" y="362" width="770" height="24" rx="4" fill="#282828"/>
+<rect x="283" y="362" width="770" height="24" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="668.0" y="378" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">Langfuse NLB (opt.) · svc langfuse-lb · :80, or TLS terminated with an ACM cert</text>
+<rect x="291" y="410" width="214" height="124" rx="4" fill="#282828"/>
+<rect x="291" y="410" width="214" height="124" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="301" y="424" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">server node · m7gd.2xlarge</text>
+<text x="301" y="438" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=server-arm64 · tainted</text>
+<rect x="299" y="440" width="132" height="84" rx="4" fill="#282828"/>
+<rect x="299" y="440" width="132" height="84" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="307" y="447" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="325" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-server</text>
+<text x="325" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">replica 0 · 26.2.1.525</text>
+<text x="325" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">4 CPU · 16Gi</text>
+<text x="325" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">no PVC (stateless)</text>
+<text x="325" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">IRSA service acct</text>
+<rect x="437" y="440" width="60" height="84" rx="4" fill="#282828"/>
+<rect x="437" y="440" width="60" height="84" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="447" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">cache</text>
+<text x="447" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">local NVMe</text>
+<text x="447" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">/nvme/disk</text>
+<text x="447" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">300Gi</text>
+<text x="447" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">read cache</text>
+<rect x="291" y="552" width="214" height="110" rx="4" fill="#282828"/>
+<rect x="291" y="552" width="214" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="301" y="566" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">keeper node · m7g.xlarge</text>
+<text x="301" y="580" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=keeper-arm64 · tainted</text>
+<rect x="299" y="582" width="132" height="70" rx="4" fill="#282828"/>
+<rect x="299" y="582" width="132" height="70" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="307" y="589" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="325" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-keeper</text>
+<text x="325" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">keeper-0 · 26.2.1.258</text>
+<text x="325" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">2 CPU · 4Gi</text>
+<text x="325" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">Raft member</text>
+<rect x="437" y="582" width="60" height="70" rx="4" fill="#282828"/>
+<rect x="437" y="582" width="60" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="447" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">EBS gp3</text>
+<text x="447" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">10Gi PVC</text>
+<text x="447" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">encrypted</text>
+<text x="447" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">EBS CSI</text>
+<rect x="291" y="680" width="214" height="178" rx="4" fill="#282828"/>
+<rect x="291" y="680" width="214" height="178" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="301" y="694" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">operator node · m7i.xlarge</text>
+<text x="301" y="708" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">untainted · unlabelled · x86_64</text>
+<rect x="299" y="714" width="198" height="48" rx="4" fill="#282828"/>
+<rect x="299" y="714" width="198" height="48" rx="4" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1.5"/>
+<svg x="307" y="721" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="325" y="732" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-operator</text>
+<text x="325" y="746" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">replica 0 of 2 (zone-spread)</text>
+<text x="325" y="756" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">+ kube-rbac-proxy sidecar</text>
+<rect x="299" y="768" width="198" height="32" rx="4" fill="#282828"/>
+<rect x="299" y="768" width="198" height="32" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="309" y="780" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">cluster add-ons</text>
+<text x="309" y="794" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">CoreDNS · EBS CSI controller</text>
+<rect x="299" y="806" width="198" height="46" rx="4" fill="#282828"/>
+<rect x="299" y="806" width="198" height="46" rx="4" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="309" y="824" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">Langfuse (opt.)</text>
+<text x="309" y="838" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">web · worker · postgres · valkey</text>
+<text x="309" y="848" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">Chainguard PG/Valkey · EBS PVCs</text>
+<rect x="553" y="410" width="214" height="124" rx="4" fill="#282828"/>
+<rect x="553" y="410" width="214" height="124" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="563" y="424" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">server node · m7gd.2xlarge</text>
+<text x="563" y="438" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=server-arm64 · tainted</text>
+<rect x="561" y="440" width="132" height="84" rx="4" fill="#282828"/>
+<rect x="561" y="440" width="132" height="84" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="569" y="447" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="587" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-server</text>
+<text x="587" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">replica 1 · 26.2.1.525</text>
+<text x="587" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">4 CPU · 16Gi</text>
+<text x="587" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">no PVC (stateless)</text>
+<text x="587" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">IRSA service acct</text>
+<rect x="699" y="440" width="60" height="84" rx="4" fill="#282828"/>
+<rect x="699" y="440" width="60" height="84" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="709" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">cache</text>
+<text x="709" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">local NVMe</text>
+<text x="709" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">/nvme/disk</text>
+<text x="709" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">300Gi</text>
+<text x="709" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">read cache</text>
+<rect x="553" y="552" width="214" height="110" rx="4" fill="#282828"/>
+<rect x="553" y="552" width="214" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="563" y="566" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">keeper node · m7g.xlarge</text>
+<text x="563" y="580" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=keeper-arm64 · tainted</text>
+<rect x="561" y="582" width="132" height="70" rx="4" fill="#282828"/>
+<rect x="561" y="582" width="132" height="70" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="569" y="589" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="587" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-keeper</text>
+<text x="587" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">keeper-1 · 26.2.1.258</text>
+<text x="587" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">2 CPU · 4Gi</text>
+<text x="587" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">Raft member</text>
+<rect x="699" y="582" width="60" height="70" rx="4" fill="#282828"/>
+<rect x="699" y="582" width="60" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="709" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">EBS gp3</text>
+<text x="709" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">10Gi PVC</text>
+<text x="709" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">encrypted</text>
+<text x="709" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">EBS CSI</text>
+<rect x="553" y="680" width="214" height="178" rx="4" fill="#282828"/>
+<rect x="553" y="680" width="214" height="178" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="563" y="694" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">operator node · m7i.xlarge</text>
+<text x="563" y="708" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">untainted · unlabelled · x86_64</text>
+<rect x="561" y="714" width="198" height="48" rx="4" fill="#282828"/>
+<rect x="561" y="714" width="198" height="48" rx="4" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1.5"/>
+<svg x="569" y="721" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="587" y="732" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-operator</text>
+<text x="587" y="746" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">replica 1 of 2 (zone-spread)</text>
+<text x="587" y="756" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">+ kube-rbac-proxy sidecar</text>
+<rect x="561" y="768" width="198" height="32" rx="4" fill="#282828"/>
+<rect x="561" y="768" width="198" height="32" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="571" y="780" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">cluster add-ons</text>
+<text x="571" y="794" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">CoreDNS · EBS CSI controller</text>
+<text x="565" y="820" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">Langfuse pods may schedule on</text>
+<text x="565" y="831" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">either operator node</text>
+<rect x="815" y="410" width="214" height="124" rx="4" fill="#282828"/>
+<rect x="815" y="410" width="214" height="124" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="825" y="424" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">server node · m7gd.2xlarge</text>
+<text x="825" y="438" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=server-arm64 · tainted</text>
+<rect x="823" y="440" width="132" height="84" rx="4" fill="#282828"/>
+<rect x="823" y="440" width="132" height="84" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="831" y="447" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="849" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-server</text>
+<text x="849" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">replica 2 · 26.2.1.525</text>
+<text x="849" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">4 CPU · 16Gi</text>
+<text x="849" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">no PVC (stateless)</text>
+<text x="849" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">IRSA service acct</text>
+<rect x="961" y="440" width="60" height="84" rx="4" fill="#282828"/>
+<rect x="961" y="440" width="60" height="84" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="971" y="458" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">cache</text>
+<text x="971" y="472" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">local NVMe</text>
+<text x="971" y="483" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">/nvme/disk</text>
+<text x="971" y="494" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">300Gi</text>
+<text x="971" y="505" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">read cache</text>
+<rect x="815" y="552" width="214" height="110" rx="4" fill="#282828"/>
+<rect x="815" y="552" width="214" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="825" y="566" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">keeper node · m7g.xlarge</text>
+<text x="825" y="580" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">label clickhouseGroup=keeper-arm64 · tainted</text>
+<rect x="823" y="582" width="132" height="70" rx="4" fill="#282828"/>
+<rect x="823" y="582" width="132" height="70" rx="4" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1.5"/>
+<svg x="831" y="589" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="17" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="29.001" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="40.998" y="5" width="5.9998" height="53.9982" rx="1.45943" fill="white" /> <rect x="53.001" y="26.0005" width="5.9998" height="11.9996" rx="1.45943" fill="white" /></svg>
+<text x="849" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">clickhouse-keeper</text>
+<text x="849" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">keeper-2 · 26.2.1.258</text>
+<text x="849" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">2 CPU · 4Gi</text>
+<text x="849" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">Raft member</text>
+<rect x="961" y="582" width="60" height="70" rx="4" fill="#282828"/>
+<rect x="961" y="582" width="60" height="70" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="971" y="600" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="start">EBS gp3</text>
+<text x="971" y="614" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">10Gi PVC</text>
+<text x="971" y="625" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">encrypted</text>
+<text x="971" y="636" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="start">EBS CSI</text>
+<rect x="815" y="680" width="214" height="178" rx="4" fill="none" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="4,4"/>
+<text x="922.0" y="760" fill="#b3b6bd" font-size="9" font-family="Inter" text-anchor="middle">operator node group</text>
+<text x="922.0" y="774" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="middle">min 2 · max 4 — ASG can</text>
+<text x="922.0" y="786" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="middle">place a node in any AZ</text>
+<rect x="1048" y="452" width="84" height="40" rx="4" fill="#282828"/>
+<rect x="1048" y="452" width="84" height="40" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<text x="1090.0" y="467" fill="white" font-size="9" font-family="Inter" font-weight="600" text-anchor="middle">S3 gateway</text>
+<text x="1090.0" y="481" fill="#b3b6bd" font-size="7" font-family="JetBrains Mono" text-anchor="middle">VPC endpoint</text>
+<rect x="1150" y="420" width="180" height="110" rx="4" fill="#282828"/>
+<rect x="1150" y="420" width="180" height="110" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5"/>
+<svg x="1158" y="427" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_472_6149-u29)"> <path d="M60 4H4V60H60V4Z" fill="url(#paint0_linear_472_6149-u29)" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M46.5848 34.025L46.8536 32.1322C49.3323 33.6169 49.3645 34.2301 49.3638 34.2469C49.3596 34.2504 48.9368 34.6032 46.5848 34.025ZM45.2247 33.647C40.9407 32.3506 34.9746 29.6136 32.5603 28.4726C32.5603 28.4628 32.5631 28.4537 32.5631 28.4439C32.5631 27.5164 31.8085 26.7618 30.8803 26.7618C29.9535 26.7618 29.1989 27.5164 29.1989 28.4439C29.1989 29.3714 29.9535 30.126 30.8803 30.126C31.2877 30.126 31.6573 29.9741 31.9492 29.7326C34.7898 31.0773 40.7097 33.7744 45.0252 35.0484L43.3186 47.0926C43.3137 47.1255 43.3116 47.1584 43.3116 47.1913C43.3116 48.2518 38.6167 50.1999 30.9454 50.1999C23.1929 50.1999 18.4483 48.2518 18.4483 47.1913C18.4483 47.1591 18.4462 47.1276 18.442 47.0961L14.8762 21.0512C17.9625 23.1757 24.6006 24.2999 30.9496 24.2999C37.2888 24.2999 43.9157 23.1799 47.0083 21.0617L45.2247 33.647ZM14.4996 18.3345C14.55 17.4133 19.8434 13.7999 30.9496 13.7999C42.0544 13.7999 47.3485 17.4126 47.3996 18.3345V18.6488C46.7906 20.7145 39.9306 22.8999 30.9496 22.8999C21.9532 22.8999 15.0897 20.7075 14.4996 18.639V18.3345ZM48.7996 18.3499C48.7996 15.9244 41.8458 12.3999 30.9496 12.3999C20.0534 12.3999 13.0996 15.9244 13.0996 18.3499L13.1654 18.8777L17.049 47.2445C17.1421 50.4169 25.6023 51.5999 30.9454 51.5999C37.5758 51.5999 44.6199 50.0753 44.7109 47.2466L46.3881 35.4187C47.3212 35.642 48.0891 35.7561 48.7058 35.7561C49.5339 35.7561 50.0939 35.5538 50.4334 35.1492C50.712 34.8174 50.8184 34.4156 50.7386 33.9879C50.5573 33.0191 49.4072 31.9747 47.065 30.6384L48.7282 18.905L48.7996 18.3499Z" fill="white" /> </g> <defs> <linearGradient id="paint0_linear_472_6149-u29" x1="4" y1="5604" x2="5604" y2="4" gradientUnits="userSpaceOnUse" > <stop stop-color="#1B660F" /> <stop offset="1" stop-color="#6CAE3E" /> </linearGradient> <clipPath id="clip0_472_6149-u29"> <rect x="4" y="4" width="56" height="56" rx="4" fill="white" /> </clipPath> </defs></svg>
+<text x="1176" y="438" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">S3 · table data</text>
+<text x="1176" y="452" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">clickhouse-private-</text>
+<text x="1176" y="464" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">  &lt;acct&gt;-us-east-1</text>
+<text x="1176" y="476" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">prefix ch-s3-4f6a1d2e…</text>
+<text x="1176" y="488" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">SharedMergeTree parts</text>
+<text x="1176" y="500" fill="#ffc300" font-size="8" font-family="JetBrains Mono" text-anchor="start">fips: s3-fips endpoint, CMK</text>
+<rect x="1150" y="560" width="180" height="66" rx="4" fill="#282828"/>
+<rect x="1150" y="560" width="180" height="66" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5" stroke-dasharray="5,3"/>
+<svg x="1158" y="567" width="12" height="12" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_472_6149-u30)"> <path d="M60 4H4V60H60V4Z" fill="url(#paint0_linear_472_6149-u30)" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M46.5848 34.025L46.8536 32.1322C49.3323 33.6169 49.3645 34.2301 49.3638 34.2469C49.3596 34.2504 48.9368 34.6032 46.5848 34.025ZM45.2247 33.647C40.9407 32.3506 34.9746 29.6136 32.5603 28.4726C32.5603 28.4628 32.5631 28.4537 32.5631 28.4439C32.5631 27.5164 31.8085 26.7618 30.8803 26.7618C29.9535 26.7618 29.1989 27.5164 29.1989 28.4439C29.1989 29.3714 29.9535 30.126 30.8803 30.126C31.2877 30.126 31.6573 29.9741 31.9492 29.7326C34.7898 31.0773 40.7097 33.7744 45.0252 35.0484L43.3186 47.0926C43.3137 47.1255 43.3116 47.1584 43.3116 47.1913C43.3116 48.2518 38.6167 50.1999 30.9454 50.1999C23.1929 50.1999 18.4483 48.2518 18.4483 47.1913C18.4483 47.1591 18.4462 47.1276 18.442 47.0961L14.8762 21.0512C17.9625 23.1757 24.6006 24.2999 30.9496 24.2999C37.2888 24.2999 43.9157 23.1799 47.0083 21.0617L45.2247 33.647ZM14.4996 18.3345C14.55 17.4133 19.8434 13.7999 30.9496 13.7999C42.0544 13.7999 47.3485 17.4126 47.3996 18.3345V18.6488C46.7906 20.7145 39.9306 22.8999 30.9496 22.8999C21.9532 22.8999 15.0897 20.7075 14.4996 18.639V18.3345ZM48.7996 18.3499C48.7996 15.9244 41.8458 12.3999 30.9496 12.3999C20.0534 12.3999 13.0996 15.9244 13.0996 18.3499L13.1654 18.8777L17.049 47.2445C17.1421 50.4169 25.6023 51.5999 30.9454 51.5999C37.5758 51.5999 44.6199 50.0753 44.7109 47.2466L46.3881 35.4187C47.3212 35.642 48.0891 35.7561 48.7058 35.7561C49.5339 35.7561 50.0939 35.5538 50.4334 35.1492C50.712 34.8174 50.8184 34.4156 50.7386 33.9879C50.5573 33.0191 49.4072 31.9747 47.065 30.6384L48.7282 18.905L48.7996 18.3499Z" fill="white" /> </g> <defs> <linearGradient id="paint0_linear_472_6149-u30" x1="4" y1="5604" x2="5604" y2="4" gradientUnits="userSpaceOnUse" > <stop stop-color="#1B660F" /> <stop offset="1" stop-color="#6CAE3E" /> </linearGradient> <clipPath id="clip0_472_6149-u30"> <rect x="4" y="4" width="56" height="56" rx="4" fill="white" /> </clipPath> </defs></svg>
+<text x="1176" y="578" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">S3 · Langfuse (opt.)</text>
+<text x="1176" y="592" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">langfuse-&lt;acct&gt;-us-east-1</text>
+<text x="1176" y="604" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">events · exports · media</text>
+<rect x="1150" y="650" width="180" height="54" rx="4" fill="#282828"/>
+<rect x="1150" y="650" width="180" height="54" rx="4" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="1160" y="668" fill="white" font-size="11" font-family="Inter" font-weight="600" text-anchor="start">ACM (opt.)</text>
+<text x="1160" y="682" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">self-signed cert for</text>
+<text x="1160" y="693" fill="#b3b6bd" font-size="8" font-family="JetBrains Mono" text-anchor="start">Langfuse NLB TLS</text>
+<rect x="1150" y="180" width="180" height="80" rx="4" fill="#282828"/>
+<rect x="1150" y="180" width="180" height="80" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<text x="1160" y="198" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">Where ClickHouse lives</text>
+<text x="1160" y="212" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">3 × server  → server nodes</text>
+<text x="1160" y="224" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">3 × keeper  → keeper nodes</text>
+<text x="1160" y="236" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">operator    → operator nodes</text>
+<text x="1160" y="248" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">data        → S3, never local</text>
+<rect x="1150" y="280" width="180" height="110" rx="4" fill="#282828"/>
+<rect x="1150" y="280" width="180" height="110" rx="4" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1.5"/>
+<svg x="1158" y="287" width="12" height="12" viewBox="0 0 24 24" fill="none" color="#9a9ea7" xmlns="http://www.w3.org/2000/svg"><path d="M8.375 10.3306V7.23497V7.23497C8.375 4.95553 10.166 3.10742 12.375 3.10742V3.10742C14.584 3.10742 16.375 4.95553 16.375 7.23497V7.23497V10.3306" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path d="M12.375 14.458V17.5537" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /> <path fill-rule="evenodd" clip-rule="evenodd" d="M17.375 21.6813H7.375C6.27 21.6813 5.375 20.7578 5.375 19.6176V12.3943C5.375 11.2541 6.27 10.3306 7.375 10.3306H17.375C18.48 10.3306 19.375 11.2541 19.375 12.3943V19.6176C19.375 20.7578 18.48 21.6813 17.375 21.6813Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+<text x="1176" y="298" fill="white" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">fips: true changes</text>
+<text x="1176" y="312" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">arm64 → x86_64 (m7i, m6id)</text>
+<text x="1176" y="324" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">image tags gain -fips</text>
+<text x="1176" y="336" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">ECR/S3/STS → FIPS endpoints</text>
+<text x="1176" y="348" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">native TLS on every CH port</text>
+<text x="1176" y="360" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">RSA 3072 · KMS CMKs</text>
+<text x="1176" y="372" fill="#b3b6bd" font-size="7.5" font-family="JetBrains Mono" text-anchor="start">Langfuse NLB forced to TLS</text>
+<text x="250" y="933" fill="#faff69" font-size="10" font-family="Inter" font-weight="600" text-anchor="start">Legend</text>
+<rect x="308" y="925" width="16" height="10" rx="2" fill="rgba(255, 195, 0, 0.14)" stroke="#ffc300" stroke-width="1"/>
+<text x="330" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">AWS service / EC2 node</text>
+<rect x="453.2" y="925" width="16" height="10" rx="2" fill="rgba(187, 51, 255, 0.16)" stroke="#bb33ff" stroke-width="1"/>
+<text x="475.2" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">ClickHouse pod</text>
+<rect x="561.6" y="925" width="16" height="10" rx="2" fill="rgba(109, 248, 225, 0.14)" stroke="#6df8e1" stroke-width="1"/>
+<text x="583.6" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Operator</text>
+<rect x="642.4" y="925" width="16" height="10" rx="2" fill="rgba(0, 203, 235, 0.16)" stroke="#00cbeb" stroke-width="1"/>
+<text x="664.4" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Client / ingress</text>
+<rect x="760.0" y="925" width="16" height="10" rx="2" fill="rgba(255, 35, 35, 0.16)" stroke="#ff2323" stroke-width="1"/>
+<text x="782.0" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Identity &amp; keys</text>
+<rect x="873.0" y="925" width="16" height="10" rx="2" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1"/>
+<text x="895.0" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Generic / storage</text>
+<rect x="995.2" y="925" width="16" height="10" rx="2" fill="rgba(154, 158, 167, 0.18)" stroke="#9a9ea7" stroke-width="1" stroke-dasharray="3,2"/>
+<text x="1017.2" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Optional (langfuse.enabled)</text>
+<line x1="1163.4" y1="930" x2="1179.4" y2="930" stroke="#ff7729" stroke-width="1.5"/>
+<text x="1185.4" y="933" fill="#b3b6bd" font-size="8" font-family="Inter" text-anchor="start">Image mirror</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header"><div class="card-dot sunrise"></div><h3>Compute & placement</h3></div>
+        <ul>
+          <li>• Three managed node groups across 3 AZs: keeper (3 × m7g.xlarge), server (3–6 × m7gd.2xlarge), operator (2–4 × m7i.xlarge)</li>
+          <li>• Keeper and server groups carry the <code>clickhouse.com/do-not-schedule</code> taint; only ClickHouse pods tolerate it</li>
+          <li>• Server nodes bind instance-store NVMe to <code>/nvme/disk</code> at boot for the 300Gi read cache</li>
+          <li>• Operator group is untainted, so it also hosts CoreDNS, EBS CSI and (optionally) Langfuse</li>
+        </ul>
+        <div class="badges"><span class="badge sunrise">AL2023 arm64</span><span class="badge sunrise">fips → x86_64</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot teal"></div><h3>Network</h3></div>
+        <ul>
+          <li>• VPC 10.20.0.0/16: public /20s for NAT + IGW, private /18s for every node and NLB</li>
+          <li>• One NAT gateway by default (<code>nat_mode: single</code>); <code>per-az</code> adds one per zone</li>
+          <li>• S3 gateway endpoint keeps table-data traffic off NAT</li>
+          <li>• ClickHouse NLB is internal by default (none | internal | public, public needs allowed_cidrs)</li>
+        </ul>
+        <div class="badges"><span class="badge teal">8123 / 9000</span><span class="badge teal">fips: 8443 / 9440</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot red"></div><h3>Storage, identity & keys</h3></div>
+        <ul>
+          <li>• All table data in one S3 bucket under a per-cluster key prefix; server pods keep no PVC</li>
+          <li>• Keeper is the only stateful ClickHouse component: 3 × 10Gi gp3-encrypted EBS</li>
+          <li>• IRSA: server pods assume ClickHouseS3Role via the EKS OIDC provider, so no static keys exist</li>
+          <li>• KMS: EKS secrets envelope encryption; bucket and EBS CMKs</li>
+        </ul>
+        <div class="badges"><span class="badge red">IRSA</span><span class="badge red">KMS</span><span class="badge red">gp3-encrypted</span></div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">ch-gov · ClickHouse Private on AWS EKS · generated from ansible/group_vars/all.yml defaults (fips: false unless noted)</p>
+  </div>
+
+  <script>
+    async function copyAsImage(btn) {
+      const orig = btn.textContent;
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        btn.textContent = '✓ Copied!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPNG(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const link = document.createElement('a');
+        link.download = 'aws-infrastructure.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+
+    async function downloadPDF(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const el = document.getElementById('report-container');
+        const r = el.getBoundingClientRect();
+        const pad = 32;
+        const canvas = await html2canvas(document.body, { backgroundColor: '#1f1f1c', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
+        const imgData = canvas.toDataURL('image/png');
+        const { jsPDF } = window.jspdf;
+        const orientation = canvas.width > canvas.height ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height], hotfixes: ['px_scaling'] });
+        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+        pdf.save('aws-infrastructure.pdf');
+        btn.textContent = '✓ Done!';
+      } catch (e) {
+        btn.textContent = '✗ Failed';
+      }
+      setTimeout(() => btn.textContent = orig, 2000);
+    }
+  </script>
+</body>
+</html>
