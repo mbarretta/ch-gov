@@ -84,7 +84,13 @@ trap cleanup EXIT
 # bytes are secret, and they reach the file solely via `cat`'s stdout --
 # never through a shell variable, command substitution, or argv.
 AUTH_CFG="$TMP/auth.cfg"
-{ printf 'user = "admin:'; cat "$PW_FILE"; printf '"\n'; } > "$AUTH_CFG"
+# tr, not cat: the generated password file ends in a newline, and that byte
+# landing inside the quoted value breaks curl's config-file parsing (the
+# closing quote ends up alone on its own line) -- confirmed live, silently,
+# since http_code() below swallows curl's own stderr. tr -d is still a pure
+# stream filter, not a shell variable/command substitution/argv, so the
+# secret-handling constraint above still holds.
+{ printf 'user = "admin:'; tr -d '\n' < "$PW_FILE"; printf '"\n'; } > "$AUTH_CFG"
 # TLS trust for both curl wrappers below, settled once the URL is chosen:
 # (--cacert <pem>) for the NLB's self-signed certificate or an explicit
 # GRAFANA_CACERT, empty for the system trust store. Never -k.

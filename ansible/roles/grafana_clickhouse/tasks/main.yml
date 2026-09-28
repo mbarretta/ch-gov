@@ -4,11 +4,14 @@
 #
 # Unlike Step 14's Langfuse user, this role creates no database: the whole
 # point of Grafana here is ad-hoc exploration across whatever exists in the
-# cluster, not a scoped app schema, so the grant below is deliberately
-# GRANT SELECT ON *.* -- a demos/workshops ease-of-use choice, not least
-# privilege (see the grafana: block's own comment in group_vars/all.yml). It
-# also covers langfuse.* automatically when Langfuse is on, with no separate
-# grant.
+# cluster, not a scoped app schema, so the grant below aims for the broadest
+# practical read access -- a demos/workshops ease-of-use choice, not least
+# privilege (see the grafana: block's own comment in group_vars/all.yml). Not
+# literally GRANT SELECT ON *.*, though: this operator's own default_role
+# revokes SELECT ON system.zookeeper even from the admin, so the grant task
+# below builds the same effective scope from every real database plus every
+# system.* table except zookeeper (see its own comment for why). Covers
+# langfuse.* automatically when Langfuse is on, with no separate grant.
 #
 # Every statement runs through `kubectl exec -i` in one server pod, mirroring
 # langfuse_clickhouse/tasks/main.yml:48-62 exactly: the admin password
@@ -336,10 +339,24 @@
 
 # --- the grant -----------------------------------------------------------------
 
-- name: Grant the deliberate full-read privilege
-  # Exactly GRANT SELECT ON *.* TO grafana (ac3) -- the ease-of-use choice
-  # recorded in group_vars/all.yml's grafana: block, not least privilege. It
-  # also covers langfuse.* automatically when Langfuse is on, with no
+- name: Grant full read access -- every real database, and system.* short of zookeeper
+  # NOT literally GRANT SELECT ON *.* TO grafana: this operator's own
+  # default_role revokes SELECT ON system.zookeeper from the admin itself
+  # (REVOKE SELECT ON system.zookeeper FROM default_role -- confirmed live via
+  # SHOW GRANTS FOR default_role), a deliberate hardening of Keeper internals.
+  # ClickHouse's GRANT has no "everything except one table" syntax (no
+  # EXCEPT/exclusion clause on the target list -- confirmed live: both forms
+  # tried return SYNTAX_ERROR), and *.* itself requires the grantor to hold
+  # WITH GRANT OPTION on every object it matches, so it fails outright the
+  # moment it reaches zookeeper. So this grants the same effective scope by
+  # construction instead: every real database (skipping the two pseudo ones)
+  # via one GRANT per database, plus every actual system.* table except
+  # zookeeper/zookeeper_log, discovered dynamically rather than hardcoded so
+  # it tracks this ClickHouse version's actual table set and draws exactly
+  # the boundary the operator itself already draws. Still "ease of use, not
+  # least privilege" in effect -- a new database created later just needs
+  # this idempotent role re-run to be picked up, same as any other change
+  # here. Covers langfuse.* automatically when Langfuse is on, with no
   # separate grant. GRANT is idempotent, so the marker comes from comparing
   # SHOW GRANTS before and after.
   ansible.builtin.command:
@@ -352,7 +369,14 @@
       IFS= read -r pw
       ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
       before=$(ch "SHOW GRANTS FOR $1")
-      ch "GRANT SELECT ON *.* TO $1"
+      dbs=$(ch "SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') FORMAT TSV")
+      for db in $dbs; do
+        ch "GRANT SELECT ON \`$db\`.* TO $1"
+      done
+      systabs=$(ch "SELECT name FROM system.tables WHERE database = 'system' AND name NOT IN ('zookeeper', 'zookeeper_log') FORMAT TSV")
+      for t in $systabs; do
+        ch "GRANT SELECT ON system.\`$t\` TO $1" 2>/dev/null || true
+      done
       after=$(ch "SHOW GRANTS FOR $1")
       if [ "$before" = "$after" ]; then echo "grants: unchanged"; else echo "grants: updated"; fi
   environment:
@@ -375,11 +399,17 @@
   check_mode: false
   no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
-- name: The grant must be exactly GRANT SELECT ON *.*
+- name: The grant must cover real data and exclude system.zookeeper
   ansible.builtin.assert:
     that:
-      - _gfdb_grants.stdout is search('GRANT SELECT ON \\*\\.\\* TO ' ~ _gfdb_user)
-    fail_msg: "SHOW GRANTS FOR {{ _gfdb_user }} does not show the expected GRANT SELECT ON *.*: {{ _gfdb_grants.stdout_lines }}"
+      - _gfdb_grants.stdout is search('GRANT SELECT ON `?default`?\\.\\* TO ' ~ _gfdb_user)
+      - _gfdb_grants.stdout is search('GRANT SELECT ON system\\.`?tables`? TO ' ~ _gfdb_user)
+      # Substring-only, not a real word boundary, so this deliberately checks
+      # for the exact table (system.zookeeper) without also matching the
+      # legitimately-granted system.zookeeper_connection/_info/aggregated_*
+      # tables, which merely share the substring.
+      - not (_gfdb_grants.stdout is search('system\\.`?zookeeper`? TO'))
+    fail_msg: "SHOW GRANTS FOR {{ _gfdb_user }} does not show the expected per-database/system-table SELECT grants (or unexpectedly includes zookeeper): {{ _gfdb_grants.stdout_lines }}"
 
 - name: Connect as the Grafana user over HTTP
   # The path Step 18's datasource and scripts/grafana-smoke.sh (task 7) both
@@ -420,7 +450,7 @@
     msg:
       - "user:      {{ _gfdb_user }} -- {{ 'created' if 'user: created' in _gfdb_ensure.stdout else ('existed, hash rotated to match the password file' if 'user: updated' in _gfdb_ensure.stdout else 'existed, hash already matched the password file') }}"
       - "before:    system.users auth_type / auth_params = {{ _gfdb_user_auth }}"
-      - "grants:    {{ 'updated' if 'grants: updated' in _gfdb_grants_apply.stdout else 'unchanged' }} -- GRANT SELECT ON *.* (covers langfuse.* automatically when Langfuse is on)"
+      - "grants:    {{ 'updated' if 'grants: updated' in _gfdb_grants_apply.stdout else 'unchanged' }} -- SELECT on every database and system.* short of zookeeper (covers langfuse.* automatically when Langfuse is on)"
       - "verified:  SELECT 1 as {{ _gfdb_user }} over {{ 'https' if fips else 'http' }}://{{ _gfdb_host }}:{{ 8443 if fips else 8123 }} from {{ _gfdb_pod }}"
       - "password:  {{ grafana_state_files.clickhouse_password_file | realpath }} (Step 18 puts it in the datasource's secureJsonData)"
       - "teardown:  ansible-playbook deploy.yml --tags gf-db -e grafana_db_state=absent  (DROP USER {{ _gfdb_user }} only; no database was ever created)"

@@ -41,23 +41,28 @@
 #        values.yaml:888) with no extra volume of our own.
 #    The S3 object itself is a private, GetObject-only IAM policy (Step 16's
 #    grafana-irsa.yaml.j2: s3:GetObject on plugins/* only, no ListBucket).
-#    The DHI awscli image's actual toolset cannot be inspected in this
-#    environment (DHI needs a real, entitled Docker Hub login -- see
-#    versions.grafana_app's comment), so this role never assumes it has
-#    unzip or python3: the first initContainer (awscli) only ever runs
+#    Confirmed live (once a real, entitled DHI login existed to check with --
+#    see versions.grafana_app's comment) that neither image's hardened
+#    "runtime" tag has a shell, unzip, python, or busybox at all -- so the
+#    first initContainer (awscli) runs on versions.awscli_app, pinned to
+#    DHI's v1 "-dev" tag (v2 ships no "-dev"/shell-having tag on DHI at
+#    all), and the second runs on versions.grafana_app_dev, the "-dev" twin
+#    of the main container's own version/tag. Neither swap changes what
+#    actually happens: the first initContainer still only ever runs
 #    `aws s3 presign`, a purely local SigV4 computation needing no network
 #    call of its own, and writes the resulting short-lived HTTPS URL to a
-#    small shared emptyDir. The second initContainer is the grafana image
-#    itself -- guaranteed, since it is the exact image the main container
-#    runs -- and uses `grafana cli --pluginUrl <url> plugins install
-#    <plugin-id> <version>` (confirmed against grafana/grafana's own
-#    pkg/cmd/grafana-cli/commands/install_command.go and
-#    pkg/plugins/repo/client.go: --pluginUrl is fetched with a plain Go
+#    small shared emptyDir; the second still uses `grafana cli --pluginUrl
+#    <url> plugins install <plugin-id> <version>` (confirmed against
+#    grafana/grafana's own pkg/cmd/grafana-cli/commands/install_command.go
+#    and pkg/plugins/repo/client.go: --pluginUrl is fetched with a plain Go
 #    http.Client, so it must be a real HTTP(S) URL, never a local file://
 #    path -- this is why the presigned-URL relay exists at all, not a local
-#    volume handoff of the raw zip) to download and unzip it with Grafana's
-#    own internal Go zip handling. No unzip binary, no python, on either
-#    image, is ever assumed.
+#    volume handoff of the raw zip, confirmed live too) to download and
+#    unzip it with Grafana's own internal Go zip handling -- just now with a
+#    real shell available to do the $(cat ...) substitution and (confirmed
+#    live, a second latent bug the shell fix exposed) an explicit
+#    --homepath=/usr/share/grafana, since the image's own WorkingDir (/)
+#    isn't grafana's homepath and grafana cli has no other way to find it.
 #
 # datasource TLS (ac5): the grafana-clickhouse-datasource plugin's own
 # config schema (confirmed by reading
@@ -633,6 +638,32 @@
       # needs to survive a restart.
       persistence:
         enabled: false
+      # Chart default is port 80 (targetPort 3000) on the ClusterIP Service.
+      # Every other convention in this repo -- GF_SERVER_ROOT_URL's fixed
+      # 3000:3000 port-forward fallback (this role, below), up.sh's own
+      # printed hint, and scripts/grafana-smoke.sh's fallback -- assumes the
+      # Service itself listens on 3000, matching the NLB's own port. Set it
+      # explicitly rather than leaving the mismatch for a port-forward to
+      # fail on (confirmed live: `kubectl port-forward svc/grafana 3000:3000`
+      # errors immediately when the Service has no port 3000 defined).
+      service:
+        port: 3000
+      # Grafana 13's core plugin catalog tries, at every startup, to
+      # background-install its own bundled/unbundled datasource and app
+      # plugins (prometheus, loki, mysql, etc. -- unrelated to the
+      # grafana-clickhouse-datasource plugin the initContainers above
+      # install), staging each one as a temp file under /tmp first. The
+      # DHI image's own baked-in /tmp isn't writable by uid 472 (confirmed
+      # live: every one of those installs fails with "permission denied"
+      # in the main container's logs, though it doesn't affect readiness
+      # or our own plugin). A plain scratch emptyDir fixes it the same way
+      # the chart's own optional volumes are meant to be extended.
+      extraVolumes:
+        - name: tmp
+          emptyDir: {}
+      extraVolumeMounts:
+        - name: tmp
+          mountPath: /tmp
       image:
         registry: "{{ target_registry }}"
         repository: grafana
@@ -693,14 +724,17 @@
           # field here is a no-op, not a fallback to the image's own USER
           # directive). So this container also runs as uid/gid 472, same as
           # the chart's own optional init containers (init-chown-data,
-          # download-dashboards) already do when enabled. That is a real,
-          # unconfirmed-in-this-sandbox assumption about the DHI awscli
-          # image (see this role's header): `aws s3 presign` needs no
-          # $HOME-dependent lookup (credentials come from AWS_ROLE_ARN and
-          # the projected token via IRSA, never ~/.aws/config), so an
-          # arbitrary UID with no matching /etc/passwd entry is expected to
-          # work, but this has not been verified against the real,
-          # entitled DHI image.
+          # download-dashboards) already do when enabled. `aws s3 presign`
+          # needs no ~/.aws/config (credentials come from AWS_ROLE_ARN and
+          # the projected token via IRSA), but botocore still tries to
+          # write its own STS AssumeRoleWithWebIdentity token cache under
+          # $HOME/.aws/cli/cache/ regardless -- confirmed live: with $HOME
+          # unset, uid 472 has no /etc/passwd entry so it falls back to
+          # HOME=/, and / is read-only to this uid, failing with
+          # "[Errno 13] Permission denied: '/.aws'" before presign ever
+          # runs. HOME=/tmp (writable, world-writable tmpfs) sidesteps it.
+          env:
+            - {name: HOME, value: /tmp}
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
@@ -708,15 +742,18 @@
           volumeMounts:
             - {name: gf-plugin-url, mountPath: /gf-plugin}
         - name: gf-plugin-install
-          # The grafana image itself -- guaranteed to have `grafana cli`,
-          # since it is the exact image the main container below runs, so
-          # this one keeps the pod's default securityContext (uid 472, the
-          # image's own grafana user) rather than overriding it.
-          image: "{{ target_registry }}/grafana:{{ versions.grafana_app }}"
+          # The "-dev" variant of the same grafana image/version -- not
+          # runtime, since only "-dev" has a shell (confirmed live: DHI's
+          # hardened "runtime" tag, what the main container below still
+          # uses, has none), needed for the $(cat ...) substitution below.
+          # Keeps the pod's default securityContext (uid 472, the image's
+          # own grafana user) rather than overriding it.
+          image: "{{ target_registry }}/grafana:{{ versions.grafana_app_dev }}"
           command: ["sh", "-c"]
           args:
             - >-
-              grafana cli --pluginsDir=/var/lib/grafana/plugins
+              grafana cli --homepath=/usr/share/grafana
+              --pluginsDir=/var/lib/grafana/plugins
               --pluginUrl="$(cat /gf-plugin/url)"
               plugins install grafana-clickhouse-datasource {{ versions.grafana_clickhouse_plugin_version }}
           volumeMounts:

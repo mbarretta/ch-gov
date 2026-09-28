@@ -224,8 +224,19 @@ versions:
                               # 2026-01-30 in favor of grafana-community/
                               # helm-charts, but the approved plan pins this
                               # exact source and it still installs cleanly.
-  grafana_app: "13.2.2"       # DHI grafana image tag
-  awscli_app: "2.37.4"        # DHI awscli image tag (initContainer)
+  grafana_app: "13.2.2"       # DHI grafana image tag (the main container)
+  grafana_app_dev: "13.2.2-dev" # same version, DHI's "-dev" variant -- used only by the
+                              # plugin-install initContainer below, which needs a real shell
+                              # for its $(cat ...) substitution feeding grafana cli's
+                              # --pluginUrl; confirmed live that DHI's hardened "runtime" tag
+                              # (grafana_app above) has no shell at all. The main container
+                              # keeps the hardened runtime tag.
+  awscli_app: "1.46.1-dev"    # DHI awscli image tag (initContainer) -- v1's "-dev" variant.
+                              # DHI's awscli v2 catalog line ships no "-dev"/shell-having tag
+                              # at all (confirmed live against the real catalog), and this
+                              # initContainer's `aws s3 presign > file` needs a shell to
+                              # redirect the output. v1's `s3 presign` takes the same
+                              # --region/--expires-in flags this already uses (confirmed live).
   # Pinned + SHA256-verified against grafana.com's plugin API (2026-09-25):
   # https://grafana.com/api/plugins/grafana-clickhouse-datasource/versions/4.21.3/download
   grafana_clickhouse_plugin_version: "4.21.3"
@@ -353,6 +364,7 @@ langfuse_charts:
 # these entries is actually in play.
 grafana_images:
   - {repo: grafana, tag: "{{ versions.grafana_app }}", source: "dhi.io"}
+  - {repo: grafana, tag: "{{ versions.grafana_app_dev }}", source: "dhi.io"}
   - {repo: awscli,  tag: "{{ versions.awscli_app }}",  source: "dhi.io"}
 # Same helm-http mechanism as langfuse_charts: grafana/helm-charts is a plain
 # Helm HTTP repository, not an OCI registry, so skopeo cannot copy it.
