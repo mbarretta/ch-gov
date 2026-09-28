@@ -205,7 +205,7 @@ A denial on any other repo name is expected, not a broken setup.
 
 ---
 
-## 3b. Persisting your two account IDs: `state/deploy-vars.yml`
+## 3b. Persisting your account IDs and SSO portal: `state/deploy-vars.yml`
 
 `ansible/group_vars/all.yml`'s `aws:` block ships with two placeholders --
 `target_account_id: "<YOUR_ACCOUNT_ID>"` and
@@ -215,10 +215,16 @@ Every script and role reads those two values, so a real deployer has to fill
 them in somewhere. Want to see the file's shape without running anything?
 It's tracked at `state/deploy-vars.yml.example`.
 
-**Don't hand-edit `all.yml`.** The first time you run any script under
-`scripts/` (every one of them sources `scripts/lib/common.sh`), it generates
-`state/deploy-vars.yml` for you, holding the same `aws:` shape as `all.yml`,
-with the same two placeholders:
+**Don't hand-edit `all.yml`, and don't hand-edit `.aws/config` or its
+template either.** `ansible/deploy.yml` re-renders `.aws/config` from
+`ansible/files/aws-config.ini.j2` on *every* run (`tags: [always]`), so any
+value filled in by hand -- in the generated file or in the tracked template
+-- is silently overwritten on the next run. `state/deploy-vars.yml` is the
+one place a fill-in survives.
+
+The first time you run any script under `scripts/` (every one of them
+sources `scripts/lib/common.sh`), it generates `state/deploy-vars.yml` for
+you, holding the same `aws:` shape as `all.yml`, with the same placeholders:
 
 ```yaml
 aws:
@@ -228,15 +234,26 @@ aws:
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
   source_ecr_profile: "private-us"
+  sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
 ```
 
-Open that file once and replace the two placeholders with your real account
-IDs. `state/` is gitignored, so this file can never be committed by accident,
-and `scripts/play.sh` picks it up automatically on every run afterward, via
-an `-e @state/deploy-vars.yml` that overrides `all.yml`'s placeholders for
-exactly those two values. Leave the file untouched, or delete it, and the
-deployment fails exactly the way it always has -- there's no new failure
-mode, only a place to fix the old one without touching a tracked file.
+Open that file once and fill in your real values: the two account IDs, and
+`sso_start_url` (your org's IAM Identity Center portal start URL, used by
+`[sso-session clickhouse]` in the generated `.aws/config`). `sso_start_url`
+is optional -- leave it as the placeholder if you don't have it yet, and
+`aws sso login` will fail clearly until you do. `state/` is gitignored, so
+this file can never be committed by accident, and `scripts/play.sh` picks it
+up automatically on every run afterward, via an `-e @state/deploy-vars.yml`
+that overrides `all.yml`'s placeholders for exactly those values. Leave the
+file untouched, or delete it, and the deployment fails exactly the way it
+always has -- there's no new failure mode, only a place to fix the old one
+without touching a tracked file.
+
+This is now the *only* place that makes AWS CLI auth work end to end: fill
+in `state/deploy-vars.yml` once, and every subsequent `.aws/config` render --
+whether from `scripts/lib/common.sh`'s pre-Ansible bootstrap or from
+`ansible/deploy.yml`'s own pre-task -- picks up your real values and keeps
+them, run after run.
 
 ---
 

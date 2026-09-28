@@ -63,7 +63,20 @@ render_aws_config() {
   fips_default="$(group_var_flag fips "$CH_PROJECT_ROOT/ansible/group_vars/all.yml")"
   [[ "$fips_default" == "true" ]] && use_fips=true
   mkdir -p "$(dirname "$out")"
-  sed "s/{{ 'true' if fips else 'false' }}/$use_fips/g" "$tmpl" > "$out"
+  # aws.target_account_id and aws.sso_start_url are also Jinja in the
+  # template now (see ansible/files/aws-config.ini.j2); this credential-free
+  # pre-Ansible render has no YAML parser, so it substitutes the same literal
+  # placeholders the template's own `| default(...)` (and all.yml's
+  # target_account_id default) would resolve to on a fresh checkout, rather
+  # than leaving raw {{ ... }} text in the generated file. The authoritative
+  # Ansible render (deploy.yml, tags: [always]) fully re-templates this file
+  # on every run anyway, so this only matters for the brief window before
+  # Ansible has run for the first time.
+  sed \
+    -e "s/{{ 'true' if fips else 'false' }}/$use_fips/g" \
+    -e "s/{{ aws\.target_account_id }}/<YOUR_ACCOUNT_ID>/g" \
+    -e "s#{{ aws\.sso_start_url | default('https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start') }}#https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start#g" \
+    "$tmpl" > "$out"
 }
 render_aws_config
 export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
@@ -91,6 +104,10 @@ aws:
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
   source_ecr_profile: "private-us"
+  # Optional -- your org's IAM Identity Center (SSO) portal start URL, used
+  # by [sso-session clickhouse] in the generated .aws/config. Leave as-is
+  # until you know it; `aws sso login` fails clearly until it's real.
+  sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
 EOF
 }
 render_deploy_vars

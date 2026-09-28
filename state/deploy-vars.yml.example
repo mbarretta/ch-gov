@@ -9,3 +9,7 @@ aws:
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
   source_ecr_profile: "private-us"
+  # Optional -- your org's IAM Identity Center (SSO) portal start URL, used
+  # by [sso-session clickhouse] in the generated .aws/config. Leave as-is
+  # until you know it; `aws sso login` fails clearly until it's real.
+  sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
