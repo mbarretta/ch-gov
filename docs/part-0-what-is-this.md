@@ -158,6 +158,9 @@ exactly. In plain terms:
 | 13 (optional) | S3 bucket and IAM role for Langfuse | A second pantry, a key for a second cook |
 | 14 (optional) | A database and user for Langfuse inside ClickHouse | Give the second cook one shelf, not the whole kitchen |
 | 15 (optional) | Install Langfuse | A second restaurant next door that stores its receipts in your kitchen |
+| 16 (optional) | S3 bucket and IAM role for Grafana's plugin mirror | A third pantry, holding one part (a plugin) instead of food |
+| 17 (optional) | A read-only user for Grafana inside ClickHouse | Give a visiting inspector a look at every shelf, but no keys to change anything |
+| 18 (optional) | Install Grafana, pointed at that user | A window installed in the kitchen wall so people can watch the cooks without walking in |
 
 Steps 1–5 are generic AWS. Steps 6–8 are preparation that only ClickHouse
 cares about. Steps 9–12 are the product itself. Only Step 5 onward costs
@@ -177,6 +180,20 @@ the costs and the teardown rules are in **Part 6**. Its web address is plain
 HTTP unless you also set `langfuse.load_balancer.tls: true`, which has its
 load balancer encrypt the connection with a certificate the deployment makes
 itself — Part 6 §9 says what that does and does not give you.
+
+### Optional: Grafana on top
+
+Steps 16–18 are also off by default, independent of Langfuse. Switched on
+(`grafana.enabled: true`), they install **Grafana** — a dashboarding UI —
+with one datasource already wired up: a read-only user (Step 17) reached
+through a plugin mirrored into your own S3 bucket (Step 16), since the
+cluster has no route out to fetch it live. Once both capabilities are on,
+that one datasource can see Langfuse's tables too, with no separate grant.
+Grafana's images come from DHI (Docker Hardened Images), a paid, entitled
+catalog unlike Chainguard's anonymous pulls — a second credential Part 1
+covers once, for every optional credential this project needs. The steps,
+the plugin-mirror mechanism, and the costs and teardown rules are in
+**Part 8**.
 
 ## 6. How to deploy it with this project
 
@@ -334,8 +351,8 @@ scripts/down.sh --all          # everything except the S3 bucket and ECR
 ```
 
 Use the script, not the console, because teardown is **not** the reverse of
-bring-up. Three things point the wrong way — four with Langfuse — and the
-script handles them:
+bring-up. Three things point the wrong way — four with Langfuse, five with
+Grafana too — and the script handles them:
 
 - The load balancer must go before the cluster or EKS, or the NLB is
   orphaned, keeps billing, and blocks deleting the VPC.
@@ -350,6 +367,13 @@ script handles them:
   still up. `down.sh` runs it first, only when it exists, and even if you
   have already switched `langfuse.enabled` back to `false`. Part 6 §13 has
   the details, including the separate command that purges its data.
+- Grafana (optional Steps 16–18) goes **after Langfuse, still before
+  ClickHouse** — it has no PVC and no data dependency of its own, so its
+  ordering constraint is looser than Langfuse's, but `down.sh`'s default
+  plan still removes both application layers before the load balancer, the
+  cluster and the node groups, independent of whether `grafana.enabled` is
+  still `true`. Part 8 §13 has the details, including the one bucket this
+  project actually deletes on teardown rather than keeping.
 
 ### Up again
 
@@ -393,9 +417,11 @@ Both run as part of `up.sh`. Both are safe any time.
 
 ### What is safe to delete by hand
 
-Nothing in the two Kubernetes namespaces (three with Langfuse), and none of
-the four CloudFormation stacks (five with Langfuse). Use the scripts. The account is shared with other people's clusters,
-so never delete an AWS resource you cannot trace to this project's names.
+Nothing in the two Kubernetes namespaces (three with Langfuse, four with
+Grafana too), and none of the four CloudFormation stacks (five with
+Langfuse, six with Grafana too). Use the scripts. The account is shared
+with other people's clusters, so never delete an AWS resource you cannot
+trace to this project's names.
 
 Two things the scripts deliberately never delete, and you must:
 
