@@ -91,7 +91,10 @@ export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
 # missing, so it never clobbers a copy someone has already filled in.
 render_deploy_vars() {
   local out="$CH_PROJECT_ROOT/state/deploy-vars.yml"
-  [[ -f "$out" ]] && return 0
+  if [[ -f "$out" ]]; then
+    chmod 600 "$out"
+    return 0
+  fi
   mkdir -p "$(dirname "$out")"
   cat > "$out" <<'EOF'
 # Local override for ansible/group_vars/all.yml's aws: block.
@@ -118,6 +121,7 @@ dhi:
   username: "<YOUR_DOCKERHUB_USERNAME>"
   token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
 EOF
+  chmod 600 "$out"
 }
 render_deploy_vars
 # Non-empty only once state/deploy-vars.yml exists (render_deploy_vars above
