@@ -212,7 +212,8 @@ A denial on any other repo name is expected, not a broken setup.
 `source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"` -- because this is a public
 tutorial repo, and a real account number has no business in a tracked file.
 Every script and role reads those two values, so a real deployer has to fill
-them in somewhere.
+them in somewhere. Want to see the file's shape without running anything?
+It's tracked at `state/deploy-vars.yml.example`.
 
 **Don't hand-edit `all.yml`.** The first time you run any script under
 `scripts/` (every one of them sources `scripts/lib/common.sh`), it generates
