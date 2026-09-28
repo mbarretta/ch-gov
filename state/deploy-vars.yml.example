@@ -1,0 +1,11 @@
+# Tracked example of the local override for ansible/group_vars/all.yml's
+# aws: block. See docs/part-1-prerequisites.md section 3b -- the real file,
+# state/deploy-vars.yml, is generated automatically (gitignored) the first
+# time you run any script under scripts/, with this exact shape.
+aws:
+  target_account_id: "<YOUR_ACCOUNT_ID>"
+  target_region: "us-east-1"
+  target_profile: "sa"
+  source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
+  source_ecr_region: "us-east-1"
+  source_ecr_profile: "private-us"
