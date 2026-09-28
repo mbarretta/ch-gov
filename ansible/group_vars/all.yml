@@ -365,15 +365,20 @@ all_artifacts: "{{ container_images + helm_charts + third_party_images
                    + (langfuse_images + langfuse_charts if (langfuse.enabled | bool) else [])
                    + (grafana_images + grafana_charts if (grafana.enabled | bool) else []) }}"
 
-# Docker Hardened Images login (grafana.enabled only). Resolved from the
-# environment ONLY -- never hardcoded here, never written to group_vars or
-# any committed file. The resulting skopeo login lands in the same gitignored
-# state/ authfile below that every other registry already uses (image_sync
-# handles the actual `skopeo login dhi.io`; this task only wires the lookup).
-#   export DHI_USERNAME=<Docker Hub username entitled to the DHI catalog>
-#   export DHI_TOKEN=<personal access token>
-dhi_username: "{{ lookup('ansible.builtin.env', 'DHI_USERNAME') }}"
-dhi_token: "{{ lookup('ansible.builtin.env', 'DHI_TOKEN') }}"
+# Docker Hardened Images login (grafana.enabled only). Never hardcoded here,
+# never written to group_vars or any other committed file -- this is a public
+# tutorial repo. Real values belong in the gitignored state/deploy-vars.yml,
+# same as the aws: block above (see its comment); dhi.username/dhi.token
+# there win when set. Falls back to DHI_USERNAME/DHI_TOKEN in the environment
+# for callers (CI, ad-hoc shells) that would rather not touch that file. The
+# resulting skopeo login lands in the same gitignored state/ authfile below
+# that every other registry already uses (image_sync handles the actual
+# `skopeo login dhi.io`; this task only wires the lookup).
+dhi:
+  username: ""
+  token: ""
+dhi_username: "{{ dhi.username | default('', true) or lookup('ansible.builtin.env', 'DHI_USERNAME') }}"
+dhi_token: "{{ dhi.token | default('', true) or lookup('ansible.builtin.env', 'DHI_TOKEN') }}"
 
 # skopeo credentials are written here, not to ~/.config/containers, so the
 # project stays self-contained. Gitignored -- it holds real registry tokens.

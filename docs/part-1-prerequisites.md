@@ -235,7 +235,20 @@ aws:
   source_ecr_region: "us-east-1"
   source_ecr_profile: "private-us"
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
+
+# Optional -- only needed when grafana.enabled is true.
+dhi:
+  username: "<YOUR_DOCKERHUB_USERNAME>"
+  token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
 ```
+
+If you're turning on the optional Grafana capability (Steps 16-18), fill in
+`dhi.username`/`dhi.token` too -- a Docker Hub account entitled to the DHI
+(Docker Hardened Images) catalog, which is what `grafana`/`awscli` mirror
+from. This is the same file, so it never touches a tracked one; setting
+`DHI_USERNAME`/`DHI_TOKEN` in the environment instead still works and is
+checked as a fallback, but `state/deploy-vars.yml` is the one that survives
+across shells and reboots.
 
 Open that file once and fill in your real values: the two account IDs, and
 `sso_start_url` (your org's IAM Identity Center portal start URL, used by

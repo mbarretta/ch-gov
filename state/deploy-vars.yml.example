@@ -13,3 +13,12 @@ aws:
   # by [sso-session clickhouse] in the generated .aws/config. Leave as-is
   # until you know it; `aws sso login` fails clearly until it's real.
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
+
+# Optional -- only needed when grafana.enabled is true. A Docker Hub account
+# entitled to the DHI (Docker Hardened Images) catalog, used to mirror the
+# grafana/awscli images from dhi.io. Leave as-is until you have one; the
+# image_sync role fails clearly if grafana.enabled is true and this is empty
+# with no DHI_USERNAME/DHI_TOKEN in the environment either.
+dhi:
+  username: "<YOUR_DOCKERHUB_USERNAME>"
+  token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
