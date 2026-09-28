@@ -457,7 +457,8 @@
         openSSL:
           enabled: "{{ fips }}"
           required: "{{ fips }}"
-          secret: "{{ clickhouse_tls_secret_name }}"
+          secret:
+            name: "{{ clickhouse_tls_secret_name }}"
         loggerConfig:
           loggerLevel: "{{ clickhouse.server.log_level }}"
         prometheus:
@@ -497,7 +498,15 @@
         openSSL:
           enabled: "{{ fips }}"
           required: "{{ fips }}"
-          secret: "{{ clickhouse_tls_secret_name }}"
+          # Keeper's chart schema defaults certKey/keyKey to keeper.crt/keeper.key,
+          # but the Secret above only ever writes server.crt/server.key/ca.crt --
+          # one shared leaf cert for both server and keeper (4a-spike's finding).
+          # Override to the keys that actually exist so fips: true's mTLS wiring
+          # doesn't reference a nonexistent Secret key.
+          secret:
+            name: "{{ clickhouse_tls_secret_name }}"
+            certKey: server.crt
+            keyKey: server.key
         loggerConfig:
           loggerLevel: "{{ clickhouse.keeper.log_level }}"
   register: _cl_release

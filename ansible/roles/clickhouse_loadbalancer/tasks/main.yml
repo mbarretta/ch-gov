@@ -284,29 +284,18 @@
       spec:
         restartPolicy: Never
         affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: clickhouseGroup, operator: DoesNotExist}]}]}}}
-        {% if fips %}
-        volumes:
-          - name: ca
-            secret: {secretName: {{ clickhouse_tls_secret_name }}, items: [{key: ca.crt, path: ca.crt}]}
-        {% endif %}
+        volumes: {{ ([{"name": "ca", "secret": {"secretName": clickhouse_tls_secret_name, "items": [{"key": "ca.crt", "path": "ca.crt"}]}}] if fips else []) | to_json }}
         containers:
           - name: probe
             image: {{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
             env:
               - {name: LB, value: "{{ _lb_host.stdout | trim }}"}
               - {name: CLICKHOUSE_PASSWORD, valueFrom: {secretKeyRef: {name: lb-probe, key: password}}}
-            {% if fips %}
-            volumeMounts:
-              - {name: ca, mountPath: /tls, readOnly: true}
-            {% endif %}
+            volumeMounts: {{ ([{"name": "ca", "mountPath": "/tls", "readOnly": true}] if fips else []) | to_json }}
             command: ["sh", "-c"]
             args:
               - |
-                {% if fips %}
-                cat >/tmp/client.xml <<'XML'
-                <config><openSSL><client><caConfig>/tls/ca.crt</caConfig><verificationMode>strict</verificationMode><invalidCertificateHandler><name>RejectCertificateHandler</name></invalidCertificateHandler></client></openSSL></config>
-                XML
-                {% endif %}
+                {{ ("echo '<config><openSSL><client><caConfig>/tls/ca.crt</caConfig><verificationMode>strict</verificationMode><invalidCertificateHandler><name>RejectCertificateHandler</name></invalidCertificateHandler></client></openSSL></config>' > /tmp/client.xml") if fips else "true" }}
                 for i in 1 2 3 4 5 6; do
                   clickhouse-client --host "$LB" --port {{ 9440 if fips else 9000 }} {{ '--secure --config-file=/tmp/client.xml' if fips else '' }} --user {{ clickhouse.admin_username }} --connect_timeout 5 -q 'SELECT hostName()' 2>&1 | head -1
                 done | sort | uniq -c | sed 's/^/native {{ 9440 if fips else 9000 }}: /'
@@ -328,25 +317,7 @@
                 # OPENSSL_CONF below restricts the offered groups to
                 # FIPS-approved classical curves to route around it (both
                 # confirmed against a live pod).
-                {% if fips %}
-                cat >/tmp/wget-openssl.cnf <<'EOF'
-                .include /etc/ssl/fipsmodule.cnf
-                [openssl_init]
-                providers = provider_sect
-                ssl_conf = ssl_sect
-                [ssl_sect]
-                system_default = system_default_sect
-                [system_default_sect]
-                CipherString = DEFAULT:@SECLEVEL=2
-                Groups = X25519:P-256:P-384
-                [provider_sect]
-                fips = fips_sect
-                default = default_sect
-                [default_sect]
-                activate = 1
-                EOF
-                export OPENSSL_CONF=/tmp/wget-openssl.cnf
-                {% endif %}
+                {{ ("echo '.include /etc/ssl/fipsmodule.cnf' > /tmp/wget-openssl.cnf && echo '[openssl_init]' >> /tmp/wget-openssl.cnf && echo 'providers = provider_sect' >> /tmp/wget-openssl.cnf && echo 'ssl_conf = ssl_sect' >> /tmp/wget-openssl.cnf && echo '[ssl_sect]' >> /tmp/wget-openssl.cnf && echo 'system_default = system_default_sect' >> /tmp/wget-openssl.cnf && echo '[system_default_sect]' >> /tmp/wget-openssl.cnf && echo 'CipherString = DEFAULT:@SECLEVEL=2' >> /tmp/wget-openssl.cnf && echo 'Groups = X25519:P-256:P-384' >> /tmp/wget-openssl.cnf && echo '[provider_sect]' >> /tmp/wget-openssl.cnf && echo 'fips = fips_sect' >> /tmp/wget-openssl.cnf && echo 'default = default_sect' >> /tmp/wget-openssl.cnf && echo '[default_sect]' >> /tmp/wget-openssl.cnf && echo 'activate = 1' >> /tmp/wget-openssl.cnf && export OPENSSL_CONF=/tmp/wget-openssl.cnf") if fips else "true" }}
                 echo "{{ 'https' if fips else 'http' }} {{ 8443 if fips else 8123 }}:   $(wget -qO- {{ '--no-check-certificate' if fips else '' }} --timeout=5 "{{ 'https' if fips else 'http' }}://$LB:{{ 8443 if fips else 8123 }}/ping" 2>&1 | head -1)"
       YAML
       kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/lb-probe --namespace={{ clickhouse.namespace }} --timeout=180s >/dev/null
