@@ -205,6 +205,40 @@ A denial on any other repo name is expected, not a broken setup.
 
 ---
 
+## 3b. Persisting your two account IDs: `state/deploy-vars.yml`
+
+`ansible/group_vars/all.yml`'s `aws:` block ships with two placeholders --
+`target_account_id: "<YOUR_ACCOUNT_ID>"` and
+`source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"` -- because this is a public
+tutorial repo, and a real account number has no business in a tracked file.
+Every script and role reads those two values, so a real deployer has to fill
+them in somewhere.
+
+**Don't hand-edit `all.yml`.** The first time you run any script under
+`scripts/` (every one of them sources `scripts/lib/common.sh`), it generates
+`state/deploy-vars.yml` for you, holding the same `aws:` shape as `all.yml`,
+with the same two placeholders:
+
+```yaml
+aws:
+  target_account_id: "<YOUR_ACCOUNT_ID>"
+  target_region: "us-east-1"
+  target_profile: "sa"
+  source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
+  source_ecr_region: "us-east-1"
+  source_ecr_profile: "private-us"
+```
+
+Open that file once and replace the two placeholders with your real account
+IDs. `state/` is gitignored, so this file can never be committed by accident,
+and `scripts/play.sh` picks it up automatically on every run afterward, via
+an `-e @state/deploy-vars.yml` that overrides `all.yml`'s placeholders for
+exactly those two values. Leave the file untouched, or delete it, and the
+deployment fails exactly the way it always has -- there's no new failure
+mode, only a place to fix the old one without touching a tracked file.
+
+---
+
 ## 4. Notes from doing this for real
 
 The guide is old, so treat its specific versions as illustrative, not literal.

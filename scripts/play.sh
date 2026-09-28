@@ -66,7 +66,13 @@ cd "$CH_ROOT/ansible"
 PY="$CH_ROOT/.venv/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
 
+# $CH_EXTRA_VARS (from common.sh: -e @state/deploy-vars.yml, or empty) goes
+# unquoted and ahead of "$@" in both branches below on purpose, so it
+# word-splits into its own -e/@file pair and so any explicit -e a caller
+# passes in "$@" still wins on conflicting keys -- Ansible lets the last -e
+# for a given var win when the same key is set more than once.
 if [[ -n "$PY" ]]; then
+  # shellcheck disable=SC2086  # CH_EXTRA_VARS is a deliberate "-e @file" word pair, or empty; word-splitting is the point.
   exec "$PY" -c '
 import fcntl, os, sys
 for fd in (0, 1, 2):
@@ -77,9 +83,10 @@ for fd in (0, 1, 2):
     except OSError:
         pass          # closed or not a real file; ansible will say so
 os.execvp(sys.argv[1], sys.argv[1:])
-' ansible-playbook "$PLAYBOOK" "$@"
+' ansible-playbook "$PLAYBOOK" $CH_EXTRA_VARS "$@"
 else
   warn "no python3 found; falling back to a pipe (output will not be coloured)"
-  ansible-playbook "$PLAYBOOK" "$@" </dev/null 2>&1 | cat
+  # shellcheck disable=SC2086  # CH_EXTRA_VARS is a deliberate "-e @file" word pair, or empty; word-splitting is the point.
+  ansible-playbook "$PLAYBOOK" $CH_EXTRA_VARS "$@" </dev/null 2>&1 | cat
   exit "${PIPESTATUS[0]}"
 fi

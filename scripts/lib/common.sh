@@ -68,6 +68,42 @@ render_aws_config() {
 render_aws_config
 export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
 
+# ---- deploy-vars bootstrap -------------------------------------------------
+# ansible/group_vars/all.yml's aws: block ships with two placeholders
+# (target_account_id, source_ecr_account_id) because this is a public
+# tutorial repo -- a real account number has no business in a tracked file.
+# state/deploy-vars.yml is the gitignored local override a deployer fills in
+# once with their two real values, instead of hand-editing all.yml. Mirrors
+# render_aws_config immediately above: only fills in the file when it's
+# missing, so it never clobbers a copy someone has already filled in.
+render_deploy_vars() {
+  local out="$CH_PROJECT_ROOT/state/deploy-vars.yml"
+  [[ -f "$out" ]] && return 0
+  mkdir -p "$(dirname "$out")"
+  cat > "$out" <<'EOF'
+# Local override for ansible/group_vars/all.yml's aws: block.
+# Fill in your two real account IDs below and leave the rest -- this file is
+# gitignored (state/) and every script picks it up automatically afterward.
+aws:
+  target_account_id: "<YOUR_ACCOUNT_ID>"
+  target_region: "us-east-1"
+  target_profile: "sa"
+  source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
+  source_ecr_region: "us-east-1"
+  source_ecr_profile: "private-us"
+EOF
+}
+render_deploy_vars
+# Non-empty only once state/deploy-vars.yml exists (render_deploy_vars above
+# always creates it, so in practice this is "always" -- the explicit check
+# keeps the intent, "load the override file when there is one", legible at
+# the scripts/play.sh call site, and keeps this a no-op if that ever changes).
+if [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]]; then
+  export CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
+else
+  export CH_EXTRA_VARS=""
+fi
+
 # Tracks non-fatal problems so the script can exit non-zero at the very end
 # instead of stopping at the first issue -- you want the whole report.
 PROBLEMS=0
