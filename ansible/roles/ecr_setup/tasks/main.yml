@@ -17,6 +17,9 @@
       - --output=text
   register: _target_acct
   changed_when: false
+  # STS get-caller-identity changes nothing; without this, --check skips the
+  # command and the account assert below sees an empty string.
+  check_mode: false
 
 - name: Fail early if the profile points at an unexpected account
   # Cheap guard against copying images into somebody else's account because
