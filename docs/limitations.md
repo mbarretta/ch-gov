@@ -123,7 +123,7 @@ These defaults are convenient for learning and worth changing for production.
 - **Self-signed certificates.** Where TLS is on, the certificates are self-signed. They give you encryption, not identity, and you trust them by file or by clicking through a browser warning.
 - **Generated passwords in `state/`.** The admin passwords are files on the machine that ran the kit. Anyone with the files has the credentials, so protect and back up `state/` as you would any secret store.
 - **Broad Grafana read access.** Grafana's ClickHouse user can read almost everything, including system tables and Langfuse's data. This is a deliberate convenience for exploring, not least privilege.
-- **A demo organization in Langfuse.** Langfuse starts with a seeded organization, project, and admin login, with sign-up disabled.
+- **A seeded organization in Langfuse.** Langfuse starts with a seeded organization, project, and admin login, with sign-up disabled.
 
 ## GovCloud is not supported yet
 

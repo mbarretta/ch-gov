@@ -230,6 +230,8 @@ smoke test: scripts/grafana-smoke.sh   (checks the datasource health and a live 
 teardown:   ansible-playbook deploy.yml --tags gf-app -e grafana_state=absent   (keeps the ClickHouse user; --tags gf-db -e grafana_db_state=absent purges it)
 ```
 
+The `teardown` line shows the underlying playbook call. Section 13 gives the `scripts/play.sh` form to use.
+
 Before the step reports, the role also asserts that every container in the pod, both initContainers included, pulled its image from your own ECR registry.
 
 ## 8. Reaching it from a browser

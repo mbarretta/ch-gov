@@ -41,6 +41,6 @@ This page describes a **fresh install** brought up with `fips: true` from the st
 
 ## Bottom line
 
-`fips: true` meaningfully raises this deployment's cryptographic posture. ClickHouse's `-fips` images on x86_64 nodes now sit alongside FIPS-routed controller and ClickHouse S3 traffic, dedicated customer-managed keys at every storage boundary, and TLS on every in-cluster network hop except one narrow, named, upstream-caused exception.
+`fips: true` raises this deployment's cryptographic posture. It pairs the `-fips` images that ClickHouse provides, on x86_64 nodes, with FIPS-routed controller and ClickHouse S3 traffic, dedicated customer-managed keys for the storage listed above, and TLS on ClickHouse's native protocol and on Langfuse's connection to ClickHouse, subject to the exceptions under "What isn't".
 
-It is not a blanket claim that every byte this deployment touches is FIPS-compliant end to end. The gaps above are real, and they are the ones an auditor is most likely to ask about first. Read Part 7 before you decide whether they matter for your target, and run its self-checks on your own cluster.
+It is not a claim that every byte this deployment touches is FIPS-compliant end to end, and the kit itself is not validated. The gaps above are real, and they are the ones an auditor is most likely to ask about first. Read Part 7 before you decide whether they matter for your target, and run its self-checks on your own cluster.

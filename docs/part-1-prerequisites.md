@@ -73,7 +73,7 @@ brew install python@3.14     # only if your python3 is older than 3.12
 
 ### Install on Linux
 
-`scripts/part1-setup.sh` installs missing tools with Homebrew only. If Homebrew is not on your `PATH`, the script stops and asks for it. On Linux you have two choices:
+`scripts/part1-setup.sh` installs missing tools with Homebrew only. If one of the base tools (`aws`, `kubectl`, `skopeo`, `jq`, `ansible` or `python3`) is missing and Homebrew is not on your `PATH`, the script stops and asks for Homebrew. Helm and krew also install through Homebrew, so without it a missing helm ends with `helm install failed` and a missing krew ends with `could not install kubectl preflight`. On Linux you have two choices:
 
 - Install [Homebrew for Linux](https://brew.sh) and run `scripts/part1-setup.sh` as on macOS.
 - Install the tools with your distribution's package manager or each tool's official installer, then run `scripts/part1-setup.sh`. When every tool is already present, the script skips the Homebrew step and installs only the pieces listed under "Supporting pieces" later in this section.
@@ -224,7 +224,7 @@ The identity behind `target_profile` creates real infrastructure, so it needs pe
 | CloudFormation | Creates, updates and deletes the stacks `clickhouse-private-vpc`, `-eks`, `-nodegroups`, `-irsa` and `-ebs-csi`, plus `-langfuse-irsa` and `-grafana-irsa` when those options are on. Stacks that create IAM roles need the `CAPABILITY_IAM` acknowledgement. | Roles `vpc`, `eks_cluster`, `eks_nodegroups`, `storage_iam`, `k8s_prereqs`, `langfuse_storage`, `grafana_storage` |
 | EC2 and VPC | Creates the VPC, subnets, internet gateway, NAT gateways, Elastic IPs, route tables, the S3 gateway endpoint and the node launch templates. Also checks which availability zones offer your node instance types (`ec2:DescribeInstanceTypeOfferings`). | Role `vpc` (its tasks and `vpc.yaml`), `ansible/roles/eks_nodegroups/files/eks-nodegroups.yaml` |
 | EKS | Creates the cluster, three node groups and the EBS CSI add-on, and writes a kubeconfig (`eks:DescribeCluster`). | `eks-cluster.yaml`, `eks-nodegroups.yaml`, `ebs-csi-addon.yaml`; role `eks_cluster` |
-| IAM | Creates and deletes roles and their policies, passes them to EKS, and registers the cluster's OIDC identity provider (`iam:CreateOpenIDConnectProvider`, `iam:ListOpenIDConnectProviders`). | Templates `eks-cluster.yaml`, `eks-nodegroups.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2`, `grafana-irsa.yaml.j2`; role `eks_cluster` |
+| IAM | Creates and deletes roles and their policies, passes them to EKS, and registers the cluster's OIDC identity provider and later checks that it exists (`iam:CreateOpenIDConnectProvider`, `iam:ListOpenIDConnectProviders`, `iam:GetOpenIDConnectProvider`). | Templates `eks-cluster.yaml`, `eks-nodegroups.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2`, `grafana-irsa.yaml.j2`; roles `eks_cluster`, `storage_iam`, `langfuse_storage`, `grafana_storage` |
 | ECR (your account) | Creates repositories with immutable tags and scan-on-push, then pushes the copied images and charts. | Roles `ecr_setup`, `image_sync` |
 | S3 | Creates buckets, sets their encryption, and reads, writes and deletes objects. | Roles `storage_iam`, `langfuse_storage`, `grafana_storage`; `scripts/s3-purge-cluster-data.sh` |
 | CloudWatch Logs | Creates the EKS control-plane log group and sets its retention. | Role `eks_cluster` |
