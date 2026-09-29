@@ -23,24 +23,39 @@
   hosts: localhost
   gather_facts: false
 
-  environment:
-    # Keep AWS config project-local, matching scripts/env.sh. Without this,
-    # a shell that never sourced env.sh would find no profiles at all.
-    AWS_CONFIG_FILE: "{{ playbook_dir }}/../.aws/config"
+  # sso mode keeps AWS config project-local, matching scripts/env.sh: without
+  # it, a shell that never sourced env.sh would find no profiles at all.
+  # profile mode leaves AWS_CONFIG_FILE alone so the caller's own file (or the
+  # AWS CLI default) is used. Nothing is rendered there, so use_fips_endpoint
+  # cannot arrive through a config file; the env var carries it instead.
+  environment: >-
+    {{ {'AWS_CONFIG_FILE': playbook_dir ~ '/../.aws/config'}
+       if aws.auth_mode == 'sso'
+       else ({'AWS_USE_FIPS_ENDPOINT': 'true'} if (fips | bool) else {}) }}
 
   pre_tasks:
-    # Renders ansible/files/aws-config.ini.j2 -> ../.aws/config for THIS run,
-    # honoring whatever -e fips=... was passed -- the authoritative render.
+    # auth_mode: sso only. Renders ansible/files/aws-config.ini.j2 ->
+    # ../.aws/config for THIS run, honoring whatever -e fips=... was passed --
+    # the authoritative render.
     # tags: [always] so a tagged invocation (e.g. --tags nodes) never skips
     # it and runs against a stale use_fips_endpoint. scripts/lib/common.sh
     # does its own credential-free render first, since scripts/play.sh and
     # scripts/part1-setup.sh check AWS auth before Ansible starts at all --
     # that one only fills in a missing file, so it never fights this one.
+    - name: Create the project-local .aws directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../.aws"
+        state: directory
+        mode: "0700"
+      when: aws.auth_mode == 'sso'
+      tags: [always]
+
     - name: Render AWS CLI config (use_fips_endpoint tracks fips)
       ansible.builtin.template:
         src: "{{ playbook_dir }}/files/aws-config.ini.j2"
         dest: "{{ playbook_dir }}/../.aws/config"
         mode: "0600"
+      when: aws.auth_mode == 'sso'
       tags: [always]
 
     - name: Show what this run will do
@@ -50,14 +65,15 @@
           - "target account:  {{ aws.target_account_id }} / {{ aws.target_region }}"
           - "target registry: {{ target_registry }}"
           - "source registry: {{ source_registry }}"
+          - "auth mode:       {{ aws.auth_mode }} (target profile {{ aws.target_profile }})"
           - "aws api endpoints: {{ 'FIPS-validated (use_fips_endpoint)' if fips else 'standard' }}"
           - "artifacts:       {{ all_artifacts | map(attribute='repo') | list | join(', ') }}"
       tags: [always]
 
   roles:
     # --- Step 1: IAM role for ECR access -----------------------------------
-    # Already satisfied: ClickHouseAirgapECRPullRole exists in this account
-    # and the `private-us` profile assumes it. Verified by
+    # Already satisfied: aws.ecr_pull_role_name exists in this account and the
+    # aws.source_ecr_profile profile assumes it. Verified by
     # scripts/part1-setup.sh. No role needed here.
 
     # --- Step 2: copy container images -------------------------------------

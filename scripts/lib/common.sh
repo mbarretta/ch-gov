@@ -27,68 +27,124 @@ fail()  { printf '  %s[fail]%s %s\n'   "$C_RED" "$C_RESET" "$*"; }
 info()  { printf '  %s%s%s\n'          "$C_DIM" "$*" "$C_RESET"; }
 die()   { fail "$*"; exit 1; }
 
-# ---- group_vars flag reader ------------------------------------------------
-# Reads a top-level scalar key (e.g. `fips:`) straight out of group_vars/all.yml.
-# Shared by render_aws_config below and ch_fips further down: both run before,
-# or without, Ansible ever templating anything, so this is the only source.
-# Defined ahead of render_aws_config (which runs immediately, at source time,
-# before CH_GROUP_VARS further down even exists) so it takes the path
-# explicitly rather than assuming that constant.
-group_var_flag() {
-  awk -F'[: \t]+' "/^$1:/"'{print $2; exit}' "$2"
+# ---- group_vars / deploy-vars scalar reader ---------------------------------
+# Reads a scalar straight out of state/deploy-vars.yml (when it has the key),
+# falling back to ansible/group_vars/all.yml -- the same "local file over the
+# tracked default, key by key" result the playbook gets from Ansible's dict
+# merging. Runs before, or without, Ansible ever templating anything, so this
+# is the only source for the credential-free render and auth checks below.
+#
+#   ch_scrape_var FILE KEY            top-level key     (fips)
+#   ch_scrape_var FILE BLOCK KEY      key one level in  (aws target_profile)
+#
+# Prints nothing when the key is absent. Handles quoted or bare scalars with
+# an optional trailing comment; it does not evaluate Jinja.
+ch_scrape_var() {
+  local file="$1" block="" key
+  [[ -f "$file" ]] || return 0
+  if [[ $# -ge 3 ]]; then block="$2"; key="$3"; else key="$2"; fi
+  awk -v block="$block" -v key="$key" '
+    function clean(v) {
+      sub(/^[ \t]+/, "", v)
+      if (v ~ /^"/) { sub(/^"/, "", v); sub(/".*$/, "", v) }
+      else if (v ~ /^\047/) { sub(/^\047/, "", v); sub(/\047.*$/, "", v) }
+      else { sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v) }
+      return v
+    }
+    block == "" && index($0, key ":") == 1 { print clean(substr($0, length(key) + 2)); exit }
+    block != "" && $0 ~ ("^" block ":") { f = 1; next }
+    block != "" && f && /^[^ \t#]/ { exit }
+    block != "" && f && index($0, "  " key ":") == 1 { print clean(substr($0, length(key) + 4)); exit }
+  ' "$file"
+}
+
+# Layered lookup: state/deploy-vars.yml wins when it sets the key, else
+# ansible/group_vars/all.yml. Same arities as ch_scrape_var. Defined ahead of
+# CH_GROUP_VARS below (which exists only after this file's first render), so
+# it names both files directly.
+ch_layered_var() {
+  local v
+  v="$(ch_scrape_var "$CH_PROJECT_ROOT/state/deploy-vars.yml" "$@")"
+  [[ -n "$v" ]] || v="$(ch_scrape_var "$CH_PROJECT_ROOT/ansible/group_vars/all.yml" "$@")"
+  printf '%s\n' "$v"
+}
+
+# One aws: value, with the two kinds of Jinja all.yml uses for it resolved:
+# a bare `{{ aws.other_key }}` reference (sso_region defaults to
+# target_region), and the derived partition.
+ch_aws_var() {
+  local key="$1" v
+  if [[ "$key" == partition ]]; then
+    case "$(ch_aws_var target_region)" in us-gov-*) echo aws-us-gov ;; *) echo aws ;; esac
+    return 0
+  fi
+  v="$(ch_layered_var aws "$key")"
+  if [[ "$v" =~ ^\{\{[[:space:]]*aws\.([a-z_]+)[[:space:]]*\}\}$ ]]; then
+    ch_aws_var "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "$v"
+  fi
+}
+
+# Succeeds when the persistent fips: switch is true (deploy-vars over all.yml).
+ch_fips_enabled() { [[ "$(ch_layered_var fips)" == "true" ]]; }
+
+# sso | profile. Anything but "profile" is treated as sso, matching the
+# playbook's default.
+ch_auth_mode() {
+  local m; m="$(ch_aws_var auth_mode)"
+  [[ "$m" == profile ]] && echo profile || echo sso
 }
 
 # ---- AWS config bootstrap --------------------------------------------------
-# .aws/config is generated from ansible/files/aws-config.ini.j2, not tracked
-# directly, so use_fips_endpoint always matches the `fips:` switch. The
-# authoritative render happens inside ansible/deploy.yml's pre_tasks
-# (tags: [always]), which honors whatever -e fips=... a given run passes.
-# This one exists only because scripts/play.sh and scripts/part1-setup.sh both
-# check AWS authentication BEFORE Ansible ever starts -- on a fresh checkout
-# there is no .aws/config yet for that check to use. Credential-free (plain
-# text substitution against the persistent `fips:` default in group_vars),
-# and safe to re-run: it only fills in the file when it's missing, so it never
-# clobbers a render already produced by an -e fips=... deploy.yml run.
+# aws.auth_mode: sso -- .aws/config is generated from
+# ansible/files/aws-config.ini.j2, not tracked directly, so use_fips_endpoint
+# always matches the `fips:` switch. The authoritative render happens inside
+# ansible/deploy.yml's pre_tasks (tags: [always]), which honors whatever
+# -e fips=... a given run passes. This one exists only because scripts/play.sh
+# and scripts/part1-setup.sh both check AWS authentication BEFORE Ansible ever
+# starts -- on a fresh checkout there is no .aws/config yet for that check to
+# use. Credential-free (plain text substitution of the template's aws.*
+# placeholders from the merged values above), and safe to re-run: it rewrites
+# the file only when something other than the use_fips_endpoint lines would
+# change, so it never clobbers a render already produced by an -e fips=...
+# deploy.yml run.
+#
+# aws.auth_mode: profile -- nothing is rendered and AWS_CONFIG_FILE is left
+# to the caller (or the AWS CLI default). With no rendered config to carry
+# use_fips_endpoint, fips: true exports AWS_USE_FIPS_ENDPOINT instead.
 render_aws_config() {
   local out="$CH_PROJECT_ROOT/.aws/config"
-  # Skip only when the existing file already carries use_fips_endpoint --
-  # not merely when it exists. A checkout cloned before this template
-  # existed may still have the old, tracked .aws/config on disk (now
-  # gitignored, so nothing else would ever touch it); re-render that one
-  # once so the new knob actually takes effect there too.
-  [[ -f "$out" ]] && grep -q '^use_fips_endpoint' "$out" && return 0
   local tmpl="$CH_PROJECT_ROOT/ansible/files/aws-config.ini.j2"
   [[ -f "$tmpl" ]] || die "missing $tmpl -- checkout looks incomplete"
-  local fips_default use_fips=false
-  fips_default="$(group_var_flag fips "$CH_PROJECT_ROOT/ansible/group_vars/all.yml")"
-  [[ "$fips_default" == "true" ]] && use_fips=true
+  local use_fips=false key val body
+  ch_fips_enabled && use_fips=true
+  body="$(<"$tmpl")"
+  # bash 5.2 treats & in a ${var//pat/rep} replacement as the matched text.
+  shopt -u patsub_replacement 2>/dev/null || true
+  body="${body//"{{ 'true' if fips else 'false' }}"/$use_fips}"
+  for key in sso_session_name sso_start_url sso_region sso_role_name target_profile \
+             target_account_id target_region source_ecr_profile partition \
+             ecr_pull_role_name ecr_pull_session_name; do
+    val="$(ch_aws_var "$key")"
+    body="${body//"{{ aws.$key }}"/$val}"
+  done
+  if [[ -f "$out" ]] && diff -q <(grep -v '^use_fips_endpoint' "$out") \
+                               <(printf '%s\n' "$body" | grep -v '^use_fips_endpoint') >/dev/null; then
+    return 0
+  fi
   mkdir -p "$(dirname "$out")"
-  # aws.target_account_id and aws.sso_start_url are also Jinja in the
-  # template now (see ansible/files/aws-config.ini.j2); this credential-free
-  # pre-Ansible render has no YAML parser, so it substitutes the same literal
-  # placeholders the template's own `| default(...)` (and all.yml's
-  # target_account_id default) would resolve to on a fresh checkout, rather
-  # than leaving raw {{ ... }} text in the generated file. The authoritative
-  # Ansible render (deploy.yml, tags: [always]) fully re-templates this file
-  # on every run anyway, so this only matters for the brief window before
-  # Ansible has run for the first time.
-  sed \
-    -e "s/{{ 'true' if fips else 'false' }}/$use_fips/g" \
-    -e "s/{{ aws\.target_account_id }}/<YOUR_ACCOUNT_ID>/g" \
-    -e "s#{{ aws\.sso_start_url | default('https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start') }}#https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start#g" \
-    "$tmpl" > "$out"
+  printf '%s\n' "$body" > "$out"
 }
-render_aws_config
-export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
 
 # ---- deploy-vars bootstrap -------------------------------------------------
 # ansible/group_vars/all.yml's aws: block ships with two placeholders
 # (target_account_id, source_ecr_account_id) because this is a public
 # tutorial repo -- a real account number has no business in a tracked file.
 # state/deploy-vars.yml is the gitignored local override a deployer fills in
-# once with their two real values, instead of hand-editing all.yml. Mirrors
-# render_aws_config immediately above: only fills in the file when it's
-# missing, so it never clobbers a copy someone has already filled in.
+# once with their real values, instead of hand-editing all.yml. Only fills in
+# the file when it's missing, so it never clobbers a copy someone has already
+# filled in. Keep it in step with state/deploy-vars.yml.example.
 render_deploy_vars() {
   local out="$CH_PROJECT_ROOT/state/deploy-vars.yml"
   if [[ -f "$out" ]]; then
@@ -97,33 +153,55 @@ render_deploy_vars() {
   fi
   mkdir -p "$(dirname "$out")"
   cat > "$out" <<'EOF'
-# Local override for ansible/group_vars/all.yml's aws: block.
-# Fill in your two real account IDs below and leave the rest -- this file is
-# gitignored (state/) and every script picks it up automatically afterward.
+# Local override for ansible/group_vars/all.yml. Only the keys you set here
+# change; every other default keeps its all.yml value (dictionaries merge key
+# by key). This file is gitignored (state/) and every script picks it up
+# automatically afterward.
 aws:
+  # sso     -- the kit renders a project-local .aws/config and you log in with
+  #            `aws sso login`.
+  # profile -- use a named profile you already have (target_profile, plus
+  #            source_ecr_profile for the ECR pull); nothing is rendered.
+  auth_mode: "sso"
+  # Fill in your two real account IDs.
   target_account_id: "<YOUR_ACCOUNT_ID>"
   target_region: "us-east-1"
-  target_profile: "sa"
+  target_profile: "ch-gov-target"
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
-  source_ecr_profile: "private-us"
-  # Optional -- your org's IAM Identity Center (SSO) portal start URL, used
-  # by [sso-session clickhouse] in the generated .aws/config. Leave as-is
-  # until you know it; `aws sso login` fails clearly until it's real.
+  source_ecr_profile: "ch-gov-ecr-pull"
+  # The role in your account that source_ecr_profile assumes. It is arranged
+  # with ClickHouse; the playbook only checks that it can be assumed.
+  ecr_pull_role_name: "ClickHouseAirgapECRPullRole"
+  ecr_pull_session_name: "ch-gov-ecr-pull"
+  # auth_mode: sso only -- ignored in profile mode. Your IAM Identity Center
+  # portal start URL; `aws sso login` fails clearly until it is real.
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
+  sso_session_name: "ch-gov"
+  sso_region: "{{ aws.target_region }}"
+  sso_role_name: "AdministratorAccess"
 
 # Optional -- only needed when grafana.enabled is true. A Docker Hub account
 # entitled to the DHI (Docker Hardened Images) catalog, used to mirror the
-# grafana/awscli images from dhi.io. Leave as-is until you have one; the
-# image_sync role fails clearly if grafana.enabled is true and this is empty
-# with no DHI_USERNAME/DHI_TOKEN in the environment either.
+# grafana/awscli images from dhi.io. Leave both empty to fall back to the
+# DHI_USERNAME/DHI_TOKEN environment variables; the image_sync role fails
+# clearly if grafana.enabled is true and neither is set.
 dhi:
-  username: "<YOUR_DOCKERHUB_USERNAME>"
-  token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
+  username: ""   # your Docker Hub username
+  token: ""      # your Docker Hub DHI access token
 EOF
   chmod 600 "$out"
 }
 render_deploy_vars
+
+# Activate the AWS auth mode. render_deploy_vars ran first so a fresh checkout
+# resolves against the freshly written state/deploy-vars.yml, not only all.yml.
+if [[ "$(ch_auth_mode)" == sso ]]; then
+  render_aws_config
+  export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
+elif ch_fips_enabled; then
+  export AWS_USE_FIPS_ENDPOINT=true
+fi
 # Non-empty only once state/deploy-vars.yml exists (render_deploy_vars above
 # always creates it, so in practice this is "always" -- the explicit check
 # keeps the intent, "load the override file when there is one", legible at
@@ -163,12 +241,12 @@ py_version() { "${1:-python3}" -c 'import platform; print(platform.python_versio
 # ---- constants (from the ClickHouse Private training guide) ---------------
 # Where ClickHouse publishes its images. You never deploy into this account;
 # you only read from it, then copy images into your own ECR.
-readonly SOURCE_ECR_ACCOUNT="<SOURCE_ECR_ACCOUNT_ID>"
-readonly SOURCE_ECR_REGION="us-east-1"
-readonly SOURCE_ECR_PROFILE="private-us"
+readonly SOURCE_ECR_ACCOUNT="$(ch_aws_var source_ecr_account_id)"
+readonly SOURCE_ECR_REGION="$(ch_aws_var source_ecr_region)"
+readonly SOURCE_ECR_PROFILE="$(ch_aws_var source_ecr_profile)"
 
 # Your account, where everything actually gets built.
-readonly TARGET_PROFILE="sa"
+readonly TARGET_PROFILE="$(ch_aws_var target_profile)"
 
 # The three images that make up a ClickHouse Private deployment.
 readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
@@ -305,9 +383,9 @@ gf_cacert() {
 }
 
 # ---- fips (shared by ch-client.sh's TLS handling) -------------------------
-# Succeeds when the persistent fips: switch in group_vars is true.
+# Succeeds when the persistent fips: switch (deploy-vars over group_vars) is true.
 ch_fips() {
-  [[ "$(group_var_flag fips "$CH_GROUP_VARS")" == "true" ]]
+  ch_fips_enabled
 }
 
 # The CA clickhouse_cluster generates into state/ when fips is true (see

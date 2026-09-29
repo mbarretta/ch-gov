@@ -10,9 +10,10 @@
 # Equivalent to `source scripts/env.sh && cd ansible && ansible-playbook
 # deploy.yml ...`, minus three things that are easy to get wrong:
 #
-#   1. AWS_CONFIG_FILE / KUBECONFIG must point into the repo, not ~/.aws and
-#      ~/.kube. Forget them and you either get "profile could not be found"
-#      or, worse, act on whatever cluster your personal kubeconfig names.
+#   1. KUBECONFIG must point into the repo, not ~/.kube (or you act on whatever
+#      cluster your personal kubeconfig names), and with aws.auth_mode: sso
+#      AWS_CONFIG_FILE must point at the repo's rendered .aws/config, not
+#      ~/.aws (or you get "profile could not be found").
 #   2. ansible-playbook has to run from ansible/, because ansible.cfg (and
 #      therefore the inventory and roles_path) is resolved from the cwd.
 #   3. Ansible refuses to start if stdin/stdout/stderr are non-blocking:
@@ -27,7 +28,10 @@ source "$CH_ROOT/scripts/lib/common.sh"
 
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0; }
 
-export AWS_CONFIG_FILE="$CH_ROOT/.aws/config"     # common.sh sets this too; explicit here
+# common.sh exports AWS_CONFIG_FILE (aws.auth_mode: sso) or AWS_USE_FIPS_ENDPOINT
+# (auth_mode: profile, fips: true); in profile mode the caller's own AWS config
+# is left alone.
+if [[ "$(ch_auth_mode)" == sso ]]; then export AWS_CONFIG_FILE="$CH_ROOT/.aws/config"; fi
 export AWS_PROFILE="${AWS_PROFILE:-$TARGET_PROFILE}"
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 

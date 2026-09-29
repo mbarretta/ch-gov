@@ -1,24 +1,38 @@
-# Tracked example of the local override for ansible/group_vars/all.yml's
-# aws: block. See docs/part-1-prerequisites.md section 3b -- the real file,
+# Tracked example of the local override for ansible/group_vars/all.yml. See
+# docs/part-1-prerequisites.md section 3b -- the real file,
 # state/deploy-vars.yml, is generated automatically (gitignored) the first
 # time you run any script under scripts/, with this exact shape.
+# Only the keys you set here change; every other default keeps its all.yml
+# value (dictionaries merge key by key).
 aws:
+  # sso     -- the kit renders a project-local .aws/config and you log in with
+  #            `aws sso login`.
+  # profile -- use a named profile you already have (target_profile, plus
+  #            source_ecr_profile for the ECR pull); nothing is rendered.
+  auth_mode: "sso"
+  # Fill in your two real account IDs.
   target_account_id: "<YOUR_ACCOUNT_ID>"
   target_region: "us-east-1"
-  target_profile: "sa"
+  target_profile: "ch-gov-target"
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
-  source_ecr_profile: "private-us"
-  # Optional -- your org's IAM Identity Center (SSO) portal start URL, used
-  # by [sso-session clickhouse] in the generated .aws/config. Leave as-is
-  # until you know it; `aws sso login` fails clearly until it's real.
+  source_ecr_profile: "ch-gov-ecr-pull"
+  # The role in your account that source_ecr_profile assumes. It is arranged
+  # with ClickHouse; the playbook only checks that it can be assumed.
+  ecr_pull_role_name: "ClickHouseAirgapECRPullRole"
+  ecr_pull_session_name: "ch-gov-ecr-pull"
+  # auth_mode: sso only -- ignored in profile mode. Your IAM Identity Center
+  # portal start URL; `aws sso login` fails clearly until it is real.
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
+  sso_session_name: "ch-gov"
+  sso_region: "{{ aws.target_region }}"
+  sso_role_name: "AdministratorAccess"
 
 # Optional -- only needed when grafana.enabled is true. A Docker Hub account
 # entitled to the DHI (Docker Hardened Images) catalog, used to mirror the
-# grafana/awscli images from dhi.io. Leave as-is until you have one; the
-# image_sync role fails clearly if grafana.enabled is true and this is empty
-# with no DHI_USERNAME/DHI_TOKEN in the environment either.
+# grafana/awscli images from dhi.io. Leave both empty to fall back to the
+# DHI_USERNAME/DHI_TOKEN environment variables; the image_sync role fails
+# clearly if grafana.enabled is true and neither is set.
 dhi:
-  username: "<YOUR_DOCKERHUB_USERNAME>"
-  token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
+  username: ""   # your Docker Hub username
+  token: ""      # your Docker Hub DHI access token
