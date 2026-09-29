@@ -15,11 +15,12 @@
 #      lib/common.sh). When load_balancer.type is `none`, or the NLB does
 #      not answer, it falls back to `kubectl port-forward svc/<release>
 #      3000:3000` -- the port is fixed at 3000 because GF_SERVER_ROOT_URL
-#      for that mode is http://localhost:3000 (grafana/tasks/main.yml:572).
+#      for that mode is http://localhost:3000 (the grafana role's "Settle the
+#      address people will use" task).
 #   2. GET /api/datasources/uid/clickhouse/health (Basic Auth, admin /
 #      state/grafana-admin-password) and asserts status "OK" -- the
 #      datasource the grafana role provisioned with the fixed uid
-#      "clickhouse" (grafana/tasks/main.yml:734-754).
+#      "clickhouse" (the datasource entry in the grafana role's Helm values).
 #   3. POST /api/ds/query against that same datasource --
 #      SELECT count() AS n FROM system.tables -- asserting a real numeric
 #      result. This runs the query through the datasource itself, the same
@@ -80,8 +81,8 @@ cleanup() { [[ -n "$PF" ]] && { kill "$PF" 2>/dev/null || true; }; rm -rf "$TMP"
 trap cleanup EXIT
 
 # curl config carrying the credential. The admin username is a fixed,
-# non-secret literal (grafana/tasks/main.yml:327); only the password's own
-# bytes are secret, and they reach the file solely via `cat`'s stdout --
+# non-secret literal (the grafana role's "Write the admin Secret" task); only
+# the password's own bytes are secret, and they reach the file solely via `cat`'s stdout --
 # never through a shell variable, command substitution, or argv.
 AUTH_CFG="$TMP/auth.cfg"
 # tr, not cat: the generated password file ends in a newline, and that byte
@@ -151,7 +152,8 @@ else
   [[ -n "$GF_URL" ]] && warn "$GF_URL does not answer /api/health from here (VPN? security group?)"
   # Same tunnel handling as scripts/ch-client.sh / langfuse-smoke.sh, except
   # the local port is fixed: GF_SERVER_ROOT_URL for type none is
-  # http://localhost:3000 (grafana/tasks/main.yml:572), and any redirect
+  # http://localhost:3000 (the grafana role's "Settle the address people will
+  # use" task), and any redirect
   # Grafana issues to itself would break otherwise.
   if (exec 3<>/dev/tcp/127.0.0.1/3000) 2>/dev/null; then
     exec 3>&-

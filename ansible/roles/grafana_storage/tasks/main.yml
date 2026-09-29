@@ -178,9 +178,9 @@
 # --- the plugin mirror ---------------------------------------------------
 # Fetched once (pinned version, SHA256-verified by get_url itself) and
 # uploaded once; re-runs check S3 first and skip both steps once the object
-# is there, mirroring image_sync/tasks/main.yml:104-124's "check what's
-# already there before acting" idiom. No credentials are handled by any task
-# below -- aws/get_url auth is entirely profile- and public-URL-based, so
+# is there, mirroring image_sync's "Check which tags already exist in the
+# target registry" task ("check what's already there before acting"). No
+# credentials are handled by any task below -- aws/get_url auth is entirely profile- and public-URL-based, so
 # there is nothing here that needs no_log (unlike image_sync's registry
 # logins or grafana_clickhouse's password-bearing tasks).
 
