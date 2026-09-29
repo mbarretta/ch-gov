@@ -18,15 +18,14 @@ _ch_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 # stderr.
 _ch_vals="$(bash -c '
   source "$1" >&2 || exit 1
-  mode="$(ch_auth_mode)"
-  [[ "$mode" == sso ]] && export AWS_CONFIG_FILE="$CH_PROJECT_ROOT/.aws/config"
-  printf "%s\t%s\t%s\t%s\n" "$mode" "$(ch_var aws.target_profile)" "$(ch_fips_enabled && echo true || echo false)" "$(ch_login_hint)"
+  printf "%s\t%s\t%s\t%s\n" "$(ch_auth_mode)" "$(ch_var aws.target_profile)" "$(ch_fips_enabled && echo true || echo false)" "$(ch_login_hint)"
 ' _ "${_ch_root}/scripts/lib/common.sh")" || { unset _ch_root _ch_vals; return 1 2>/dev/null || exit 1; }
 IFS=$'\t' read -r _ch_mode _ch_profile _ch_fips _ch_hint <<< "$_ch_vals"
 
-# aws.auth_mode: sso keeps AWS config in the repo. profile mode leaves
-# AWS_CONFIG_FILE to you (or the AWS CLI default) and, with no rendered config
-# to carry use_fips_endpoint, exports AWS_USE_FIPS_ENDPOINT when fips is on.
+# aws.auth_mode: sso always points AWS_CONFIG_FILE at the repo's .aws/config,
+# replacing any value already set. profile mode leaves AWS_CONFIG_FILE
+# untouched (yours, or the AWS CLI default) and, with no rendered config to
+# carry use_fips_endpoint, exports AWS_USE_FIPS_ENDPOINT when fips is on.
 if [[ "$_ch_mode" == sso ]]; then
   export AWS_CONFIG_FILE="${_ch_root}/.aws/config"
 elif [[ "$_ch_fips" == true ]]; then

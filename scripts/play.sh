@@ -28,10 +28,9 @@ source "$CH_ROOT/scripts/lib/common.sh"
 
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0; }
 
-# common.sh exports AWS_CONFIG_FILE (aws.auth_mode: sso) or AWS_USE_FIPS_ENDPOINT
-# (auth_mode: profile, fips: true); in profile mode the caller's own AWS config
-# is left alone.
-if [[ "$(ch_auth_mode)" == sso ]]; then export AWS_CONFIG_FILE="$CH_ROOT/.aws/config"; fi
+# common.sh has already exported AWS_CONFIG_FILE as the repo's .aws/config
+# (aws.auth_mode: sso) or AWS_USE_FIPS_ENDPOINT (auth_mode: profile, fips:
+# true); in profile mode the caller's own AWS config is left alone.
 export AWS_PROFILE="${AWS_PROFILE:-$TARGET_PROFILE}"
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
