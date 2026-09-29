@@ -1,24 +1,22 @@
-# Part 1 — Prerequisites and Environment Setup
+# Part 1 — Prerequisites and AWS access
 
-> **Goal of Part 1:** get your laptop able to talk to two AWS accounts and
-> prove you can reach the ClickHouse image registry. Nothing is deployed yet
-> and nothing costs money yet.
+> **What you'll learn**
 >
-> **Run it:** `./scripts/part1-setup.sh` (or `--check` to verify without changing anything)
+> - Why an airgapped ClickHouse Government deployment needs credentials for two AWS accounts, and how the `aws.auth_mode` setting gives you two ways to provide them.
+> - Which tools the kit needs, what each one does, and how to install them on macOS and Linux.
+> - Which AWS permissions the deploying identity needs, and how to check your setup before you spend anything.
+>
+> **Run it:** `scripts/part1-setup.sh` installs and checks everything. Add `--check` to verify without changing anything. Nothing is deployed and nothing costs money in this Part.
 
 ---
 
-## 1. What you are actually building, and why it looks odd
+## 1. What you are building, and why it looks odd
 
 Before the tool list makes sense, you need the shape of the thing.
 
-A normal Kubernetes deployment pulls container images from the public internet —
-Docker Hub, quay.io, whatever. **ClickHouse Government deliberately cannot do that.**
-It runs in an *airgapped* model: the VPC hosting your database has no route to the
-internet at all. That is the point. It is the property that makes the product
-viable for regulated and classified environments.
+A normal Kubernetes deployment pulls container images from the public internet: Docker Hub, quay.io, and so on. ClickHouse Government deliberately does not. It runs in an *airgapped* model, where the VPC that hosts your database has no route to the internet at all. That property is what makes the product suitable for regulated and classified environments.
 
-That single constraint explains almost every strange thing in Part 1:
+That single constraint explains almost everything in this Part:
 
 ```
   ClickHouse's AWS account                 YOUR AWS account
@@ -36,248 +34,275 @@ That single constraint explains almost every strange thing in Part 1:
                                            └──────────────────────────────┘
 ```
 
-Images make exactly one hop from ClickHouse's registry into yours, and the
-cluster only ever pulls from yours. Your cluster never talks to ClickHouse Inc.
+Images make exactly one hop from ClickHouse's registry into yours, and the cluster only ever pulls from yours. The cluster never talks to ClickHouse Inc.
 
-**Why this matters for you:** you need credentials for *two* accounts, and a tool
-that can copy images between registries. Hence two AWS profiles, and `skopeo`.
+**Why this matters to you:** you need credentials for *two* accounts and a tool that can copy images between registries. That is why the kit uses two AWS profiles and `skopeo`.
 
 ---
 
 ## 2. The seven tools, and what each one is for
 
-Install them all; the deployment fails on a missing one.
+Install all seven. The deployment stops at the first missing one.
 
-| Tool | Min version | Its job in this deployment |
+| Tool | Minimum version | Its job in this deployment |
 |---|---|---|
-| **aws** | v2.x | Creates AWS resources. Also mints the short-lived token used to log into ECR. |
-| **kubectl** | v1.28+ | Talks to the Kubernetes API once EKS exists. Your main inspection tool. |
-| **helm** | v3+ (**we use v4**) | Installs the ClickHouse operator and cluster as packaged "charts". |
-| **skopeo** | v1.x | Copies images registry→registry *without* a local `docker pull`. The airgap workhorse. |
-| **jq** | any | Parses the JSON that `aws` and `kubectl` emit. The scripts lean on it heavily. |
-| **python3** | 3.12+ | Ansible's runtime. |
-| **ansible** | 2.21+ | Runs the 14-phase deployment playbook that does the real work. |
+| **aws** | v2 | Creates AWS resources and mints the short-lived token used to log in to ECR. |
+| **kubectl** | v1.28 | Talks to the Kubernetes API once EKS exists. Your main inspection tool. |
+| **helm** | v3 or v4 | Installs the ClickHouse operator and cluster as packaged *charts*. |
+| **skopeo** | v1 | Copies images from registry to registry without a local `docker pull`. The airgap workhorse. |
+| **jq** | any | Parses the JSON that `aws` and `kubectl` print. The scripts rely on it heavily. |
+| **python3** | 3.12 | Ansible's runtime. |
+| **ansible** | ansible-core 2.21 | Runs the deployment playbook that does the real work (Steps 1–12, plus the optional Steps 13–18). |
 
-**Why skopeo and not docker?** `docker pull` + `docker push` would drag every
-image layer down to your laptop and back up again — gigabytes, twice, slowly.
-`skopeo copy` instructs the two registries to transfer layers directly. It also
-needs no running Docker daemon.
+**Why skopeo and not docker?** `docker pull` followed by `docker push` drags every image layer down to your machine and back up again, which is gigabytes moved twice. `skopeo copy` asks the two registries to transfer layers directly, and it needs no running Docker daemon.
 
+### Install on macOS
 
-### Two supporting pieces
+The setup script installs missing tools with [Homebrew](https://brew.sh):
 
-- **`helm-diff` plugin** — shows what a `helm upgrade` *would* change before it
-  changes anything. The playbooks use it to stay **idempotent**: re-running a
-  deploy becomes a no-op instead of a surprise. Worth understanding, because
-  "just run it again" is your main recovery tool later.
-- **Four Ansible collections** (`amazon.aws`, `community.aws`, `kubernetes.core`,
-  `community.general`) — these teach Ansible to speak CloudFormation, EC2, and
-  Kubernetes. Without them the playbook dies on its first task with
-  "module not found".
-- **`kubectl preflight` plugin** (via `krew`) — the Troubleshoot-project
-  runner behind Step 10's preflight checks. It is a kubectl plugin, not a
-  Homebrew formula, so `part1-setup.sh` installs `krew` from Homebrew and the
-  plugin through it; `scripts/lib/common.sh` puts `~/.krew/bin` on `PATH`. It
-  runs on your laptop against the cluster API, so nothing needs mirroring.
+```bash
+scripts/part1-setup.sh
+```
+
+To install by hand instead, this is what the script runs, plus Helm and the `krew` plugin manager:
+
+```bash
+brew install awscli kubectl skopeo jq ansible helm krew
+brew install python@3.14     # only if your python3 is older than 3.12
+```
+
+### Install on Linux
+
+`scripts/part1-setup.sh` installs missing tools with Homebrew only. If Homebrew is not on your `PATH`, the script stops and asks for it. On Linux you have two choices:
+
+- Install [Homebrew for Linux](https://brew.sh) and run `scripts/part1-setup.sh` as on macOS.
+- Install the tools with your distribution's package manager or each tool's official installer, then run `scripts/part1-setup.sh`. When every tool is already present, the script skips the Homebrew step and installs only the pieces listed under "Supporting pieces" later in this section.
+
+| Tool | Linux install |
+|---|---|
+| aws | The [official AWS CLI v2 installer](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| kubectl | The [Kubernetes install page](https://kubernetes.io/docs/tasks/tools/) |
+| helm | The [Helm install page](https://helm.sh/docs/intro/install/) |
+| skopeo | `sudo apt-get install -y skopeo` on Debian and Ubuntu, `sudo dnf install -y skopeo` on Fedora and RHEL. Other distributions: the [skopeo install guide](https://github.com/containers/skopeo/blob/main/install.md) |
+| jq | `sudo apt-get install -y jq` or `sudo dnf install -y jq` |
+| python3 | `sudo apt-get install -y python3 python3-venv` or `sudo dnf install -y python3`. The version must be 3.12 or later, and `python3` on your `PATH` must be that version. The `python3-venv` package matters on Debian and Ubuntu, because the script builds a virtual environment. |
+| ansible | The [Ansible install guide](https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html). For example: `pipx install --include-deps ansible` |
+| krew | The [krew install guide](https://krew.sigs.k8s.io/docs/user-guide/setup/install/) |
+
+After you install krew, add `$HOME/.krew/bin` to your `PATH` for your own shell. The scripts add it for themselves.
+
+### Supporting pieces
+
+`scripts/part1-setup.sh` installs and checks four more things. You need them all, but you do not install them by hand.
+
+- **`helm-diff` plugin.** Shows what a `helm upgrade` *would* change before it changes anything. The playbooks use it to stay *idempotent*, which means running a deployment again changes nothing that already matches. That property makes "run it again" your main recovery tool.
+- **Four Ansible collections** (`amazon.aws`, `community.aws`, `kubernetes.core`, `community.general`). They teach Ansible to speak CloudFormation, ECR, S3 and Kubernetes. Without them the playbook stops on its first task with "module not found".
+- **`kubectl preflight` plugin** (installed through `krew`). This is the Troubleshoot-project runner behind Step 10's preflight checks. It runs on your machine against the cluster API, so nothing needs mirroring into ECR.
+- **A project-local Python virtual environment** at `.venv/`, holding `boto3` and `kubernetes`. Ansible's AWS and Kubernetes modules import these libraries inside whichever Python runs them. A project-local environment leaves your system Python untouched, and `ansible/group_vars/all.yml` points `ansible_python_interpreter` at it.
 
 ---
 
-## 3. AWS access: two profiles, one login
+## 3. AWS access: one setting, two paths
 
-An AWS **profile** is a named set of credentials. You select one per command
-with `--profile`, or globally with `export AWS_PROFILE=...`.
+An AWS *profile* is a named set of credentials. You pick one per command with `--profile`, or for a whole shell with `export AWS_PROFILE=...`.
 
-### Config lives in the repo, not in your home directory
+The kit uses two profiles, one per account:
 
-By default the CLI reads `~/.aws/config`. We instead keep it at **`.aws/config`
-inside this project** and point the CLI at it with `AWS_CONFIG_FILE`, so the
-entire setup moves as one directory.
+| Config key | Default name | Purpose |
+|---|---|---|
+| `aws.target_profile` | `ch-gov-target` | Your account. Builds the VPC, EKS, S3 and your ECR, and holds your data. |
+| `aws.source_ecr_profile` | `ch-gov-ecr-pull` | An IAM role that assumes read access to ClickHouse's source ECR. Used only while copying images (Step 2). |
+
+The setting `aws.auth_mode` decides who creates those profiles:
+
+| `aws.auth_mode` | Choose it when | What the kit does |
+|---|---|---|
+| `sso` (default) | You sign in with AWS IAM Identity Center (SSO). | Renders a project-local `.aws/config` with both profiles and points the AWS CLI at it. |
+| `profile` | You already have a working named profile. | Renders nothing. It uses your own AWS config, and both profiles must exist there. |
+
+You set these keys in `state/deploy-vars.yml`. Section 3b explains that file, and the defaults live in `ansible/group_vars/all.yml`.
+
+### Path A: SSO with IAM Identity Center (`auth_mode: sso`)
+
+Set these keys in `state/deploy-vars.yml`:
+
+| Key | What to put there |
+|---|---|
+| `target_account_id` | The 12-digit ID of your account. |
+| `source_ecr_account_id` | The account ID of ClickHouse's source registry, which ClickHouse gives you. |
+| `sso_start_url` | Your IAM Identity Center portal URL, like `https://<your-portal-id>.awsapps.com/start`. |
+| `sso_role_name` | The permission set to use in your account. The default is `AdministratorAccess`. |
+| `target_region` | The AWS Region. The default is `us-east-1`. |
+
+The kit renders `.aws/config` from `ansible/files/aws-config.ini.j2`. The file is generated, gitignored, and rewritten on every run, so never edit it by hand. It holds no secrets: only your portal URL, your account ID and a role ARN.
+
+Log in once. The repo-local config is the one to use, so point the CLI at it:
 
 ```bash
-source scripts/env.sh    # sets AWS_CONFIG_FILE + AWS_PROFILE, prints your identity
+source scripts/env.sh                        # sets AWS_CONFIG_FILE, AWS_PROFILE and KUBECONFIG
+aws sso login --profile "$AWS_PROFILE"
 ```
 
-The scripts under `scripts/` detect and use the in-repo config on their own, so
-they work without activating anything. Sourcing `env.sh` is only for your own
-interactive `aws` / `kubectl` commands.
+The scripts under `scripts/` find the repo-local config on their own, so they work without `env.sh`. You source `env.sh` only for your own interactive `aws` and `kubectl` commands. It also prints your current identity, or the exact login command when you are logged out.
 
-**Two consequences worth knowing:**
+Two consequences of keeping the config in the repo:
 
-1. **A bare `aws` command outside this project finds no profiles.** That's
-   deliberate — there is one source of truth, not two that can drift. If you
-   want these profiles available everywhere, copy `.aws/config` to `~/.aws/config`,
-   and accept that you now maintain both.
-2. **The SSO token cache does not move.** The CLI hardcodes `~/.aws/sso/cache`
-   and offers no environment variable to relocate it. This is a non-issue: it
-   holds only a short-lived token that `aws sso login` regenerates. Just don't
-   expect a copy of this directory to arrive somewhere already logged in.
+1. A bare `aws` command outside this project finds no profiles. That is deliberate: there is one source of truth. Use `source scripts/env.sh` in each new shell.
+2. The SSO token cache does not move. The AWS CLI always keeps it in `~/.aws/sso/cache`. It holds only a short-lived token that `aws sso login` regenerates.
 
-`.aws/config` is tracked in git. It contains no credentials — only an SSO start
-URL, an account ID, and a role ARN. `.gitignore` blocks `.aws/credentials` and
-the cache directories so that static keys can never be committed by accident.
-If you'd rather not have account identifiers in the repo, make `.aws/config` a
-template and gitignore the real one.
-
-We use the two names the deployment config expects:
-
-| Profile | Resolves to | Purpose |
-|---|---|---|
-| `sa` | your account, via SSO | Builds VPC, EKS, S3, your ECR. Holds your data. |
-| `private-us` | an assumed IAM role | Read-only access to ClickHouse's source ECR. |
-
-### How the credentials actually flow
+The credentials chain like this:
 
 ```
   you ──browser login──► IAM Identity Center (SSO)
                               │
                               ▼
-                     cached token (~8h)
+                     cached token (hours)
                               │
                               ▼
-                    profile "sa"  ──sts:AssumeRole──►  profile "private-us"
-                   (your account)                     (ClickHouseAirgapECRPullRole)
+                 profile target_profile  ──sts:AssumeRole──►  profile source_ecr_profile
+                   (ch-gov-target)                              (ch-gov-ecr-pull)
+                   (your account)                              (ClickHouseAirgapECRPullRole)
                           │                                     │
                           ▼                                     ▼
                  build all infrastructure               read source ECR only
 ```
 
-The key idea is **role chaining**. `private-us` has no credentials of its own —
-its config says "use `sa`'s credentials to assume this role." So one browser
-login covers both profiles, and the CLI silently re-assumes the role whenever
-those 1-hour role credentials expire. You never manage a long-lived access key,
-which is the whole reason SSO is preferred: nothing secret sits on your disk.
+The idea is *role chaining*. `ch-gov-ecr-pull` has no credentials of its own. Its config says "use the target profile's credentials to assume this role", so one browser login covers both profiles. The AWS CLI renews the role's one-hour credentials silently. You never manage a long-lived access key, which is why SSO is the default: nothing secret sits on your disk.
 
-### The one command you'll rerun
+SSO tokens expire after a few hours. When commands start failing with `Error loading SSO Token`, or a script prints `not authenticated`, run the login command again.
 
-SSO tokens expire (roughly daily). When commands start failing with
-`Error loading SSO Token`, that's all it is:
+### Path B: an existing profile (`auth_mode: profile`)
 
-```bash
-source scripts/env.sh            # if not already active in this shell
-aws sso login --profile sa
+Use this path when your organization already gives you AWS credentials through named profiles, for example through `aws configure`, a credential helper, or a company login tool. Set these keys in `state/deploy-vars.yml`:
+
+```yaml
+aws:
+  auth_mode: "profile"
+  target_account_id: "<YOUR_ACCOUNT_ID>"
+  source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
+  target_profile: "my-profile"          # a profile you already have
+  source_ecr_profile: "ch-gov-ecr-pull" # must exist in your AWS config (see below)
 ```
 
-### Verifying it worked
+In this mode the kit renders no `.aws/config` and leaves `AWS_CONFIG_FILE` alone, so the AWS CLI reads your own file (`~/.aws/config` by default). The `sso_*` keys are ignored.
 
-```bash
-aws sts get-caller-identity --profile sa          # your account + SSO role
-aws sts get-caller-identity --profile private-us  # ClickHouseAirgapECRPullRole
+The kit cannot create the ECR pull profile for you here, so add it to your AWS config. It chains off your target profile:
+
+```ini
+[profile ch-gov-ecr-pull]
+source_profile = my-profile
+role_arn = arn:aws:iam::<YOUR_ACCOUNT_ID>:role/ClickHouseAirgapECRPullRole
+role_session_name = ch-gov-ecr-pull
+region = us-east-1
 ```
 
-If the second fails, you lack the cross-account role — that's a permissions
-request to your ClickHouse contact, not something you can configure around.
+The role lives in *your* account, so the account ID in `role_arn` is your `target_account_id`. Keep your credentials fresh the way your organization does it. There is no SSO session for the kit to log in to, so a failing profile produces a message that names the profile and asks you to refresh it.
 
-### What the pull role can and cannot do
+With `fips: true` and this mode, the scripts export `AWS_USE_FIPS_ENDPOINT=true` so the AWS CLI uses FIPS endpoints. In SSO mode the rendered config carries that setting instead.
 
-Worth knowing so its error messages don't confuse you. The role grants exactly:
-`GetAuthorizationToken`, `BatchGetImage`, `GetDownloadUrlForLayer`,
-`BatchCheckLayerAvailability`, `DescribeImages`, `ListImages` — scoped to
-account **<SOURCE_ECR_ACCOUNT_ID>**.
+### Check that both profiles work
 
-It deliberately does **not** grant `DescribeRepositories`. So you cannot list
-*which* repositories exist; you can only inspect ones you already know by name.
-There are three: `clickhouse-server`, `clickhouse-keeper`, `clickhouse-operator`.
-A denial on any other repo name is expected, not a broken setup.
+```bash
+source scripts/env.sh
+aws sts get-caller-identity --profile "$AWS_PROFILE"       # your account and your role
+aws sts get-caller-identity --profile ch-gov-ecr-pull      # the ClickHouseAirgapECRPullRole session
+```
+
+Replace `ch-gov-ecr-pull` with your `source_ecr_profile` if you changed the name. If the second command fails, the pull role is not set up for your account. That is a request to your ClickHouse contact, and you cannot configure around it. The role and its trust relationship are arranged with ClickHouse, and the kit never creates them. Step 1 of the playbook only checks that you can assume the role.
+
+### What the pull role needs
+
+The kit reads exactly three repositories in the source registry, by name: `clickhouse-server`, `clickhouse-keeper` and `clickhouse-operator`. To do that, the role needs read access to ECR: `ecr:GetAuthorizationToken`, plus the image-read actions `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` and `DescribeImages`. The kit never lists repositories, so a permission error when you try to list them with this profile does not mean your setup is broken.
+
+### Permissions for the deploying identity
+
+The identity behind `target_profile` creates real infrastructure, so it needs permissions across several AWS services. In SSO mode the default `sso_role_name` is `AdministratorAccess`, which covers everything below. If your organization requires something narrower, this table is where to start. Each row names the role or template that makes the calls.
+
+| Area | What the kit does | Where |
+|---|---|---|
+| STS | Reads its own identity, and assumes the ECR pull role (`sts:GetCallerIdentity`, `sts:AssumeRole` on `ClickHouseAirgapECRPullRole`). | Roles `ecr_pull_role`, `ecr_setup`; every script |
+| CloudFormation | Creates, updates and deletes the stacks `clickhouse-private-vpc`, `-eks`, `-nodegroups`, `-irsa` and `-ebs-csi`, plus `-langfuse-irsa` and `-grafana-irsa` when those options are on. Stacks that create IAM roles need the `CAPABILITY_IAM` acknowledgement. | Roles `vpc`, `eks_cluster`, `eks_nodegroups`, `storage_iam`, `k8s_prereqs`, `langfuse_storage`, `grafana_storage` |
+| EC2 and VPC | Creates the VPC, subnets, internet gateway, NAT gateways, Elastic IPs, route tables, the S3 gateway endpoint and the node launch templates. | `ansible/roles/vpc/files/vpc.yaml`, `ansible/roles/eks_nodegroups/files/eks-nodegroups.yaml` |
+| EKS | Creates the cluster, three node groups and the EBS CSI add-on, and writes a kubeconfig (`eks:DescribeCluster`). | `eks-cluster.yaml`, `eks-nodegroups.yaml`, `ebs-csi-addon.yaml`; role `eks_cluster` |
+| IAM | Creates and deletes roles and their policies, passes them to EKS, and registers the cluster's OIDC identity provider (`iam:CreateOpenIDConnectProvider`, `iam:ListOpenIDConnectProviders`). | Templates `eks-cluster.yaml`, `eks-nodegroups.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2`, `grafana-irsa.yaml.j2`; role `eks_cluster` |
+| ECR (your account) | Creates repositories with immutable tags and scan-on-push, then pushes the copied images and charts. | Roles `ecr_setup`, `image_sync` |
+| S3 | Creates buckets, sets their encryption, and reads, writes and deletes objects. | Roles `storage_iam`, `langfuse_storage`, `grafana_storage`; `scripts/s3-purge-cluster-data.sh` |
+| CloudWatch Logs | Creates the EKS control-plane log group and sets its retention. | Role `eks_cluster` |
+| KMS | Creates keys and aliases. Only when `fips: true`. | `eks-cluster.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2` |
+| ACM | Imports and deletes a certificate. Only when `langfuse.load_balancer.tls` or `grafana.load_balancer.tls` is on, or `fips: true`. | Roles `langfuse`, `grafana` |
+
+No role calls the Elastic Load Balancing API directly. When Kubernetes sees a `Service` of type `LoadBalancer`, the EKS control plane creates the Network Load Balancer for you.
+
+Treat this list as a starting point, not a validated least-privilege policy. It is derived from what the roles create and call, and it has not been tested as a minimal policy. If a deployment fails with `AccessDenied`, the error names the missing action, so add it and run the step again.
+
+One more rule follows from how EKS works. The identity that creates the cluster becomes its cluster administrator (`BootstrapClusterCreatorAdminPermissions` in `eks-cluster.yaml`), so use the same identity for the `kubectl` commands that follow.
 
 ---
 
 ## 3b. Persisting your account IDs and SSO portal: `state/deploy-vars.yml`
 
-`ansible/group_vars/all.yml`'s `aws:` block ships with two placeholders --
-`target_account_id: "<YOUR_ACCOUNT_ID>"` and
-`source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"` -- because this is a public
-tutorial repo, and a real account number has no business in a tracked file.
-Every script and role reads those two values, so a real deployer has to fill
-them in somewhere. Want to see the file's shape without running anything?
-It's tracked at `state/deploy-vars.yml.example`.
+The `aws:` block in `ansible/group_vars/all.yml` ships with placeholders such as `"<YOUR_ACCOUNT_ID>"` and `"<SOURCE_ECR_ACCOUNT_ID>"`. Real account numbers do not belong in a tracked file, and every script and role reads those values, so you fill them in somewhere else: `state/deploy-vars.yml`.
 
-**Don't hand-edit `all.yml`, and don't hand-edit `.aws/config` or its
-template either.** `ansible/deploy.yml` re-renders `.aws/config` from
-`ansible/files/aws-config.ini.j2` on *every* run (`tags: [always]`), so any
-value filled in by hand -- in the generated file or in the tracked template
--- is silently overwritten on the next run. `state/deploy-vars.yml` is the
-one place a fill-in survives.
+**Do not hand-edit `.aws/config` or its template, `ansible/files/aws-config.ini.j2`.** `ansible/deploy.yml` re-renders `.aws/config` on every run (`tags: [always]`), so a hand edit is overwritten. `state/deploy-vars.yml` is the one place your values survive.
 
-The first time you run any script under `scripts/` (every one of them
-sources `scripts/lib/common.sh`), it generates `state/deploy-vars.yml` for
-you, holding the same `aws:` shape as `all.yml`, with the same placeholders:
+The first time you run any script under `scripts/` (each one sources `scripts/lib/common.sh`), the kit generates `state/deploy-vars.yml` for you. It is gitignored, so it can never be committed by accident. It holds the same `aws:` shape as `all.yml`. A tracked copy at `state/deploy-vars.yml.example` shows the file without running anything:
 
 ```yaml
 aws:
+  auth_mode: "sso"                       # or "profile" (Path B)
   target_account_id: "<YOUR_ACCOUNT_ID>"
   target_region: "us-east-1"
-  target_profile: "sa"
+  target_profile: "ch-gov-target"
   source_ecr_account_id: "<SOURCE_ECR_ACCOUNT_ID>"
   source_ecr_region: "us-east-1"
-  source_ecr_profile: "private-us"
+  source_ecr_profile: "ch-gov-ecr-pull"
+  ecr_pull_role_name: "ClickHouseAirgapECRPullRole"
+  ecr_pull_session_name: "ch-gov-ecr-pull"
+  # auth_mode: sso only -- ignored in profile mode
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
+  sso_session_name: "ch-gov"
+  sso_region: "{{ aws.target_region }}"
+  sso_role_name: "AdministratorAccess"
 
-# Optional -- only needed when grafana.enabled is true.
+# Optional -- only needed when grafana.enabled is true (see below).
 dhi:
-  username: "<YOUR_DOCKERHUB_USERNAME>"
-  token: "<YOUR_DOCKERHUB_DHI_TOKEN>"
+  username: ""   # your Docker Hub username
+  token: ""      # your Docker Hub DHI access token
 ```
 
-If you're turning on the optional Grafana capability (Steps 16-18), fill in
-`dhi.username`/`dhi.token` too -- a Docker Hub account entitled to the DHI
-(Docker Hardened Images) catalog, which is what `grafana`/`awscli` mirror
-from. This is the same file, so it never touches a tracked one; setting
-`DHI_USERNAME`/`DHI_TOKEN` in the environment instead still works and is
-checked as a fallback, but `state/deploy-vars.yml` is the one that survives
-across shells and reboots.
+Open the file once and replace every `<...>` placeholder that applies to your `auth_mode`: the two account IDs always, and `sso_start_url` in SSO mode. Only the keys you set change. Every other key keeps its `all.yml` default, because dictionaries merge key by key. `scripts/play.sh` passes the file to Ansible automatically as `-e @state/deploy-vars.yml`.
 
-Open that file once and fill in your real values: the two account IDs, and
-`sso_start_url` (your org's IAM Identity Center portal start URL, used by
-`[sso-session clickhouse]` in the generated `.aws/config`). `sso_start_url`
-is optional -- leave it as the placeholder if you don't have it yet, and
-`aws sso login` will fail clearly until you do. `state/` is gitignored, so
-this file can never be committed by accident, and `scripts/play.sh` picks it
-up automatically on every run afterward, via an `-e @state/deploy-vars.yml`
-that overrides `all.yml`'s placeholders for exactly those values. Leave the
-file untouched, or delete it, and the deployment fails exactly the way it
-always has -- there's no new failure mode, only a place to fix the old one
-without touching a tracked file.
+If a placeholder is still there, the playbook stops before it touches AWS. It names the offending key and never prints your values.
 
-This is now the *only* place that makes AWS CLI auth work end to end: fill
-in `state/deploy-vars.yml` once, and every subsequent `.aws/config` render --
-whether from `scripts/lib/common.sh`'s pre-Ansible bootstrap or from
-`ansible/deploy.yml`'s own pre-task -- picks up your real values and keeps
-them, run after run.
+### DHI credentials (Grafana only)
+
+Docker Hardened Images (DHI) is a paid, entitled catalog of images on `dhi.io`. You need DHI credentials in exactly one situation: **when `grafana.enabled` is `true`.** In that case Step 2 mirrors the Grafana and `awscli` images from `dhi.io`, and `image_sync` logs in to that registry first. With Grafana off, the playbook never asks for the credentials. The ClickHouse, Langfuse and Chainguard images are pulled without them.
+
+Provide them in `state/deploy-vars.yml`, using the `dhi:` block shown earlier:
+
+```yaml
+dhi:
+  username: "<your Docker Hub username>"
+  token: "<your Docker Hub DHI access token>"
+```
+
+The account must be entitled to the DHI catalog. Alternatively, set the `DHI_USERNAME` and `DHI_TOKEN` environment variables. The kit uses them only when the two `dhi` keys are empty. The file survives new shells and reboots, so it is the more convenient choice. The file is gitignored, and the login is written to `state/skopeo-auth.json`, which is also gitignored.
+
+If Grafana is on and both are missing, `image_sync` stops with `An artifact sources from dhi.io but the DHI username/token are empty or still a <...> placeholder`. Part 8 covers the Grafana steps.
 
 ---
 
-## 4. The deployment repository question, resolved
+## 4. How this repo relates to ClickHouse's tutorial
 
-The public tutorial at
-[docs/cloud/clickhouse-private/tutorials/deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws)
-documents all 11 steps as explicit commands. The Ansible in `ansible/` follows
-that tutorial; see `docs/part-2-image-sync.md`.
+ClickHouse publishes a tutorial for this deployment at [docs/cloud/clickhouse-private/tutorials/deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). It gives the steps as explicit commands. The Ansible in `ansible/` implements those steps, in the same order, so you can read the tutorial for the reasoning and this repo for the automation. Part 2 walks through the first steps.
 
 ## 5. Running the playbook: `scripts/play.sh`
 
-Every step in Parts 2 and 3 is shown as a bare `ansible-playbook` command,
-because that is what you would type in a normal interactive shell. In practice
-use the wrapper:
+The deployment is an Ansible playbook, but you rarely start it directly. `scripts/up.sh` (section 5b) calls `scripts/play.sh`, and `play.sh` sets up the environment the playbook needs. You get the same result with less to remember, because three things are easy to get wrong:
 
-```bash
-scripts/play.sh --tags nodes                              # a step
-scripts/play.sh --check --tags storage                    # dry run
-scripts/play.sh --tags nodes -e nodegroups_state=absent   # teardown
-scripts/play.sh --help
-```
+**1. The environment has to point into the repo.** `AWS_CONFIG_FILE` (in SSO mode) and `KUBECONFIG` must be the project-local ones. If they are not, you get `The config profile (ch-gov-target) could not be found`, or, much worse, a run against whatever cluster your personal `~/.kube/config` names.
 
-It is equivalent to `source scripts/env.sh && cd ansible && ansible-playbook
-deploy.yml ...`, and exists because three things are easy to get wrong:
-
-**1. The environment has to point into the repo.** `AWS_CONFIG_FILE` and
-`KUBECONFIG` must be the project-local ones. Forgetting them gives you either
-`The config profile (sa) could not be found` or — much worse — a run against
-whatever cluster your personal `~/.kube/config` happens to name.
-
-**2. `ansible-playbook` must run from `ansible/`.** `ansible.cfg` is resolved
-relative to the current directory, and it is what supplies the inventory and
-`roles_path`. Run from the repo root and Ansible silently uses different
-settings.
+**2. The playbook must run from `ansible/`.** `ansible.cfg` is resolved relative to the current directory, and it supplies the inventory and `roles_path`. From the repo root, Ansible silently uses different settings.
 
 **3. Ansible refuses to start on non-blocking pipes.**
 
@@ -286,112 +311,184 @@ ERROR: Ansible requires blocking IO on stdin/stdout/stderr.
 Non-blocking file handles detected: <stdout>, <stderr>
 ```
 
-This has nothing to do with your command. Some parent processes — CI runners,
-some editor terminals, agent harnesses — hand their child non-blocking
-descriptors, and Ansible checks for that and bails. It is confusing precisely
-because the same command works when you type it into a normal terminal.
+This has nothing to do with your command. Some parent processes, such as CI runners and certain editor terminals, hand their child non-blocking file descriptors, and Ansible checks for that and stops. `play.sh` clears the flag on the three descriptors before it starts the playbook, so the terminal stays attached and you keep coloured output.
 
-The obvious workaround is to pipe through `cat`, which restores blocking IO:
-
-```bash
-ansible-playbook deploy.yml --tags nodes </dev/null 2>&1 | cat
-```
-
-That works, but it costs you the TTY, and with it coloured output and the
-correct terminal width. The wrapper instead clears the `O_NONBLOCK` flag on
-the three descriptors and then `exec`s, fixing the actual cause and leaving
-the terminal attached:
-
-```python
-for fd in (0, 1, 2):
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    if flags & os.O_NONBLOCK:
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-os.execvp("ansible-playbook", [...])
-```
-
-It also checks your credentials before doing anything:
+`play.sh` also checks your credentials before it does anything. When they have expired, you see the exact fix:
 
 ```
-[fail] not authenticated -- run: aws sso login --profile sa
+[fail] not authenticated -- run: AWS_CONFIG_FILE=/path/to/repo/.aws/config aws sso login --profile ch-gov-target
 ```
 
-SSO tokens last hours, not days. Without that check an expired token shows up
-partway into a run as an unrelated-looking module failure — sometimes after
-something has already been created.
+Without that check, an expired token shows up partway into a run as an unrelated-looking module failure, sometimes after something has already been created.
+
+> **Advanced: run individual steps.** While you learn one step at a time, or when you re-run a step after fixing a problem, pass a tag to `play.sh`:
+>
+> ```bash
+> scripts/play.sh --tags nodes           # one step
+> scripts/play.sh --check --tags storage # dry run
+> scripts/play.sh --help                 # usage and the full list
+> ```
+>
+> The tags are `images vpc eks nodes storage prereqs operator cluster preflight verify lb`, plus `lf-storage lf-db lf-app` and `gf-storage gf-db gf-app` for the optional Steps 13–18. Parts 2 onward name the tag for each step.
 
 ## 5b. The two scripts you will actually use: `up.sh` and `down.sh`
 
-`play.sh --tags <step>` is the right tool while *building* a step. Day to day
-you want two verbs, and you want them to know the order so you do not have to:
+Day to day you want two verbs, and you want them to know the order so you do not have to:
 
 ```bash
 scripts/up.sh                  # Steps 1-12, in order, idempotent; asks first
-scripts/up.sh --from nodes     # start at a step (e.g. after down.sh)
+scripts/up.sh --from nodes     # start at a step (for example after down.sh)
 scripts/up.sh --skip-images    # skip the Step 2 image hop once it has run
 
 scripts/down.sh                # stop the meter: load balancer, cluster, node groups
-scripts/down.sh --nodes-only   # just the nodes -- fastest; pods go Pending, NLB stays
+scripts/down.sh --nodes-only   # just the nodes: fastest; pods go Pending, the NLB stays
 scripts/down.sh --all          # everything except the S3 bucket and ECR images
 ```
 
-Both scripts read one more switch from `ansible/group_vars/all.yml`:
-`langfuse.enabled`. It is `false` by default and then neither script changes.
-Set it to `true` and `up.sh` appends the optional Langfuse steps
-(`lf-storage lf-db lf-app`, Steps 13–15) after `lb` and prints the Langfuse
-URL at the end, and `down.sh` puts `lf-app` first in its default plan (and
-`lf-db` and `lf-storage` in `--all`) — but only when there is a Langfuse
-release, namespace or stack to remove, and whether or not the switch is still
-`true` at teardown time. Part 6 covers the steps themselves. A second
-Langfuse switch, `langfuse.load_balancer.tls`, has that load balancer
-terminate TLS with a self-signed certificate; neither script changes for it
-beyond the address `up.sh` prints becoming `https://` — Part 6 §9.
+Both scripts read one more setting: `langfuse.enabled`, which is `false` by default. While it is `false`, neither script changes. Set it to `true` and `up.sh` appends the optional Langfuse steps (`lf-storage lf-db lf-app`, Steps 13–15) after `lb` and prints the Langfuse URL at the end. `down.sh` puts `lf-app` first in its default plan (and `lf-db` and `lf-storage` in `--all`), but only when there is a Langfuse release, namespace or stack to remove, and whether or not the setting is still `true`. `grafana.enabled` works the same way for Steps 16–18. Part 6 covers Langfuse and Part 8 covers Grafana.
 
-`down.sh` exists because teardown is **not** simply `up.sh` backwards. Three
-dependencies point the other way — four with Langfuse — and getting any of
-them wrong leaves something orphaned and billing:
+`down.sh` exists because teardown is **not** `up.sh` backwards. Several dependencies point the other way, and getting one wrong leaves something orphaned and billing:
 
-1. The load balancer Service goes **before** the cluster or EKS — deleting the
-   Service is what deletes the NLB. Delete EKS first and the NLB survives it
-   and then blocks the VPC stack.
-2. The ClickHouse cluster goes **while the nodes are still up.** Removing its
-   namespace needs the operator (to unwind the CR's finalizers) and the EBS
-   CSI controller (to release Keeper's volumes). With no nodes, neither is
-   running: the namespace hangs in `Terminating` and the EBS volumes are
-   orphaned. `down.sh` refuses to start if it finds the namespace with no
-   nodes, and tells you what to do instead.
-3. The prerequisites and storage teardowns read the EKS cluster and the IRSA
-   stack, so they run before EKS goes — and prerequisites before storage.
-4. Langfuse (optional Steps 13–15) goes **before the ClickHouse cluster.**
-   Its tables live in that cluster and its PostgreSQL and Valkey disks are
-   EBS volumes, so removing it needs the operator and the EBS CSI driver
-   alive — the cluster and the nodes still up. The same zero-nodes refusal
-   applies to the `langfuse` namespace.
+1. The load balancer `Service` goes **before** the cluster or EKS. Deleting the `Service` is what deletes the NLB. Delete EKS first and the NLB survives it, then blocks deletion of the VPC stack.
+2. The ClickHouse cluster goes **while the nodes are still up.** Removing its namespace needs the operator (to unwind the resource's finalizers) and the EBS CSI controller (to release Keeper's volumes). With no nodes, neither runs, the namespace hangs in `Terminating`, and the EBS volumes are orphaned. `down.sh` refuses to start if it finds the namespace with no nodes, and tells you what to do instead.
+3. The prerequisites and storage teardowns read the EKS cluster and the IRSA stack, so they run before EKS goes, and prerequisites before storage.
+4. Langfuse (optional Steps 13–15) goes **before the ClickHouse cluster.** Its tables live in that cluster, and its PostgreSQL and Valkey disks are EBS volumes, so removing it needs the operator and the EBS CSI driver running. The same zero-nodes refusal applies to the `langfuse` namespace.
+5. Grafana (optional Steps 16–18) also goes before the ClickHouse cluster, for the same load-balancer reason. It has no persistent volume, so it does not need the nodes to be up.
 
-Each teardown is a separate playbook run, because every role ends the play
-after its own teardown task; that is why the script loops rather than passing
-one long `--tags` list. Nothing in either script deletes S3 data.
+Each teardown is a separate playbook run, because every role ends the play after its own teardown task. That is why the script loops instead of passing one long `--tags` list. Neither script deletes your ClickHouse or Langfuse data buckets. The one bucket teardown does remove is Grafana's plugin mirror, which holds a single re-downloadable file.
 
-## 6. Checkpoint
+## 6. Check your setup
 
-Verified working:
+Run these checks in order. Each one gives a command and the result you should see, and the checks double as exercises for a workshop. If one fails, section 7 lists the common causes.
 
-- [x] All 7 tools installed (helm v4)
-- [x] helm-diff plugin + 4 Ansible collections
-- [x] `sa` profile authenticates via SSO
-- [x] `private-us` assumes the pull role
-- [x] Source ECR reachable; real image versions enumerated
-- [x] Python venv (3.12+) with boto3 and kubernetes for Ansible's modules
-- [x] Deployment automation — we write our own (`ansible/`)
+1. **All tools and both profiles pass the setup check.**
 
-Re-verify any time with:
+   ```bash
+   scripts/part1-setup.sh --check
+   ```
 
-```bash
-./scripts/part1-setup.sh --check
-```
+   You should see a version table with no `NOT FOUND` entries, an `[ ok ]` line for each profile, and a final `Part 1 complete` heading followed by `tools installed, both profiles authenticate, source ECR reachable`. The exit status is `0`.
 
-And run every step through the wrapper:
+2. **Your shell points at the repo's configuration.**
 
-```bash
-scripts/play.sh --help
-```
+   ```bash
+   source scripts/env.sh
+   ```
+
+   You should see `AWS_CONFIG_FILE`, `AWS_PROFILE` (your `target_profile`) and `KUBECONFIG` (`state/kubeconfig`), then a line starting `identity:` with your role's ARN. `not logged in` means you need to log in or refresh credentials.
+
+3. **The target profile is in the right account.**
+
+   ```bash
+   aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text
+   ```
+
+   You should see the 12-digit `target_account_id` you set.
+
+4. **The pull profile assumes the pull role.**
+
+   ```bash
+   aws sts get-caller-identity --profile ch-gov-ecr-pull --query Arn --output text
+   ```
+
+   You should see an ARN that ends `assumed-role/ClickHouseAirgapECRPullRole/ch-gov-ecr-pull`, in your account.
+
+5. **You can read ClickHouse's registry.** The last section of the setup check does this. Look for `ECR authorization token obtained`, then the three repositories with up to three recent image tags each. Those tags are the ones a deployment can copy today.
+
+6. **The Python environment is ready for Ansible.**
+
+   ```bash
+   .venv/bin/python3 -c 'import boto3, kubernetes; print("ok")'
+   ```
+
+   You should see `ok`.
+
+7. **The wrapper runs.**
+
+   ```bash
+   scripts/play.sh --help
+   ```
+
+   You should see the usage text. Nothing is deployed.
+
+## 7. Troubleshooting
+
+Each entry gives the symptom, the cause and the fix.
+
+**`Error loading SSO Token`, or a script prints `not authenticated -- run: ... aws sso login ...`**
+
+- *Cause:* the SSO token expired. Tokens last hours, not days.
+- *Fix:* run the login command the message prints, or `source scripts/env.sh` and `aws sso login --profile "$AWS_PROFILE"`.
+
+**`The config profile (ch-gov-target) could not be found`, or `profile '...' not defined`**
+
+- *Cause (SSO mode):* the AWS CLI is not reading the repo's `.aws/config`, because your shell never sourced `scripts/env.sh`.
+- *Cause (profile mode):* the profile is missing from the config file the CLI reads.
+- *Fix:* in SSO mode, run `source scripts/env.sh` or go through the scripts. In profile mode, add the profile to your AWS config, and check that the names match `target_profile` and `source_ecr_profile`.
+
+**`These settings still hold a <...> placeholder`**
+
+- *Cause:* `state/deploy-vars.yml` still contains a value such as `<YOUR_ACCOUNT_ID>`. The message lists the keys.
+- *Fix:* edit `state/deploy-vars.yml` (section 3b) and run again.
+
+**`Profile '...' resolves to account X, but group_vars says Y`**
+
+- *Cause:* `target_account_id` does not match the account your `target_profile` actually signs in to.
+- *Fix:* correct `target_account_id` in `state/deploy-vars.yml`, or point `target_profile` at the right account.
+
+**`Profile '...' could not authenticate`, or `authenticates, but not as the ECR pull role`**
+
+- *Cause:* the pull role is not set up for your account, its trust relationship does not allow your identity, or the names in your configuration do not match.
+- *Fix:* check `ecr_pull_role_name` and `source_ecr_profile`, and make sure the target profile is logged in. If both look right, ask your ClickHouse contact to confirm the role exists in your account.
+
+**`scripts/part1-setup.sh` stops with `Homebrew required`**
+
+- *Cause:* a tool is missing and Homebrew is not installed. This is common on Linux.
+- *Fix:* install the missing tools as section 2 describes, or install Homebrew for Linux, then run the script again.
+
+**`python3 is X.Y; need 3.12+`**
+
+- *Cause:* `ansible-core` 2.21 requires Python 3.12 or later, so an older interpreter cannot run the playbook.
+- *Fix:* install Python 3.12 or later and make it the `python3` on your `PATH`. The script rebuilds an older `.venv/` on its own.
+
+**`module not found`, or a message that `boto3` or `kubernetes` is missing**
+
+- *Cause:* the Ansible collections or the `.venv/` environment are missing or out of date.
+- *Fix:* run `scripts/part1-setup.sh`. It installs both.
+
+**`ERROR: Ansible requires blocking IO on stdin/stdout/stderr`**
+
+- *Cause:* the process that started your shell gave it non-blocking file descriptors.
+- *Fix:* start the playbook through `scripts/play.sh` (which `up.sh` uses), which clears the flag.
+
+**The image copy in Step 2 fails because a tag does not exist**
+
+- *Cause:* ClickHouse purges old tags from the source registry over time, and the versions pinned under `versions:` in `ansible/group_vars/all.yml` can fall out of date.
+- *Fix:* run `scripts/part1-setup.sh` and read the tags it lists in the final section. Set the matching entry under `versions:` in `state/deploy-vars.yml` to a tag that exists, then run again. Enter the base tag only: with `fips: true` the kit appends the `-fips` suffix itself.
+
+**`kubectl` prints a version-skew warning**
+
+- *Cause:* Kubernetes supports a `kubectl` within one minor version of the cluster. Your `kubectl` is further away from `infrastructure.eks_version`.
+- *Fix:* install a `kubectl` within one minor version of `infrastructure.eks_version`, or choose an `eks_version` that fits the `kubectl` you have.
+
+**A Helm task fails in a way that looks unrelated to your change**
+
+- *Cause:* the Ansible Helm modules were written against Helm 3, and Helm 4 behaves differently in places. Part 4 describes one such case with the operator.
+- *Fix:* check the Helm version first (`helm version --short`). Try Helm 3 if a Helm task misbehaves.
+
+**`An artifact sources from dhi.io but the DHI username/token are empty`**
+
+- *Cause:* `grafana.enabled` is `true` and no DHI credentials are set.
+- *Fix:* set `dhi.username` and `dhi.token` in `state/deploy-vars.yml` (section 3b).
+
+**`kubectl preflight` is not found in your own shell**
+
+- *Cause:* `krew` puts plugins in `~/.krew/bin`, which is not on your `PATH`. The scripts add it for themselves only.
+- *Fix:* add `$HOME/.krew/bin` to your `PATH`.
+
+**`kubectl` says `You must be logged in to the server (Unauthorized)`**
+
+- *Cause:* you are using a different identity from the one that created the cluster, and only the creator is an administrator by default.
+- *Fix:* use the profile you deployed with (`source scripts/env.sh`, then run `kubectl` again).
+
+**Where to go next:** Part 2 copies the images into your registry and starts building the infrastructure.
