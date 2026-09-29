@@ -469,7 +469,7 @@ plane is healthy and waiting for Step 5.
 ## Checkpoint
 
 - [x] EKS 1.36 control plane, private + public endpoint access
-- [x] Control plane logging (api, audit, authenticator) to CloudWatch
+- [x] Control plane logging (api, audit, authenticator) to CloudWatch, expiring after `eks_log_retention_days` (30)
 - [x] Project-local kubeconfig; API verified, skew within ±1
 - [x] OIDC provider registered — IRSA trust policies can reference it
 - [x] Role idempotent (`changed=0` on re-run)

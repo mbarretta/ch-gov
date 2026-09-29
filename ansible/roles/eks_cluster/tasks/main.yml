@@ -137,6 +137,20 @@
   ansible.builtin.meta: end_play
   when: (eks_state | default('present')) == 'absent'
 
+- name: Expire control-plane logs after {{ infrastructure.eks_log_retention_days }} days
+  # EKS creates /aws/eks/<cluster>/cluster with no retention, and leaves it
+  # behind when the cluster is deleted, so without this the log storage bill
+  # only ever grows. Not in the CFN template: a LogGroup resource there would
+  # collide with the group EKS already created on any existing cluster. The
+  # module adopts an existing group and only changes its retention; if it runs
+  # before EKS has written anything, it creates the group and EKS uses it.
+  amazon.aws.cloudwatchlogs_log_group:
+    log_group_name: "/aws/eks/{{ infrastructure.eks_cluster_name }}/cluster"
+    retention: "{{ infrastructure.eks_log_retention_days }}"
+    state: present
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+
 # ac3: documentation of intent, read back from this same CloudFormation
 # stack's own outputs -- not a live `aws eks describe-cluster` call, per
 # plan.constraints[]. EksSecretsKeyArn only exists in stack_outputs when
