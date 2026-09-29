@@ -150,6 +150,9 @@
     # SSE-S3 (AES256) otherwise -- unchanged from pre-FIPS behaviour.
     encryption: "{{ 'aws:kms' if fips else 'AES256' }}"
     encryption_key_id: "{{ _lf_bucket_kms_key_arn if fips else omit }}"
+    # S3 Bucket Key: one bucket-level data key instead of a KMS call per
+    # object -- see the same setting in storage_iam/tasks/main.yml.
+    bucket_key_enabled: "{{ true if fips else omit }}"
     # Nothing about this bucket should ever be public. This blocks it at
     # the bucket level, independent of any policy or ACL applied later.
     public_access:

@@ -133,6 +133,12 @@
     # SSE-S3 (AES256) otherwise -- unchanged from pre-FIPS behaviour.
     encryption: "{{ 'aws:kms' if fips else 'AES256' }}"
     encryption_key_id: "{{ clickhouse_bucket_kms_key_arn if fips else omit }}"
+    # S3 Bucket Key: S3 caches a bucket-level data key instead of calling KMS
+    # for every object, cutting KMS requests (billed per 10k) by ~99%.
+    # ClickHouse's S3 request rate makes per-object KMS calls the largest
+    # avoidable FIPS-mode cost. Applies to new objects only; the S3 role's
+    # KMS grant has no encryption-context condition, so nothing else changes.
+    bucket_key_enabled: "{{ true if fips else omit }}"
     # Nothing about this bucket should ever be public. This blocks it at the
     # bucket level, independent of any policy or ACL applied later.
     public_access:

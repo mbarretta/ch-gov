@@ -117,6 +117,7 @@ default key AWS supplied, with no dedicated key to control or rotate.
 # storage_iam/tasks/main.yml
 encryption: "{{ 'aws:kms' if fips else 'AES256' }}"
 encryption_key_id: "{{ clickhouse_bucket_kms_key_arn if fips else omit }}"
+bucket_key_enabled: "{{ true if fips else omit }}"
 ```
 
 with an equivalent ternary in `langfuse_storage/tasks/main.yml` for the
@@ -145,6 +146,10 @@ storageClass:
    output.
 3. Bucket encryption flips to `aws:kms` (backed by the new key) under
    `fips: true`, `AES256` otherwise — unchanged from the pre-phase default.
+   Under `fips: true` the S3 Bucket Key is also enabled, so S3 uses a
+   bucket-level data key instead of calling KMS for every object. Without it,
+   each ClickHouse GET and PUT is a billed KMS request, and ClickHouse makes a
+   lot of them.
 4. The shared `gp3-encrypted` StorageClass gains `encrypted`/`fsType`/`type`
    plus `kmsKeyId` under `fips: true`, read back from `storage_iam`'s stack
    via `amazon.aws.cloudformation_info` so `--tags prereqs` still works
@@ -183,6 +188,7 @@ ciphertext; that combination is rejected outright, not attempted.
 - [x] Three FIPS-gated KMS keys, one per blast-radius boundary, no sharing
 - [x] Bucket creation reordered after its key's stack deploy in both `storage_iam` and `langfuse_storage`
 - [x] Bucket encryption ternary (`aws:kms` / `AES256`) wired to the new key
+- [x] S3 Bucket Key enabled under `fips: true`, so KMS is not called per object
 - [x] StorageClass parameters ternary, with an immutable-parameter mismatch guard that fails clearly instead of attempting an update
 - [x] `ClickHouseBucketKmsKey`/`LangfuseBucketKmsKey` retained across teardown; `EbsKmsKey` deliberately not, matching teardown order
 - [ ] Future-`PUT`s-only limitation: no retroactive re-encryption of pre-existing objects — stated, not fixed, by design
