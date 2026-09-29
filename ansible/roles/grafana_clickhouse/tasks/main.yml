@@ -363,18 +363,31 @@
     argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_grant_sh, clickhouse.admin_username, _gfdb_user] }}"
     stdin: "{{ _gfdb_admin_pw }}\n"
   vars:
-    # $0 = admin user, $1 = user.
+    # $0 = admin user, $1 = user. Both loops read one name per line (never
+    # `for x in $list`, which word-splits on whitespace too) and skip any
+    # name containing a backtick before it is spliced into the GRANT
+    # statement: ClickHouse allows a backtick-quoted identifier to itself
+    # contain a literal backtick (escaped by doubling it at creation time),
+    # which system.databases/system.tables then returns unescaped -- without
+    # this guard that string would reach a query run with the admin's own
+    # credentials on every idempotent re-run of this role (found by the
+    # phase 7.5 security audit, sec1 -- a real privesc path new in this
+    # cycle, unlike the fixed, single-database grant langfuse_clickhouse
+    # mirrors). Skipping such a name rather than trying to escape it is
+    # simpler and needs no tool beyond the POSIX shell itself.
     _gfdb_grant_sh: |
       set -eu
       IFS= read -r pw
       ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
       before=$(ch "SHOW GRANTS FOR $1")
       dbs=$(ch "SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') FORMAT TSV")
-      for db in $dbs; do
+      printf '%s\n' "$dbs" | while IFS= read -r db; do
+        case "$db" in *'`'*|'') continue ;; esac
         ch "GRANT SELECT ON \`$db\`.* TO $1"
       done
       systabs=$(ch "SELECT name FROM system.tables WHERE database = 'system' AND name NOT IN ('zookeeper', 'zookeeper_log') FORMAT TSV")
-      for t in $systabs; do
+      printf '%s\n' "$systabs" | while IFS= read -r t; do
+        case "$t" in *'`'*|'') continue ;; esac
         ch "GRANT SELECT ON system.\`$t\` TO $1" 2>/dev/null || true
       done
       after=$(ch "SHOW GRANTS FOR $1")
