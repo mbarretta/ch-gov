@@ -71,7 +71,7 @@ Resources:
   # Node IAM role -- shared by all three groups
   # =========================================================================
   # Every EC2 node assumes this. Deliberately NO RoleName: an explicit name
-  # collides with leftovers from other attempts in this shared account, and
+  # collides with leftovers from other attempts in the same account, and
   # CloudFormation reports such a collision only as "Validation failed with
   # 1 error(s)", naming neither the resource nor the reason.
   NodeRole:

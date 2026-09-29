@@ -38,7 +38,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       # No RoleName, for the same reason as every other role in this project:
-      # a collision in a shared account surfaces only as "Validation failed
+      # a collision with an existing role surfaces only as "Validation failed
       # with 1 error(s)". The tutorial suggests the convention
       # CH-S3-$NAME-$REGION-$ORDINAL-Role; nothing here depends on the name,
       # because the service account is annotated from this stack's output.
@@ -69,7 +69,7 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}'
                   - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/*'
 {% if fips %}
-              # FIPS hardening Phase 2: the bucket's default encryption below
+              # Under fips: the bucket's default encryption below
               # becomes aws:kms (see storage_iam/tasks/main.yml), backed by
               # ClickHouseBucketKmsKey. This is the ONLY statement anywhere
               # that grants a real principal use of that key -- see the key's
@@ -146,7 +146,7 @@ Resources:
         - {Key: Project, Value: clickhouse-private}
 {% if fips %}
   # =========================================================================
-  # Customer-managed KMS keys (FIPS 140-3 hardening, Phase 2)
+  # Customer-managed KMS keys (FIPS 140-3 hardening)
   # =========================================================================
   # Both keys grant only account-root admin in their own KeyPolicy. Real
   # usage grants live in the roles' own IAM policies above (ClickHouseBucket

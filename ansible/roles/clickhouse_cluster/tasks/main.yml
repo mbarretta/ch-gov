@@ -140,15 +140,15 @@
         - "{{ prometheus_password_file }}"
 
     # --- native TLS: a self-signed CA and a leaf server cert it signs -------
-    # Only under fips: true. 4a-spike's findings (AC1) confirmed the chart's
-    # TLS surface is CA-chain verification only -- no SNI/hostname/SAN field
-    # exists anywhere in server.openSSL/keeper.openSSL's schema -- so one
+    # Only under fips: true. The chart's TLS surface is CA-chain verification
+    # only (confirmed against its rendered templates) -- no SNI/hostname/SAN
+    # field exists anywhere in server.openSSL/keeper.openSSL's schema -- so one
     # long-lived leaf naming the stable in-cluster service hostnames is
     # sufficient; no LB-hostname-keyed reissue workflow is needed. The SAN
-    # list below covers both hostname forms Phase 4b's ac2 says its two
-    # callers use (langfuse_clickhouse's bare .svc form, langfuse's migration
-    # block's .svc.cluster.local form) plus Keeper's own service, so 4b does
-    # not need to touch this cert again. Structured as one block (matching
+    # list below covers both hostname forms its two callers use
+    # (langfuse_clickhouse's bare .svc form, langfuse's migration block's
+    # .svc.cluster.local form) plus Keeper's own service, so those roles do
+    # not need to reissue this cert. Structured as one block (matching
     # langfuse/tasks/main.yml's own "Terminate TLS at the load balancer"
     # block) so `when: fips` is stated once rather than on every task.
     - name: Generate the ClickHouse native-TLS CA, leaf cert and Secret
@@ -503,7 +503,7 @@
             # .aws/config has no bearing on it. See the endpoint-coverage
             # matrix in group_vars/all.yml.
             endpoint: "{{ s3_endpoint }}"
-        # 4a-spike's findings (AC2): server.openSSL.required: true zeroes
+        # server.openSSL.required: true zeroes
         # http_port/tcp_port (and the cloud.port readiness listener) for
         # EVERY caller, not just the load balancer -- clickhouse_loadbalancer
         # and scripts/ch-client.sh move to the secure ports under fips: true
@@ -543,12 +543,12 @@
           storageClassName: "{{ clickhouse.storage_class }}"
           resources:
             requests: "{{ clickhouse.keeper.disk }}"
-        # Same Secret and CA-chain model as server.openSSL above -- 4a-spike
-        # confirmed the identical five-field tlsConfiguration shape renders
-        # for Keeper. Unlike the server, this chart does NOT confirm whether
+        # Same Secret and CA-chain model as server.openSSL above -- the
+        # identical five-field tlsConfiguration shape renders for Keeper.
+        # Unlike the server, this chart does NOT confirm whether
         # `required: true` also disables Keeper's plaintext listener (that is
-        # the un-pulled operator chart's call, not this one's) -- 4a-spike's
-        # conservative default is to not assume it is auto-disabled, so
+        # the operator chart's call, not this one's) -- the conservative
+        # default is to not assume it is auto-disabled, so
         # nothing downstream of this role currently depends on Keeper's
         # plaintext port being gone.
         openSSL:
@@ -556,7 +556,7 @@
           required: "{{ fips }}"
           # Keeper's chart schema defaults certKey/keyKey to keeper.crt/keeper.key,
           # but the Secret above only ever writes server.crt/server.key/ca.crt --
-          # one shared leaf cert for both server and keeper (4a-spike's finding).
+          # one shared leaf cert for both server and keeper.
           # Override to the keys that actually exist so fips: true's mTLS wiring
           # doesn't reference a nonexistent Secret key.
           secret:

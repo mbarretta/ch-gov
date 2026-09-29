@@ -43,8 +43,8 @@ elif have clickhouse; then CLIENT=(clickhouse client)
 else die "clickhouse-client not installed: brew install clickhouse"; fi
 
 # Native port and TLS args, decided once and reused by both paths below.
-# fips: true means server.openSSL.required has zeroed 9000's listener (see
-# 4a-spike's findings) -- 9440 is ClickHouse's own tcp_port_secure default.
+# fips: true means server.openSSL.required has zeroed 9000's listener --
+# 9440 is ClickHouse's own tcp_port_secure default.
 CH_PORT=9000
 SECURE_ARGS=()
 if ch_fips_enabled; then

@@ -61,9 +61,9 @@
       ansible.builtin.set_fact:
         _lf_present: "{{ langfuse.load_balancer.type != 'none' }}"
         # The effective TLS state: the legacy langfuse.load_balancer.tls
-        # switch, OR'd with fips (Phase 4c) so that a single fips: true does
-        # not silently leave the NLB in plaintext -- the single-fips-switch
-        # ground rule this whole plan follows. type: none never terminates
+        # switch, OR'd with fips so that a single fips: true does
+        # not silently leave the NLB in plaintext -- the one fips switch is
+        # meant to be the whole decision. type: none never terminates
         # TLS regardless of either value: there is no NLB to terminate it on.
         # fips: false leaves the pre-4c behaviour (tls alone) unchanged.
         _lf_tls: "{{ langfuse.load_balancer.type != 'none' and ((langfuse.load_balancer.tls | bool) or (fips | bool)) }}"
@@ -229,7 +229,7 @@
         # fips: true adds --secure --port 9440: this exec runs inside the
         # server pod itself (no --host, implicit localhost), and
         # server.openSSL.required zeroes localhost's own plaintext 9000 the
-        # same as everyone else's (4a-spike findings). No --config-file/CA
+        # same as everyone else's. No --config-file/CA
         # argument here -- this is an in-cluster loopback admin check that
         # had no certificate verification at all on the removed plaintext
         # port either, so accepting whatever cert the server presents is not
@@ -477,7 +477,7 @@
 
 - name: Write the ClickHouse CA Secret (Step 9's TLS material, for the migration and runtime clients)
   # fips: true only. clickhouse_cluster (Step 9) runs before this role and
-  # already wrote clickhouse_tls_ca_cert_file (4a-impl); the CA itself has no
+  # already wrote clickhouse_tls_ca_cert_file; the CA itself has no
   # secret material (it signs, it does not authenticate as anything), so a
   # Secret is used here only to match this file's existing convention of
   # putting everything the chart mounts into a Secret, not because ca.crt is
@@ -671,7 +671,7 @@
 
     - name: Generate the key and the self-signed certificate (missing, naming another hostname, or under-strength for fips)
       # One shot: an rsa:{{ tls_rsa_bits }}-bit RSA key (2048 normally, 3072+
-      # under fips -- ac2), unencrypted (the NLB needs it plain and ACM
+      # under fips), unencrypted (the NLB needs it plain and ACM
       # imports it plain), and a certificate signed by it with the NLB
       # hostname as its only SAN. Paths only on argv; openssl writes the key
       # 0600 itself. The fips key-size clause below regenerates an
@@ -952,16 +952,16 @@
       # through the operator's server-any Service. Nothing is deployed here.
       #
       # fips: true moves both the runtime and migration connections to the
-      # secure ports 4a-impl wired (server.openSSL.required zeroes 8123/9000
-      # for every caller -- 4a-spike's findings -- so leaving these on their
+      # secure ports clickhouse_cluster wired (server.openSSL.required zeroes
+      # 8123/9000 for every caller, so leaving these on their
       # plaintext defaults would simply fail to connect, not "keep working
       # unencrypted"). The chart's own `langfuse.clickhouse.protocol` helper
       # (confirmed by reading templates/_helpers.tpl in the pulled 2.1.0
       # chart) derives CLICKHOUSE_URL's scheme from whether `host` starts with
       # "https://", stripping that prefix before use as the hostname -- so
       # prefixing host is how CLICKHOUSE_URL becomes https:// without a
-      # duplicate-name additionalEnv override (see ac3's additionalEnv note
-      # below and the langfuse.additionalEnv block above). The hostname itself
+      # duplicate-name additionalEnv override (see the CLICKHOUSE_*
+      # additionalEnv note and the langfuse.additionalEnv block above). The hostname itself
       # (.svc.cluster.local) is in the leaf certificate's SAN list
       # clickhouse_cluster/tasks/main.yml generates, alongside
       # langfuse_clickhouse's bare .svc form -- both verify.

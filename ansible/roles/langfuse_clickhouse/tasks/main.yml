@@ -54,19 +54,19 @@
     # verification downgrade -- there was none before either") as
     # clickhouse_verify's _vf_sh: this exec runs inside the server pod
     # itself, and server.openSSL.required zeroes localhost's plaintext 9000
-    # too (4a-spike findings).
+    # too.
     _lfdb_sh: >-
       IFS= read -r pw;
       exec clickhouse-client --user "$0" --password "$pw"
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
     # $0 = user, $1 = host, $2 = attempts; the user's password is the first
-    # line of stdin, followed (fips: true only) by the ClickHouse CA 4a-impl
-    # wrote (clickhouse_tls_ca_cert_file). SELECT 1 over HTTP, the port
-    # Langfuse's own runtime client uses (fips: true moves this to HTTPS
-    # 8443 -- 4a-spike's findings confirm the plain 8123 listener is zeroed
-    # the same as 9000's). ac1 (task 4b) asks for CA verification on this
-    # check specifically, not --no-check-certificate: `read -r pw` consumes
+    # line of stdin, followed (fips: true only) by the ClickHouse CA
+    # clickhouse_cluster wrote (clickhouse_tls_ca_cert_file). SELECT 1 over
+    # HTTP, the port Langfuse's own runtime client uses (fips: true moves this
+    # to HTTPS 8443 -- the plain 8123 listener is zeroed the same as 9000's).
+    # This check verifies against the CA, rather than using
+    # --no-check-certificate: `read -r pw` consumes
     # exactly the first stdin line (the password has no embedded newline), so
     # the plain `cat` after it slurps whatever is left on stdin -- the CA,
     # when the caller appended it -- into a per-exec temp file inside the
@@ -74,16 +74,15 @@
     # this pod's filesystem: unlike clickhouse_loadbalancer's own probe, this
     # role execs into the *existing* server pod rather than creating one of
     # its own, so it cannot add a volume mount, and the operator's own
-    # in-pod mount path for server.openSSL's Secret is not documented by
-    # anything 4a-spike or 4a-impl recorded. The password rides in a header
-    # on wget's argv inside the container, the same exposure as
+    # in-pod mount path for server.openSSL's Secret is not documented by the
+    # chart. The password rides in a header on wget's argv inside the
+    # container, the same exposure as
     # clickhouse-client's --password in _lfdb_sh; the kubectl argv on this
     # machine carries nothing. Retries are here rather than in `until:` so
     # the task can be `failed_when: false` and the assert after it can
     # explain the failure (an exhausted `until:` fails regardless).
     #
-    # Two wget defects found by pulling the real -fips image and testing it
-    # (d1 in the plan's deferral ledger, now resolved): this BusyBox wget has
+    # Two wget defects in the -fips image: this BusyBox wget has
     # no CA-pinning flag at all -- `--ca-certificate` is a hard "unrecognized
     # option" -- so the CA goes into the system trust store instead, which
     # wget's default verification (both chain AND hostname; confirmed against
@@ -419,7 +418,7 @@
 
 - name: Try to grant CLUSTER
   # In Langfuse's list for clustered deployments, but `default` does not hold
-  # CLUSTER on ClickHouse Private (verified live), so this will likely be
+  # CLUSTER on ClickHouse Private, so this will likely be
   # refused. Not fatal: Step 15 reads the outcome recorded below together with
   # on_cluster_queries_require_cluster_grant and decides
   # clickhouse.cluster.enabled for the chart. DDL replicates through the

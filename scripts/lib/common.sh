@@ -256,7 +256,7 @@ _ch_block_var() {
 lf_var() { _ch_block_var langfuse "$1"; }
 
 # Succeeds when the NLB terminates TLS -- the same effective state the
-# langfuse role computes as _lf_tls (Phase 4c): langfuse.load_balancer.tls,
+# langfuse role computes as _lf_tls: langfuse.load_balancer.tls,
 # OR'd with the persistent fips: switch (ch_fips_enabled, defined above), but
 # never for load_balancer.type: none, which has no NLB at all. `    tls:` and
 # `    type:` are the only keys at that indentation spelled that way in the
@@ -354,7 +354,7 @@ gf_cacert() {
 # The CA clickhouse_cluster generates into state/ when fips is true (see
 # ansible/group_vars/all.yml's clickhouse_tls_ca_cert_file) -- a leaf server
 # cert signed by it terminates the ClickHouse native/HTTP TLS listeners once
-# server.openSSL.required zeroes their plaintext ports (4a-spike findings).
+# server.openSSL.required zeroes their plaintext ports.
 readonly CH_TLS_CA="$CH_PROJECT_ROOT/state/clickhouse-tls-ca.pem"
 # A minimal clickhouse-client openSSL config trusting CH_TLS_CA, rewritten by
 # ch_tls_client_config() below every time it's needed. It carries no secret
@@ -366,7 +366,7 @@ readonly CH_TLS_CLIENT_CFG="$CH_PROJECT_ROOT/state/clickhouse-client-tls.xml"
 # "$CH_TLS_CLIENT_CFG" --secure` trusts the CA clickhouse_cluster generated,
 # instead of the system trust store (which never has our self-signed CA in
 # it). verificationMode is strict, rejecting an unrecognized chain outright:
-# per 4a-spike's findings the chart's TLS surface is CA-chain verification
+# the chart's TLS surface is CA-chain verification
 # only (no separate hostname/SNI check exists to configure either way), so
 # this is the whole story -- there is no hostname-matching flag to add.
 # Dies with a clear message if fips: true but clickhouse_cluster has not
