@@ -92,7 +92,7 @@
     template_parameters:
       EksClusterName: "{{ infrastructure.eks_cluster_name }}"
       EbsCsiRoleArn: "{{ _ebs_csi_role_arn }}"
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   register: _ebs_addon
 
 - name: Stop here when tearing down

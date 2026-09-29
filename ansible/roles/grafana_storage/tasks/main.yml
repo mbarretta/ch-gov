@@ -129,7 +129,7 @@
       BucketName: "{{ grafana.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   register: _gf_irsa_stack
 
 - name: Record the role ARN
@@ -163,7 +163,7 @@
       restrict_public_buckets: true
     # Versioning stays OFF: one object, replaced in place on a version bump.
     versioning: false
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   when: _gf_s3_role_arn is defined
 
 - name: Report the bucket and IRSA wiring

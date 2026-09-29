@@ -125,6 +125,13 @@ infrastructure:
   # separate EBS volumes the Helm chart provisions.
   node_boot_disk_gb: 20
 
+# Tags applied to every CloudFormation stack and S3 bucket: the customer's
+# infrastructure.extra_tags, with this kit's own Project and ManagedBy tags
+# combined last so a customer key can never override them. Defined once here
+# and referenced by the roles; it is a top-level var so it resolves lazily
+# against whatever infrastructure.extra_tags the merged vars hold.
+stack_tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+
 # us-east-1 on-demand list prices in USD/hr, read from the AWS Pricing API on
 # 2026-09-03. Used only to print an honest estimate before anything is
 # created; a type missing here simply counts as 0.
