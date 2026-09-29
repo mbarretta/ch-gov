@@ -13,7 +13,7 @@
 Before the tool list makes sense, you need the shape of the thing.
 
 A normal Kubernetes deployment pulls container images from the public internet —
-Docker Hub, quay.io, whatever. **ClickHouse Private deliberately cannot do that.**
+Docker Hub, quay.io, whatever. **ClickHouse Government deliberately cannot do that.**
 It runs in an *airgapped* model: the VPC hosting your database has no route to the
 internet at all. That is the point. It is the property that makes the product
 viable for regulated and classified environments.
@@ -24,7 +24,7 @@ That single constraint explains almost every strange thing in Part 1:
   ClickHouse's AWS account                 YOUR AWS account
   ┌───────────────────────────┐            ┌──────────────────────────────┐
   │ source ECR                │            │  your ECR                    │
-  │ <SOURCE_ECR_ACCOUNT_ID>              │  skopeo    │  <your-account-id>           │
+  │ <SOURCE_ECR_ACCOUNT_ID>   │  skopeo    │  <your-account-id>           │
   │  clickhouse-server        │ ─────────► │   clickhouse-server          │
   │  clickhouse-keeper        │   copy     │   clickhouse-keeper          │
   │  clickhouse-operator      │            │   clickhouse-operator        │
@@ -59,34 +59,11 @@ Install them all; the deployment fails on a missing one.
 | **python3** | 3.12+ | Ansible's runtime. |
 | **ansible** | 2.21+ | Runs the 14-phase deployment playbook that does the real work. |
 
-Three details worth internalizing:
-
-**Why Python 3.12 and not the 3.9 the older guide names.** The floor is set by
-Ansible, not by us: `ansible-core` 2.21 declares `Requires-Python >=3.12`, so an
-older interpreter cannot run the playbook at all. It lines up with support dates
-anyway — 3.9 reached end-of-life in October 2025 and 3.10 does so in October
-2026, while 3.12 is supported until October 2028. `part1-setup.sh` checks this
-explicitly and fails loudly, because the alternative is a confusing error from
-inside an Ansible module several steps into a deployment. Two interpreters are
-involved and both must clear the floor: the one Homebrew bundles with Ansible
-(which runs `ansible-playbook` itself) and the project-local `.venv` (which is
-where AWS modules import `boto3`) — see §3.
-
 **Why skopeo and not docker?** `docker pull` + `docker push` would drag every
 image layer down to your laptop and back up again — gigabytes, twice, slowly.
 `skopeo copy` instructs the two registries to transfer layers directly. It also
 needs no running Docker daemon.
 
-**A note on the helm version.** The guide specifies v3.x, and Ansible's
-`kubernetes.core` helm modules were written against v3. **We are running v4 by
-choice.** Worth knowing so you can recognize the symptom: if a helm task in the
-playbook fails in a way that looks like a chart-apply or manifest problem rather
-than a real config error, version skew is the first suspect. `helm@3` stays
-installed alongside (keg-only), so switching back is one command:
-
-```bash
-brew unlink helm && brew link --overwrite --force helm@3
-```
 
 ### Two supporting pieces
 
