@@ -103,7 +103,7 @@
       BucketName: "{{ clickhouse.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   register: _irsa_stack
 
 - name: Stop here when tearing down
@@ -149,7 +149,7 @@
     # indefinitely and quietly multiply storage cost. For the same reason the
     # tutorial says explicitly: do not add S3 lifecycle rules to this bucket.
     versioning: false
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   when: clickhouse_s3_role_arn is defined
 
 - name: Report the bucket

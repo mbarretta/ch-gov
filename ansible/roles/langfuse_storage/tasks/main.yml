@@ -110,7 +110,7 @@
       BucketName: "{{ langfuse.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   register: _lf_irsa_stack
 
 - name: Record the role and key ARN
@@ -162,7 +162,7 @@
     # itself (hence s3:DeleteObject below); versioning would retain every
     # deleted object indefinitely and quietly multiply storage cost.
     versioning: false
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   when: _lf_s3_role_arn is defined
 
 - name: Report the bucket

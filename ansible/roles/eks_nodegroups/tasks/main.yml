@@ -144,7 +144,7 @@
       BootDiskSize: "{{ infrastructure.node_boot_disk_gb }}"
     capabilities:
       - CAPABILITY_IAM
-    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
+    tags: "{{ stack_tags }}"
   register: _ng_stack
 
 - name: Stop here when tearing down
