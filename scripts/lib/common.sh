@@ -57,7 +57,7 @@ ch_resolve() {
     return 0
   fi
   CH_VARS_JSON=""
-  fail "could not resolve the configuration ($CH_GROUP_VARS over state/deploy-vars.yml) with Ansible" >&2
+  fail "could not resolve the configuration (ansible/group_vars/all.yml over state/deploy-vars.yml) with Ansible" >&2
   { [[ -n "$out" ]] && printf '%s\n' "$out"; cat "$errf"; } | head -20 | sed 's/^/      /' >&2
   rm -f "$errf"
   return 1
@@ -230,10 +230,6 @@ py_version() { "${1:-python3}" -c 'import platform; print(platform.python_versio
 readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
 
 # ---- Langfuse (optional Steps 13-15) --------------------------------------
-# The tracked defaults the resolver above merges deploy-vars over; named only
-# so the resolver's error message can say what it was reading.
-readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
-
 # The certificate the langfuse role generates into state/ when
 # langfuse.load_balancer.tls is true and terminates at the langfuse-lb NLB.
 # Self-signed, so it is its own CA: `curl --cacert "$LF_TLS_CERT"` trusts it.
@@ -261,14 +257,13 @@ lf_var() { _ch_block_var langfuse "$1"; }
 
 # Succeeds when the NLB terminates TLS -- the same effective state the
 # langfuse role computes as _lf_tls (Phase 4c): langfuse.load_balancer.tls,
-# OR'd with the persistent fips: switch (ch_fips, defined below -- function
-# order in this file does not matter, only call order), but never for
-# load_balancer.type: none, which has no NLB at all. `    tls:` and
+# OR'd with the persistent fips: switch (ch_fips_enabled, defined above), but
+# never for load_balancer.type: none, which has no NLB at all. `    tls:` and
 # `    type:` are the only keys at that indentation spelled that way in the
 # langfuse: block, so the prefix matches are unambiguous.
 lf_tls() {
   [[ "$(lf_var '    type:')" != none ]] || return 1
-  [[ "$(lf_var '    tls:')" == true ]] || ch_fips
+  [[ "$(lf_var '    tls:')" == true ]] || ch_fips_enabled
 }
 
 # Prints the address Langfuse is reached at -- the same rule the langfuse role
@@ -319,11 +314,12 @@ gf_var() { _ch_block_var grafana "$1"; }
 
 # Succeeds when the NLB terminates TLS -- the same effective state the
 # grafana role computes as _gf_tls: grafana.load_balancer.tls, OR'd with the
-# persistent fips: switch via the shared ch_fips function (never duplicated
-# here), but never for load_balancer.type: none, which has no NLB at all.
+# persistent fips: switch via the shared ch_fips_enabled function (never
+# duplicated here), but never for load_balancer.type: none, which has no NLB
+# at all.
 gf_tls() {
   [[ "$(gf_var '    type:')" != none ]] || return 1
-  [[ "$(gf_var '    tls:')" == true ]] || ch_fips
+  [[ "$(gf_var '    tls:')" == true ]] || ch_fips_enabled
 }
 
 # Prints the address Grafana is reached at -- the same rule lf_url uses for
@@ -355,11 +351,6 @@ gf_cacert() {
 }
 
 # ---- fips (shared by ch-client.sh's TLS handling) -------------------------
-# Succeeds when the persistent fips: switch (deploy-vars over group_vars) is true.
-ch_fips() {
-  ch_fips_enabled
-}
-
 # The CA clickhouse_cluster generates into state/ when fips is true (see
 # ansible/group_vars/all.yml's clickhouse_tls_ca_cert_file) -- a leaf server
 # cert signed by it terminates the ClickHouse native/HTTP TLS listeners once
