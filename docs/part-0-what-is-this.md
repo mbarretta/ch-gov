@@ -486,5 +486,17 @@ anyone noticing.
 | **`auth_mode`** | The `aws.auth_mode` setting: `sso` renders a project-local AWS config, `profile` uses a profile you already have |
 | **state/** | The gitignored folder holding kubeconfig, passwords and reports. Back it up |
 
+## Check your understanding
+
+You can answer each of these from this Part. If you cannot, reread the section named in brackets before you move on.
+
+1. Why can you delete a ClickHouse server pod without losing data? [section 3]
+2. Which component holds the only persistent disk in the ClickHouse cluster, and what does it store? [section 3]
+3. What does the operator do that you would otherwise do by hand? [section 3]
+4. Which steps of the deployment start the meaningful AWS cost, and what does it cost to keep the cluster ready to come back? [sections 5 and 8]
+5. Why must the load balancer go before the cluster or EKS at teardown? [section 8]
+6. What does `aws.auth_mode` choose between, and which mode fits when you already have a working AWS profile? [section 6.2 and the glossary]
+7. Which two things do the scripts never delete, so you must? [section 8]
+
 **Where to go next:** Part 1 for tools and AWS access, Parts 2–3 for the
 infrastructure, Part 4 for the cluster itself, Part 5 for the load balancer.

@@ -222,7 +222,7 @@ The identity behind `target_profile` creates real infrastructure, so it needs pe
 |---|---|---|
 | STS | Reads its own identity, and assumes the ECR pull role (`sts:GetCallerIdentity`, `sts:AssumeRole` on `ClickHouseAirgapECRPullRole`). | Roles `ecr_pull_role`, `ecr_setup`; every script |
 | CloudFormation | Creates, updates and deletes the stacks `clickhouse-private-vpc`, `-eks`, `-nodegroups`, `-irsa` and `-ebs-csi`, plus `-langfuse-irsa` and `-grafana-irsa` when those options are on. Stacks that create IAM roles need the `CAPABILITY_IAM` acknowledgement. | Roles `vpc`, `eks_cluster`, `eks_nodegroups`, `storage_iam`, `k8s_prereqs`, `langfuse_storage`, `grafana_storage` |
-| EC2 and VPC | Creates the VPC, subnets, internet gateway, NAT gateways, Elastic IPs, route tables, the S3 gateway endpoint and the node launch templates. | `ansible/roles/vpc/files/vpc.yaml`, `ansible/roles/eks_nodegroups/files/eks-nodegroups.yaml` |
+| EC2 and VPC | Creates the VPC, subnets, internet gateway, NAT gateways, Elastic IPs, route tables, the S3 gateway endpoint and the node launch templates. Also checks which availability zones offer your node instance types (`ec2:DescribeInstanceTypeOfferings`). | Role `vpc` (its tasks and `vpc.yaml`), `ansible/roles/eks_nodegroups/files/eks-nodegroups.yaml` |
 | EKS | Creates the cluster, three node groups and the EBS CSI add-on, and writes a kubeconfig (`eks:DescribeCluster`). | `eks-cluster.yaml`, `eks-nodegroups.yaml`, `ebs-csi-addon.yaml`; role `eks_cluster` |
 | IAM | Creates and deletes roles and their policies, passes them to EKS, and registers the cluster's OIDC identity provider (`iam:CreateOpenIDConnectProvider`, `iam:ListOpenIDConnectProviders`). | Templates `eks-cluster.yaml`, `eks-nodegroups.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2`, `grafana-irsa.yaml.j2`; role `eks_cluster` |
 | ECR (your account) | Creates repositories with immutable tags and scan-on-push, then pushes the copied images and charts. | Roles `ecr_setup`, `image_sync` |
@@ -230,8 +230,9 @@ The identity behind `target_profile` creates real infrastructure, so it needs pe
 | CloudWatch Logs | Creates the EKS control-plane log group and sets its retention. | Role `eks_cluster` |
 | KMS | Creates keys and aliases. Only when `fips: true`. | `eks-cluster.yaml`, `irsa-roles.yaml.j2`, `langfuse-irsa.yaml.j2` |
 | ACM | Imports and deletes a certificate. Only when `langfuse.load_balancer.tls` or `grafana.load_balancer.tls` is on, or `fips: true`. | Roles `langfuse`, `grafana` |
+| Elastic Load Balancing | Read-only lookups of the Network Load Balancer that Kubernetes creates for each service: it finds the load balancer, its target groups and its listener, and waits for the targets to pass health checks (`elasticloadbalancing:DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeTargetHealth`, `DescribeListeners`). When TLS is on for Langfuse or Grafana, it also switches the listener to TLS (`elasticloadbalancing:ModifyListener`). | Roles `clickhouse_loadbalancer`, `langfuse`, `grafana` |
 
-No role calls the Elastic Load Balancing API directly. When Kubernetes sees a `Service` of type `LoadBalancer`, the EKS control plane creates the Network Load Balancer for you.
+The kit does not create the load balancers itself. When Kubernetes sees a `Service` of type `LoadBalancer`, the EKS control plane creates the Network Load Balancer for you, and the kit only reads it (and, with TLS on, modifies its listener) as the Elastic Load Balancing row describes.
 
 Treat this list as a starting point, not a validated least-privilege policy. It is derived from what the roles create and call, and it has not been tested as a minimal policy. If a deployment fails with `AccessDenied`, the error names the missing action, so add it and run the step again.
 
