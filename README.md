@@ -1,7 +1,7 @@
 # ClickHouse Private on AWS EKS
 
 An Ansible-driven, airgapped deployment of ClickHouse Private (optionally
-with Langfuse on top) into your own AWS account and EKS cluster, following
+with Langfuse and Grafana on top) into your own AWS account and EKS cluster, following
 [ClickHouse's own tutorial](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws)
 step for step. Start with [`docs/part-0-what-is-this.md`](docs/part-0-what-is-this.md)
 if you have never touched this project before — it explains what gets built,
