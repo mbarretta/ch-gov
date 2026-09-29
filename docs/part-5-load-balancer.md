@@ -185,7 +185,7 @@ VPC stack's deletion.
 You should not have to remember that. `scripts/down.sh` does the load
 balancer first, then the cluster (while nodes are still up, so the operator
 and the CSI driver can clean up after it), then the node groups; `--all` goes
-on through operator, prerequisites, storage, EKS and VPC. Part 1 §6b has the
+on through operator, prerequisites, storage, EKS and VPC. Part 1 §5b has the
 full reasoning. If you are doing it by hand:
 
 ```bash

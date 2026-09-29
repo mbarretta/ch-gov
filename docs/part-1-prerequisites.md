@@ -246,63 +246,14 @@ them, run after run.
 
 ---
 
-## 4. Notes from doing this for real
+## 4. The deployment repository question, resolved
 
-The guide is old, so treat its specific versions as illustrative, not literal.
-Two things are worth carrying forward:
-
-### 4.1 The pull role's account number is wrong in the guide
-
-The guide prints `role_arn = arn:aws:iam::925472944448:...`, which did not work.
-The role that exists for this SSO login is in **<YOUR_ACCOUNT_ID>** — matching the
-guide's own "Expected output" block a few lines later. Three accounts are in
-play, which is the confusing part:
-
-- **<YOUR_ACCOUNT_ID>** — your account; also hosts the pull role
-- **<SOURCE_ECR_ACCOUNT_ID>** — where the images actually live (source ECR)
-- **925472944448** — in the guide's `role_arn`; unverified
-
-### 4.2 Resolve image versions at deploy time
-
-The guide's pinned tags are stale (two of its three no longer exist in the
-registry) — expected for a doc this age. The habit that matters: **list what's
-actually in the registry before deploying** rather than trusting a pinned
-config, because a missing tag fails at the image-sync phase well into a run.
-`part1-setup.sh` prints the current tags for that reason.
-
-### 4.3 Everything runs current, which shifts the version question to EKS
-
-All tooling is at current releases (kubectl 1.37, helm 4.2.4, ansible-core 2.21,
-jq 1.8.2, skopeo 1.24, aws-cli 2.36). Nothing is pinned backwards.
-
-The consequence: kubectl 1.37 against the guide's `eks_version: "1.31"` is six
-minor versions of skew, where Kubernetes supports ±1. Everyday commands
-generally still work, but the fix is to pick a **current** `eks_version` in
-`deploy-config.yaml` rather than to downgrade kubectl — one more reason not to
-take the old guide's config values literally.
-
-### 4.4 FIPS and hardened variants
-
-Every image also ships as `-fips`, `-nocve`, and sometimes `-fips-ubi9`.
-`-fips` means FIPS 140 validated crypto — typically **mandatory** for US federal
-work. The original guide never mentions these, and for a government target this
-is probably a day-one `deploy-config.yaml` decision rather than a later
-migration.
-
-## 5. The deployment repository question, resolved
-
-The training guide's Section 3 opens with `cd cloud/aws/ansible` but never says
-where that directory comes from — no clone URL, no repo name. Searching the
-ClickHouse GitHub org for its distinctive filenames turned up nothing reachable.
-
-**We stopped looking and wrote our own.** The public tutorial at
+The public tutorial at
 [docs/cloud/clickhouse-private/tutorials/deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws)
-documents all 11 steps as explicit commands, and it is *current* — its versions
-match what actually exists in the source ECR today, unlike the training doc. Our
-Ansible lives in `ansible/` and follows that tutorial. See
-`docs/part-2-image-sync.md`.
+documents all 11 steps as explicit commands. The Ansible in `ansible/` follows
+that tutorial; see `docs/part-2-image-sync.md`.
 
-## 6. Running the playbook: `scripts/play.sh`
+## 5. Running the playbook: `scripts/play.sh`
 
 Every step in Parts 2 and 3 is shown as a bare `ansible-playbook` command,
 because that is what you would type in a normal interactive shell. In practice
@@ -369,7 +320,7 @@ SSO tokens last hours, not days. Without that check an expired token shows up
 partway into a run as an unrelated-looking module failure — sometimes after
 something has already been created.
 
-## 6b. The two scripts you will actually use: `up.sh` and `down.sh`
+## 5b. The two scripts you will actually use: `up.sh` and `down.sh`
 
 `play.sh --tags <step>` is the right tool while *building* a step. Day to day
 you want two verbs, and you want them to know the order so you do not have to:
@@ -421,7 +372,7 @@ Each teardown is a separate playbook run, because every role ends the play
 after its own teardown task; that is why the script loops rather than passing
 one long `--tags` list. Nothing in either script deletes S3 data.
 
-## 7. Checkpoint
+## 6. Checkpoint
 
 Verified working:
 

@@ -16,15 +16,11 @@ it, the mechanism in the order it runs, and — because a compliance decision
 deserves the caveats as much as the feature — an honest paragraph on what
 that mechanism does and does not give you.
 
-**What this part is not.** Every phase below was verified by reading the
-actual diff, the actual pulled Helm charts, and the actual CloudFormation
-templates — never by running `ansible-playbook`, `aws`, `kubectl`, or `helm
-install` against this deployment's live account, per this cycle's own
-constraints. A companion live-run document, in the style of
-[`docs/part-6-langfuse-live-run.md`](part-6-langfuse-live-run.md), does **not**
-exist yet for this phase and was deliberately not created in this cycle —
-that pass, exercising `fips: true` end to end against a real cluster, is left
-to your own manual post-merge run.
+**What this part is not.** Every phase below was derived from reading the
+actual code, the pulled Helm charts, and the CloudFormation templates that
+ship -- not from running `ansible-playbook`, `aws`, `kubectl`, or `helm
+install` against a live account. No end-to-end run of `fips: true` against a
+real cluster is documented here; that pass is yours to run.
 
 ---
 
@@ -405,7 +401,7 @@ in-cluster `.svc` hostnames, not the external LB hostname it connects to.
 - [x] Langfuse NLB: FIPS TLS policy, 3072-bit key with a key-size-aware regeneration check, effective `_lf_tls` forcing TLS on under `fips: true` for any non-`none` load-balancer type
 - [ ] Keeper's own plaintext-listener behavior under `openSSL.required` — unconfirmed, conservative default in place
 - [x] `clickhouse-server`'s bundled `wget` HTTPS support — resolved: no CA-pinning flag exists (CA goes into the system trust store instead) and its TLS backend's default ML-KEM key share fails under the FIPS provider (routed around via a per-exec `OPENSSL_CONF`)
-- [ ] Live end-to-end TLS handshake evidence (the kind of transcript in [`docs/part-6-langfuse-live-run.md`](part-6-langfuse-live-run.md)) for all three hops under `fips: true` — deferred to your own manual pass
+- [ ] Live end-to-end TLS handshake evidence for all three hops under `fips: true` — deferred to your own manual pass
 
 ---
 
@@ -414,7 +410,5 @@ in-cluster `.svc` hostnames, not the external LB hostname it connects to.
 `FIPS.md`, at the repository root, gives the short version of everything
 above for someone deciding whether this posture clears their compliance bar.
 This part is the long version, with the mechanism and the caveats attached
-to each claim. There is no `docs/part-7-fips-hardening-live-run.md` yet — the
-live, end-to-end run against a real `fips: true` cluster that would produce
-one is a manual pass you run after merging this work, the same way
-[Part 6's live run](part-6-langfuse-live-run.md) followed Part 6 itself.
+to each claim. No end-to-end run against a real `fips: true` cluster is
+documented here; that is a manual pass for you to run.

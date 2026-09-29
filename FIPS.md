@@ -73,11 +73,10 @@ sections cover those transition caveats (KMS key retention, the
   swapping that default key for a customer-managed one you control and can
   audit — not turning on encryption where none existed. Do not read
   `fips: false` as "Secrets are unencrypted."
-- **A live-run verification of any of the above.** Everything in this file
+- **A live verification of any of the above.** Everything in this file
   was verified against the actual code, chart values, and CloudFormation
-  templates that ship — not against a real `fips: true` cluster. That live,
-  end-to-end pass is a manual step you run after merging this work; no
-  `docs/part-7-fips-hardening-live-run.md` exists yet, deliberately.
+  templates that ship -- not against a real `fips: true` cluster. That live,
+  end-to-end pass is a manual step for you to run.
 
 ## Bottom line
 

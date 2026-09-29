@@ -23,8 +23,11 @@ kubeconfig*
 # kubectl preflight writes a support bundle into its cwd; the role runs from state/ but belt and braces
 preflightbundle-*.tar.gz
 
-# harness worktrees are throwaway
+# throwaway working copies used while building this repo
 .claude/worktrees/
 
-# internal harness planning docs -- not part of the public tutorial
+# local planning notes -- not part of the public tutorial
 .claude/plans/
+
+# engineering validation notes -- not part of the public evaluation kit
+internal/
