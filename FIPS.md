@@ -1,91 +1,46 @@
 # FIPS 140-3 posture
 
-This is the short answer for someone deciding whether `fips: true` on this
-deployment clears their compliance bar. The long answer, with the mechanism
-behind every line below, is [`docs/part-7-fips-hardening.md`](docs/part-7-fips-hardening.md).
+This is the short answer for someone deciding whether `fips: true` on this deployment clears their compliance bar. The long answer, with the mechanism behind every line below, is [`docs/part-7-fips-hardening.md`](docs/part-7-fips-hardening.md). For where the whole learning setup differs from production, see [`docs/limitations.md`](docs/limitations.md).
 
-This synopsis describes a **fresh install** brought up with `fips: true`
-from the start. It does not attempt to describe every consequence of
-flipping `fips` on an existing, already-populated deployment — Part 7's own
-sections cover those transition caveats (KMS key retention, the
-`EncryptionConfig` one-way door, StorageClass immutability) in full.
+## What you'll learn
+
+- What `fips: true` protects and what it leaves out.
+- Which claims come from the code and which are still for you to confirm on a real cluster.
+- What to read next to make a compliance decision.
+
+## How to read this page
+
+This kit selects and connects cryptographic modules that ClickHouse and AWS provide: the ClickHouse `-fips` image variants and AWS's FIPS endpoints. It does not validate them, and the kit as a whole is not FIPS-validated or certified. "Validated" below describes the component that ClickHouse or AWS supplies, not a result this kit produces.
+
+Everything here is derived from the code, the chart values, and the CloudFormation templates in this repository. The full deployment has not been run with `fips: true` against a real cluster from start to finish, so the commands in Part 7 and in `docs/limitations.md` are yours to run.
+
+This page describes a **fresh install** brought up with `fips: true` from the start. It does not describe every consequence of flipping `fips` on an existing, already-populated deployment. Part 7's own sections cover those transition caveats (KMS key retention, the `EncryptionConfig` one-way door, StorageClass immutability) in full.
 
 ## What's protected
 
-- **Compute and images.** FIPS-validated container images, x86_64-only
-  instances, and FIPS-validated ECR image pulls. This predates this
-  hardening cycle.
-- **Controller-side AWS API calls.** Every AWS CLI/SDK call this project's
-  own Ansible automation makes (STS, IAM, EKS, CloudFormation, ECR's token
-  exchange) routes through FIPS-validated AWS endpoints.
-- **ClickHouse's own S3 access.** Its in-pod S3 client, authenticating via
-  its own IAM role for service accounts, targets a FIPS-validated S3
-  endpoint.
-- **Data at rest.** New objects written to the ClickHouse and Langfuse S3
-  buckets, and EBS volumes provisioned through the shared StorageClass, are
-  encrypted under dedicated customer-managed KMS keys — one key per
-  component, none shared, so no single key's compromise or rotation crosses
-  a component boundary.
-- **Kubernetes Secrets in etcd.** Encrypted under a dedicated
-  customer-managed KMS key rather than an AWS-owned one.
-- **ClickHouse's native protocol and Keeper traffic.** TLS-encrypted,
-  verified against a private CA generated for the cluster, at a 3072-bit RSA
-  floor.
-- **Langfuse's connection to ClickHouse, in ongoing use.** The runtime query
-  traffic both the web and worker processes send is TLS-encrypted with full
-  certificate and hostname verification against that same private CA.
-- **Langfuse's own load balancer**, when it has one — `load_balancer.type`
-  other than `none` — terminates TLS with a FIPS-validated security policy
-  and a 3072-bit key, whether or not the load-balancer-specific `tls` flag
-  was also set by hand. A single `fips: true` is enough; you do not need to
-  flip a second switch.
+- **ClickHouse images and machines.** The three ClickHouse container images (server, Keeper, operator) use their FIPS-validated `-fips` variants, the nodes are x86_64 only, and image pulls use the FIPS ECR hostname.
+- **Controller-side AWS API calls.** Every AWS CLI and SDK call that this project's Ansible automation makes (STS, IAM, EKS, CloudFormation, and ECR's token exchange) uses a FIPS endpoint.
+- **ClickHouse's own S3 access.** Its in-pod S3 client, authenticating through its own IAM role for service accounts, targets a FIPS S3 endpoint.
+- **Data at rest.** New objects written to the ClickHouse and Langfuse S3 buckets, and EBS volumes provisioned through the shared StorageClass, are encrypted under dedicated customer-managed KMS keys. There is one key per component and none is shared, so no single key's compromise or rotation crosses a component boundary.
+- **Kubernetes Secrets in etcd.** They are encrypted under a dedicated customer-managed KMS key rather than an AWS-owned one.
+- **ClickHouse's native protocol and Keeper traffic.** It is TLS-encrypted and verified against a private CA generated for the cluster, at a 3072-bit RSA floor.
+- **Langfuse's connection to ClickHouse, in ongoing use.** The runtime query traffic from both the web and worker processes is TLS-encrypted with full certificate and hostname verification against that same private CA.
+- **The Langfuse and Grafana load balancers**, when they exist (`load_balancer.type` other than `none`). They terminate TLS with a FIPS security policy and a 3072-bit key, whether or not the `tls` flag was also set by hand. A single `fips: true` is enough, with no second switch to flip.
 
 ## What isn't
 
-- **Langfuse's own S3 access.** Its in-pod S3 client, on its own separate
-  IAM role, is not FIPS-endpoint-routed. This is a real, currently unclosed
-  gap, not an oversight glossed over — see Part 7 §1.
-- **Any other pod-side AWS SDK call** outside the two explicitly wired paths
-  above. Nothing about the controller's own AWS configuration says anything
-  about what a pod's own SDK, under its own credentials, actually routes
-  through.
-- **Langfuse's one-time schema-migration connection to ClickHouse.** It is
-  TLS-encrypted, but the pinned Langfuse application image hardcodes
-  certificate verification off for that one migration step, independent of
-  any setting this deployment controls. This is an upstream limitation of
-  that pinned image, not a choice made here.
-- **Hostname/identity verification on ClickHouse's native protocol.** The
-  chart's TLS surface offers CA-chain verification only; there is no
-  hostname-matching option to turn on.
-- **Whether the certificate-issuance mechanism itself is FIPS-140-3
-  validated.** The self-signed certificates involved in this deployment are
-  generated by whatever OpenSSL build runs on the machine driving this
-  automation. This plan does not validate that build, and does not specify
-  or endorse a particular certificate-issuance tool or workflow as meeting a
-  compliance bar — confirming your own tooling's FIPS status is on you.
-- **Keeper's own plaintext-listener behavior**, specifically, once TLS is
-  required — that depends on a Kubernetes operator chart this project does
-  not vendor and could not inspect in this cycle; a conservative default is
-  in place, not a confirmed answer.
-- **EKS Secrets envelope encryption "starting" here.** It did not: EKS
-  1.28+ (this deployment runs 1.36) already defaults to envelope encryption
-  of Secrets in etcd using an AWS-owned key. `fips: true`'s contribution is
-  swapping that default key for a customer-managed one you control and can
-  audit — not turning on encryption where none existed. Do not read
-  `fips: false` as "Secrets are unencrypted."
-- **A live verification of any of the above.** Everything in this file
-  was verified against the actual code, chart values, and CloudFormation
-  templates that ship -- not against a real `fips: true` cluster. That live,
-  end-to-end pass is a manual step for you to run.
+- **Images other than ClickHouse's three.** The Langfuse application, Chainguard PostgreSQL and Valkey, Grafana, and `awscli` images have no FIPS variant in this kit.
+- **Langfuse's own S3 access.** Its in-pod S3 client, on its own separate IAM role, does not use FIPS endpoints. This is a real gap that remains open. See Part 7 section 1.
+- **Any other pod-side AWS SDK call** outside the two explicitly wired paths above. The controller's AWS configuration says nothing about what a pod's own SDK, under its own credentials, routes through.
+- **Langfuse's one-time schema-migration connection to ClickHouse.** It is TLS-encrypted, but the pinned Langfuse application image hardcodes certificate verification off for that one migration step, independent of any setting this deployment controls. This is an upstream limitation of that image, not a choice made here.
+- **Hostname and identity verification on ClickHouse's native protocol.** The chart's TLS surface offers CA-chain verification only, with no hostname-matching option to turn on.
+- **A validated certificate-issuance mechanism.** The self-signed certificates in this deployment are generated by whatever OpenSSL build runs on the machine driving the automation. This kit does not validate that build, and it does not specify or endorse a particular certificate-issuance tool as meeting a compliance bar. Confirming your own tooling's FIPS status is up to you.
+- **A confirmed answer on Keeper's plaintext listener** once TLS is required. That depends on a Kubernetes operator chart this project does not vendor and could not inspect, so a conservative default is in place, not a confirmed answer.
+- **EKS Secrets encryption "starting" here.** It did not start here. EKS 1.28 and later (this kit deploys 1.36) already encrypts Secrets in etcd by default, using an AWS-owned key. `fips: true` swaps that default key for a customer-managed one you control and can audit. It does not turn on encryption where none existed, so do not read `fips: false` as "Secrets are unencrypted."
+- **A live verification of any of the above.** The claims in this file come from the code, chart values, and CloudFormation templates that ship, not from a real `fips: true` cluster. The end-to-end pass is a manual step for you to run, and Part 7 has a self-check for each area.
 
 ## Bottom line
 
-`fips: true` meaningfully raises this deployment's cryptographic posture: a
-FIPS-validated compute and image layer (already true before this cycle) now
-sits alongside FIPS-routed controller and ClickHouse S3 traffic, dedicated
-customer-managed keys at every storage boundary, and TLS on every
-in-cluster network hop except one narrow, named, upstream-caused exception.
-It is not a blanket claim that every byte this deployment touches is
-FIPS-compliant end to end — the gaps above are real and are the ones an
-auditor is most likely to ask about first. Read Part 7 before you decide
-whether they matter for your target.
+`fips: true` meaningfully raises this deployment's cryptographic posture. ClickHouse's `-fips` images on x86_64 nodes now sit alongside FIPS-routed controller and ClickHouse S3 traffic, dedicated customer-managed keys at every storage boundary, and TLS on every in-cluster network hop except one narrow, named, upstream-caused exception.
+
+It is not a blanket claim that every byte this deployment touches is FIPS-compliant end to end. The gaps above are real, and they are the ones an auditor is most likely to ask about first. Read Part 7 before you decide whether they matter for your target, and run its self-checks on your own cluster.
