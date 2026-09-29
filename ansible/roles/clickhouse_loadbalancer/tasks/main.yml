@@ -34,11 +34,10 @@
     _lb_name: "{{ clickhouse.cluster_name }}-lb"
 
 - name: Decide the load balancer's listener ports
-  # 4a-spike's findings (AC2): server.openSSL.required: true zeroes the
-  # plaintext http_port/tcp_port for every caller, including this NLB's
-  # targets -- so under fips: true this Service (and the health probe below)
-  # must point at ClickHouse's TLS ports instead of group_vars' plaintext
-  # defaults. 8443/9440 are ClickHouse's own https/tcp_port_secure defaults
+  # server.openSSL.required: true zeroes the plaintext http_port/tcp_port
+  # for every caller, including this NLB's targets -- so under fips: true this
+  # Service (and the health probe below) must point at ClickHouse's TLS ports
+  # instead of group_vars' plaintext defaults. 8443/9440 are ClickHouse's own https/tcp_port_secure defaults
   # (also named in docs/part-2-image-sync.md's "TLS-only on port 9440" debt
   # item); the chart's base config enables them via featureFlags.enableSecurePorts
   # once server.openSSL.required is true (see clickhouse_cluster/tasks/main.yml).

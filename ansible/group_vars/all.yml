@@ -132,9 +132,9 @@ infrastructure:
 # against whatever infrastructure.extra_tags the merged vars hold.
 stack_tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
 
-# us-east-1 on-demand list prices in USD/hr, read from the AWS Pricing API on
-# 2026-09-03. Used only to print an honest estimate before anything is
-# created; a type missing here simply counts as 0.
+# us-east-1 on-demand list prices in USD/hr, read from the AWS Pricing API.
+# Used only to print an honest estimate before anything is created; a type
+# missing here simply counts as 0. Refresh when AWS changes its list prices.
 pricing:
   instance_hourly_usd:
     m7g.xlarge:   0.1632
@@ -254,7 +254,7 @@ versions:
   langfuse_chart: "2.1.0"            # helm chart from langfuse/langfuse-k8s
   langfuse_app: "4.25.0"             # web and worker image tag
   # Chainguard's free tier publishes only `latest`, so the ECR tag claims only the
-  # major we verified (PG 18.6 / Valkey 9.1.2 on 2026-09-11) and the sync freezes
+  # major we verified (PG 18.6 / Valkey 9.1.2) and the sync freezes
   # whatever digest `latest` resolves to on first copy. Bump the tag to re-mirror.
   chainguard_postgres_tag: "pg18-cg"        # source cgr.dev/chainguard/postgres:latest
   chainguard_valkey_tag:   "valkey9-cg-dev" # source cgr.dev/chainguard/valkey:latest-dev (needs the shell)
@@ -276,16 +276,16 @@ versions:
   grafana_app_dev: "13.2.2-dev" # same version, DHI's "-dev" variant -- used only by the
                               # plugin-install initContainer below, which needs a real shell
                               # for its $(cat ...) substitution feeding grafana cli's
-                              # --pluginUrl; confirmed live that DHI's hardened "runtime" tag
+                              # --pluginUrl; DHI's hardened "runtime" tag
                               # (grafana_app above) has no shell at all. The main container
                               # keeps the hardened runtime tag.
   awscli_app: "1.46.1-dev"    # DHI awscli image tag (initContainer) -- v1's "-dev" variant.
                               # DHI's awscli v2 catalog line ships no "-dev"/shell-having tag
-                              # at all (confirmed live against the real catalog), and this
+                              # at all (per the DHI catalog), and this
                               # initContainer's `aws s3 presign > file` needs a shell to
                               # redirect the output. v1's `s3 presign` takes the same
-                              # --region/--expires-in flags this already uses (confirmed live).
-  # Pinned + SHA256-verified against grafana.com's plugin API (2026-09-25):
+                              # --region/--expires-in flags this already uses.
+  # Pinned + SHA256-verified against grafana.com's plugin API:
   # https://grafana.com/api/plugins/grafana-clickhouse-datasource/versions/4.21.3/download
   grafana_clickhouse_plugin_version: "4.21.3"
   grafana_clickhouse_plugin_sha256: "ab1fb90979e5b915e797e2987e19f58a346cfc8ad3120cbbef8d0b3cc894e104"
@@ -330,13 +330,13 @@ target_registry: >-
 s3_endpoint: "https://{{ 's3-fips' if fips else 's3' }}.{{ aws.target_region }}.amazonaws.com"
 
 # RSA key size for the ClickHouse native-TLS CA/leaf certificate
-# clickhouse_cluster generates (Phase 4a): the FIPS 140-3 floor of 3072 bits
+# clickhouse_cluster generates: the FIPS 140-3 floor of 3072 bits
 # when fips is true, the usual 2048 otherwise. Kept alongside the other
-# single-fips ternaries in this block per plan.constraints[].
+# single-fips ternaries in this block (one flag drives every FIPS choice).
 tls_rsa_bits: "{{ 3072 if fips else 2048 }}"
 
 # ---------------------------------------------------------------------------
-# FIPS AWS-API endpoint-coverage matrix (Phase 1 of the FIPS hardening plan).
+# FIPS AWS-API endpoint-coverage matrix (what fips: true does and does not route).
 # fips: true FIPS-routes:
 #   - Every AWS CLI/SDK call this repo's Ansible CONTROLLER makes under the
 #     aws.target_profile and aws.source_ecr_profile profiles (STS, IAM, EKS,
@@ -345,8 +345,8 @@ tls_rsa_bits: "{{ 3072 if fips else 2048 }}"
 #     it does not inherit through source_profile). Under aws.auth_mode:
 #     profile nothing is rendered, so the play and the scripts export
 #     AWS_USE_FIPS_ENDPOINT=true instead.
-#   - The ECR image-pull hostname (target_registry, above -- predates this
-#     phase).
+#   - The ECR image-pull hostname (target_registry, above -- unchanged by
+#     the fips switch).
 #   - ClickHouse's own in-pod S3 client, i.e. its native S3-disk storage
 #     backend authenticating via its own IRSA service-account annotation --
 #     via s3_endpoint, above, wired into clickhouse_cluster's Helm values.
@@ -415,9 +415,8 @@ langfuse_charts:
 # Single source of truth for the mirrored plugin zip's filename, derived
 # from versions.grafana_clickhouse_plugin_version. grafana_storage (fetch +
 # upload) and grafana (the presign initContainer) both reference this
-# instead of each re-templating the literal string (phase 7.6 quality
-# finding q1 -- a naming-convention change, e.g. adding a checksum suffix,
-# now only needs editing here).
+# instead of each re-templating the literal string (a naming-convention
+# change, e.g. adding a checksum suffix, then only needs editing here).
 grafana_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
 
 grafana_images:
@@ -469,7 +468,7 @@ prometheus_password_file: "{{ state_dir }}/clickhouse-prometheus-password"
 # Where the preflight role leaves its rendered spec and last report.
 preflight_dir: "{{ state_dir }}/preflight"
 
-# ClickHouse native TLS (Phase 4a): a self-signed CA and a leaf server cert
+# ClickHouse native TLS: a self-signed CA and a leaf server cert
 # it signs, generated once by clickhouse_cluster when fips is true and kept
 # under state/ like the other generated material above. Named after
 # langfuse_state_files' tls_cert_file/tls_key_file convention below, but kept
@@ -481,8 +480,8 @@ clickhouse_tls_ca_key_file:  "{{ state_dir }}/clickhouse-tls-ca-key.pem"
 clickhouse_tls_cert_file:    "{{ state_dir }}/clickhouse-tls-cert.pem"
 clickhouse_tls_key_file:     "{{ state_dir }}/clickhouse-tls-key.pem"
 # The chart's own default Secret name for server.openSSL/keeper.openSSL's
-# `secret` value, confirmed by 4a-spike's helm template render (see the
-# findings doc, AC2 evidence #5): "<release>-server-cert-secret". Reused
+# `secret` value, confirmed by rendering the chart with `helm template`:
+# "<release>-server-cert-secret". Reused
 # for BOTH server.openSSL.secret and keeper.openSSL.secret below -- one CA,
 # one leaf cert, one Secret -- since the chart's TLS surface is CA-chain
 # verification only (no per-listener SAN/hostname field exists to force two
@@ -575,7 +574,7 @@ langfuse:
     # false: with false nothing here changes. fips: true forces this on
     # (effectively true) whenever load_balancer.type is not none, regardless
     # of this value -- the single fips switch is meant to be the whole
-    # decision (Phase 4c). load_balancer.type: none has no NLB at all, so
+    # decision. load_balancer.type: none has no NLB at all, so
     # there is nothing for either switch to terminate TLS on. See
     # docs/part-6-langfuse.md section 9. Going back to false after a TLS deploy: the clean
     # way is to tear down first (-e langfuse_state=absent) and re-run. The

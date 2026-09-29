@@ -81,8 +81,9 @@
 
 # Same shared-account caution as the cluster stack: a first CREATE that fails
 # leaves a ROLLBACK_COMPLETE husk holding nothing but blocking the name. We
-# report it and delete only when explicitly told to, because this account is
-# shared and the husk may be a colleague's in-progress debugging.
+# report it and delete only when explicitly told to, because an account may
+# hold stacks this playbook did not create and the husk may belong to
+# someone else's in-progress work.
 - name: Check for a stack stuck in ROLLBACK_COMPLETE
   ansible.builtin.command:
     argv:

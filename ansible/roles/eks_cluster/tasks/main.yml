@@ -37,9 +37,9 @@
 # ROLLBACK_COMPLETE, holding no resources but blocking both update and
 # re-create ("can not be updated").
 #
-# This account is SHARED between SAs, so we never delete such a stack
-# automatically -- an unusable husk may be a colleague's in-progress
-# debugging, and stack names can collide. We only report it, and delete
+# An account may hold stacks this playbook did not create, so we never delete
+# such a stack automatically -- an unusable husk may belong to someone else's
+# in-progress work, and stack names can collide. We only report it, and delete
 # only when explicitly asked:
 #     ansible-playbook deploy.yml --tags eks -e clear_failed_stack=true
 - name: Check for a stack stuck in ROLLBACK_COMPLETE
@@ -78,11 +78,11 @@
     - _eks_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
     - clear_failed_stack | default(false) | bool
 
-# FIPS hardening Phase 3: EncryptionConfig (a customer-managed KMS key for
+# EncryptionConfig (a customer-managed KMS key for
 # EKS Secrets/etcd envelope encryption) can be ADDED to an existing cluster
 # in place, but EKS never lets it be removed or repointed to a different
 # key afterward -- only a full teardown (-e eks_state=absent) and recreate
-# undoes it. This is a SHARED account and a casual fips=true re-run must not
+# undoes it. A casual fips=true re-run must not
 # silently lock that in on a cluster that already exists, so -- matching the
 # clear_failed_stack/allow_open_internet explicit-confirmation pattern above
 # -- require an explicit flag before touching an existing stack with
@@ -149,9 +149,9 @@
     region: "{{ aws.target_region }}"
     profile: "{{ aws.target_profile }}"
 
-# ac3: documentation of intent, read back from this same CloudFormation
-# stack's own outputs -- not a live `aws eks describe-cluster` call, per
-# plan.constraints[]. EksSecretsKeyArn only exists in stack_outputs when
+# Documentation of intent, read back from this same CloudFormation
+# stack's own outputs -- not a live `aws eks describe-cluster` call.
+# EksSecretsKeyArn only exists in stack_outputs when
 # EnableSecretsEncryption was 'true' for this deploy (see the CFN template's
 # SecretsEncryptionEnabled condition), so its presence is itself the proof
 # the template rendered the encrypted branch.

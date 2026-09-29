@@ -40,7 +40,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       # No RoleName, for the same reason as every other role in this project:
-      # a collision in a shared account surfaces only as "Validation failed
+      # a collision with an existing role surfaces only as "Validation failed
       # with 1 error(s)". Nothing depends on the name, because the service
       # account is annotated from this stack's output in Step 15.
       AssumeRolePolicyDocument:
@@ -75,7 +75,7 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}'
                   - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/*'
 {% if fips %}
-              # FIPS hardening Phase 2: the bucket's default encryption below
+              # Under fips: the bucket's default encryption below
               # becomes aws:kms (see langfuse_storage/tasks/main.yml), backed
               # by LangfuseBucketKmsKey. This is the ONLY statement anywhere
               # that grants a real principal use of that key -- see the key's
@@ -92,7 +92,7 @@ Resources:
         - {Key: Project, Value: clickhouse-private}
 {% if fips %}
   # =========================================================================
-  # Customer-managed KMS key (FIPS 140-3 hardening, Phase 2)
+  # Customer-managed KMS key (FIPS 140-3 hardening)
   # =========================================================================
   # Account-root admin only, same reasoning as storage_iam's KMS keys: a
   # KeyPolicy statement naming LangfuseS3Role.Arn while that role's own

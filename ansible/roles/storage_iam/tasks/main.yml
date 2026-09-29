@@ -16,17 +16,17 @@
 # then blocks the next create. The module is idempotent, so an existing
 # bucket is simply adopted.
 #
-# Creation moved to AFTER the IRSA stack deploy below (FIPS hardening Phase
-# 2): under fips: true the bucket's encryption_key_id names a KMS key that
-# only exists once that stack has run, so the stack has to go first.
+# Creation happens AFTER the IRSA stack deploy below: under fips: true the
+# bucket's encryption_key_id names a KMS key that only exists once that stack
+# has run, so the stack has to go first.
 #
 # fips: false keeps today's SSE-S3 behaviour (AES256, no customer-managed
 # key -- the tutorial requires encryption but not a KMS key, and KMS adds a
 # per-request cost and a second IAM policy to get right for no benefit
 # outside a FIPS/compliance posture).
 #
-# Future-PUTs-only limitation, unfixed by design (out of scope for this
-# task -- see plan ac5): switching an existing non-empty bucket's default
+# Future-PUTs-only limitation, unfixed by design (re-encrypting existing
+# objects is out of scope): switching an existing non-empty bucket's default
 # encryption from AES256 to aws:kms (or vice versa) only changes what NEW
 # PUTs get encrypted with. It does not retroactively re-encrypt any object
 # already sitting in the bucket. A fresh deployment has nothing to backfill,
@@ -171,7 +171,7 @@
       - "note: the bucket is never deleted by teardown -- it holds data."
   when: clickhouse_s3_role_arn is defined
 
-# --- KMS key retention and recovery (FIPS hardening Phase 2, plan ac6) -----
+# --- KMS key retention and recovery ----------------------------------------
 # ClickHouseBucketKmsKey (and its alias) carry DeletionPolicy: Retain in the
 # template, so `--tags storage -e storage_state=absent` (or a fips: true ->
 # false transition that drops the key from the template) never schedules the
@@ -206,7 +206,7 @@
 #      the bucket looks perfectly healthy -- "still encrypted" is not "still
 #      readable." Re-encrypting old objects under the new key instead of
 #      reusing the old one is the S3 Batch Operations rewrite named out of
-#      scope in ac5 -- not attempted here either.
+#      scope -- not attempted here either.
 # The same procedure applies to langfuse_storage's LangfuseBucketKmsKey and
 # its alias, substituting that alias's name. EbsKmsKey above is NOT retained
 # and has no alias -- it is not part of this recovery path; see its own
