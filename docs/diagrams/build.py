@@ -207,7 +207,7 @@ FOOTER = 'ch-gov · ClickHouse Private on AWS EKS · generated from ansible/grou
 def aws_view():
     o = []
     # ---- boundaries first
-    o.append(region(240, 30, 1105, 880, 'AWS account <YOUR_ACCOUNT_ID> · us-east-1 (target, profile sa)'))
+    o.append(region(240, 30, 1105, 880, 'AWS account <YOUR_ACCOUNT_ID> · us-east-1 (target, profile ch-gov-target)'))
     o.append(region(260, 165, 800, 725, 'VPC 10.20.0.0/16 · clickhouse-private-vpc', color='#ffc300', dash='6,3', rx=10,
                     fill='rgba(255, 195, 0, 0.02)'))
     azs = [('us-east-1a', 275, '10.20.192.0/20', '10.20.0.0/18'),
@@ -268,7 +268,7 @@ def aws_view():
     # ---- left column
     o.append(box(28, 100, 182, 100, 'aws', 'Source ECR', [
         '<SOURCE_ECR_ACCOUNT_ID> · us-east-1', 'clickhouse-server / keeper', 'clickhouse-operator · helm/*',
-        ('read-only: profile private-us', {'color': '#ffc300'}), ('ClickHouseAirgapECRPullRole', {'color': '#ffc300'})],
+        ('read-only: ch-gov-ecr-pull', {'color': '#ffc300'}), ('ClickHouseAirgapECRPullRole', {'color': '#ffc300'})],
         logo_name='aws', align='start', line_gap=11))
     o.append(box(15, 240, 195, 110, 'gen', 'Operator workstation', [
         'scripts/up.sh → ansible-playbook', 'aws · kubectl · helm · skopeo', '.aws/config (project-local)',
@@ -632,7 +632,7 @@ def deploy_view():
     o.append(arrow([(705, 740), (705, 772)], 'gen'))
     o.append(badge(270, 650, 'read', 'bus'))
     o.append(badge(564, 675, 'write', 'bus'))
-    o.append(box(30, 620, 195, 90, 'aws', 'Source ECR', ['ClickHouse <SOURCE_ECR_ACCOUNT_ID>', 'profile private-us (SSO)', 'ClickHouseAirgapECR-', '  PullRole · read-only'],
+    o.append(box(30, 620, 195, 90, 'aws', 'Source ECR', ['ClickHouse <SOURCE_ECR_ACCOUNT_ID>', 'profile ch-gov-ecr-pull', 'ClickHouseAirgapECR-', '  PullRole · read-only'],
                  logo_name='aws', align='start', line_gap=12))
     o.append(box(30, 730, 195, 84, 'gen', 'Public registries', ['registry.k8s.io', 'cgr.dev · docker.langfuse.com', 'langfuse charts (helm-http)',
                  ('dhi.io (auth) — Grafana/awscli', {'color': '#ffc300'})],
