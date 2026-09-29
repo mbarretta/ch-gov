@@ -21,12 +21,10 @@ source "$CH_ROOT/scripts/lib/common.sh"
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0; }
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
-PREFIX="$(awk -F'"' '/^  s3_key_prefix:/ {print $2; exit}' "$CH_GROUP_VARS")"
+PREFIX="$(ch_var clickhouse.s3_key_prefix)"
 UUID="${PREFIX#ch-s3-}"
-ACCOUNT="$(awk -F'"' '/^  target_account_id:/ {print $2; exit}' "$CH_GROUP_VARS")"
-REGION="$(awk -F'"' '/^  target_region:/ {print $2; exit}' "$CH_GROUP_VARS")"
-BUCKET="clickhouse-private-${ACCOUNT}-${REGION}"
-[[ -n "$UUID" && -n "$ACCOUNT" ]] || die "could not read s3_key_prefix / target_account_id from $CH_GROUP_VARS"
+BUCKET="$(ch_var clickhouse.bucket_name)"
+[[ -n "$UUID" && -n "$BUCKET" ]] || die "could not read clickhouse.s3_key_prefix / clickhouse.bucket_name from the merged configuration"
 
 info "bucket: s3://$BUCKET   cluster uuid: $UUID"
 keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix ch-s3- \

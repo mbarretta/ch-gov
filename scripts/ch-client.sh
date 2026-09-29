@@ -32,8 +32,8 @@ source "$CH_ROOT/scripts/lib/common.sh"
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars.
-NS="$(awk -F'"' '/^  namespace:/ {print $2; exit}' "$CH_GROUP_VARS")"
-USER_="$(awk -F'"' '/^  admin_username:/ {print $2; exit}' "$CH_GROUP_VARS")"
+NS="$(ch_var clickhouse.namespace)"
+USER_="$(ch_var clickhouse.admin_username)"
 PW_FILE="$CH_ROOT/state/clickhouse-admin-password"
 LOCAL_PORT="${CH_LOCAL_PORT:-19000}"
 
@@ -55,7 +55,7 @@ fi
 
 if [[ "${1:-}" == "--lb" ]]; then
   shift
-  CLUSTER="$(awk -F'"' '/^  cluster_name:/ {print $2; exit}' "$CH_GROUP_VARS")"
+  CLUSTER="$(ch_var clickhouse.cluster_name)"
   host="$(kubectl get service "$CLUSTER-lb" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
   [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
   info "connecting to $host:$CH_PORT (NLB)$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')"

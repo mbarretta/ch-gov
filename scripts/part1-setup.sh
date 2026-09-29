@@ -22,6 +22,10 @@ set -euo pipefail
 # read its own header comment afterwards.
 _SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# Resolving the configuration needs Ansible and jq, which this script installs,
+# so common.sh must not do it on source; ch_init runs after the dependencies
+# are in place (step 5).
+CH_DEFER_INIT=1
 source ./lib/common.sh
 
 CHECK_ONLY=0
@@ -188,28 +192,52 @@ vrow preflight "$(kubectl preflight version 2>/dev/null | head -1 | awk '{print 
 # ===========================================================================
 step "5/6  AWS profiles"
 # ===========================================================================
+# The configuration is resolved here, after the tools and the venv above, and
+# before anything that needs a profile name: it comes from Ansible, which may
+# only just have been installed. --check installs nothing, so if Ansible or jq
+# is still missing it reports that and skips the checks that need the config.
+#
 # Two profiles, because the airgap model spans two accounts:
-#   sa          -> your account. Builds VPC/EKS/S3/ECR. Holds your data.
-#   private-us  -> an assumed role that can READ ClickHouse's source ECR.
-#                  It chains off sa, so `aws sso login` once covers both.
-# On a fresh checkout there is no .aws/config yet for these checks to use --
-# lib/common.sh's render_aws_config (sourced above, before Ansible exists to
-# render it via ansible/deploy.yml's pre_tasks) already generated one from
-# ansible/files/aws-config.ini.j2.
+#   aws.target_profile      -> your account. Builds VPC/EKS/S3/ECR. Holds your data.
+#   aws.source_ecr_profile  -> an assumed role that can READ ClickHouse's source ECR.
+# With aws.auth_mode: sso the kit renders a project-local .aws/config (chained
+# off the SSO session, so one `aws sso login` covers both profiles) -- on a
+# fresh checkout there is no .aws/config yet for these checks to use, so
+# lib/common.sh's render_aws_config generates one from
+# ansible/files/aws-config.ini.j2 before Ansible exists to do it via
+# ansible/deploy.yml's pre_tasks. With auth_mode: profile nothing is rendered:
+# both profiles must already exist in your own AWS config, and each is checked
+# with a plain sts get-caller-identity.
+CONFIG_OK=0
+if ! have ansible || ! have jq; then
+  missing_cfg=(); have ansible || missing_cfg+=(ansible); have jq || missing_cfg+=(jq)
+  fail "cannot read the configuration: ${missing_cfg[*]} not installed -- skipping the AWS and ECR checks"
+  note_problem
+elif ch_init; then
+  CONFIG_OK=1
+else
+  note_problem
+fi
+
 check_profile() {
-  local p="$1" desc="$2" arn
+  local p="$1" desc="$2" arn hp="$TARGET_PROFILE"
+  # In sso mode both profiles hang off one SSO session, logged in via the
+  # deployment profile; in profile mode each one is refreshed on its own.
+  [[ "$(ch_auth_mode)" == profile ]] && hp="$p"
   if ! aws configure list-profiles 2>/dev/null | grep -qx "$p"; then
-    fail "profile '$p' not defined in $AWS_CONFIG_FILE ($desc)"; note_problem; return 1
+    fail "profile '$p' not defined in ${AWS_CONFIG_FILE:-the AWS CLI default config} ($desc)"; note_problem; return 1
   fi
   if arn="$(aws sts get-caller-identity --profile "$p" --query Arn --output text 2>/dev/null)"; then
     ok "$p -> $arn"
   else
-    fail "profile '$p' will not authenticate. Run: AWS_CONFIG_FILE=$AWS_CONFIG_FILE aws sso login --profile $TARGET_PROFILE"
+    fail "profile '$p' will not authenticate. $(ch_login_hint "$hp")"
     note_problem; return 1
   fi
 }
-check_profile "$TARGET_PROFILE"     "your deployment account" || true
-check_profile "$SOURCE_ECR_PROFILE" "cross-account source ECR read" || true
+if ((CONFIG_OK)); then
+  check_profile "$TARGET_PROFILE"     "your deployment account" || true
+  check_profile "$SOURCE_ECR_PROFILE" "cross-account source ECR read" || true
+fi
 
 # ===========================================================================
 step "6/6  Source ECR reachability and real image versions"
@@ -218,29 +246,33 @@ step "6/6  Source ECR reachability and real image versions"
 # deploy-config.yaml pins exact image tags, and old tags get purged from the
 # source registry over time. A pinned tag that no longer exists fails the
 # deployment at the image-sync phase, ~30 minutes in.
-if aws ecr get-login-password --profile "$SOURCE_ECR_PROFILE" --region "$SOURCE_ECR_REGION" >/dev/null 2>&1; then
-  ok "ECR authorization token obtained"
-  info "registry: ${SOURCE_ECR_ACCOUNT}.dkr.ecr.${SOURCE_ECR_REGION}.amazonaws.com"
-  for r in "${CH_REPOS[@]}"; do
-    latest="$(aws ecr describe-images \
-                --registry-id "$SOURCE_ECR_ACCOUNT" --repository-name "$r" \
-                --profile "$SOURCE_ECR_PROFILE" --region "$SOURCE_ECR_REGION" \
-                --output json 2>/dev/null \
-              | jq -r '[.imageDetails[] | select(.imageTags != null)]
-                       | sort_by(.imagePushedAt) | reverse
-                       | .[0:3][] | "\(.imagePushedAt[0:10])  \(.imageTags | join(" "))"' 2>/dev/null)"
-    if [[ -n "$latest" ]]; then
-      printf '  %s%s%s\n' "$C_BOLD" "$r" "$C_RESET"
-      sed 's/^/      /' <<<"$latest"
-    else
-      warn "$r: could not list images (no permission, or repo renamed)"; note_problem
-    fi
-  done
-  info "note: -fips / -nocve / -ubi9 suffixes are compliance-hardened variants"
+if ((CONFIG_OK)); then
+  if aws ecr get-login-password --profile "$SOURCE_ECR_PROFILE" --region "$SOURCE_ECR_REGION" >/dev/null 2>&1; then
+    ok "ECR authorization token obtained"
+    info "registry: ${SOURCE_ECR_ACCOUNT}.dkr.ecr.${SOURCE_ECR_REGION}.amazonaws.com"
+    for r in "${CH_REPOS[@]}"; do
+      latest="$(aws ecr describe-images \
+                  --registry-id "$SOURCE_ECR_ACCOUNT" --repository-name "$r" \
+                  --profile "$SOURCE_ECR_PROFILE" --region "$SOURCE_ECR_REGION" \
+                  --output json 2>/dev/null \
+                | jq -r '[.imageDetails[] | select(.imageTags != null)]
+                         | sort_by(.imagePushedAt) | reverse
+                         | .[0:3][] | "\(.imagePushedAt[0:10])  \(.imageTags | join(" "))"' 2>/dev/null)"
+      if [[ -n "$latest" ]]; then
+        printf '  %s%s%s\n' "$C_BOLD" "$r" "$C_RESET"
+        sed 's/^/      /' <<<"$latest"
+      else
+        warn "$r: could not list images (no permission, or repo renamed)"; note_problem
+      fi
+    done
+    info "note: -fips / -nocve / -ubi9 suffixes are compliance-hardened variants"
+  else
+    fail "cannot reach source ECR via '$SOURCE_ECR_PROFILE'"
+    info "you may not have the cross-account role; contact your ClickHouse rep"
+    note_problem
+  fi
 else
-  fail "cannot reach source ECR via '$SOURCE_ECR_PROFILE'"
-  info "you may not have the cross-account role; contact your ClickHouse rep"
-  note_problem
+  info "skipped: the configuration could not be read (step 5)"
 fi
 # The optional Langfuse steps (langfuse.enabled: true in ansible/group_vars/
 # all.yml) widen the Step 2 image hop beyond ClickHouse's ECR: two public

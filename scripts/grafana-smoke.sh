@@ -62,12 +62,12 @@ for tool in curl jq kubectl; do have "$tool" || die "$tool not installed"; done
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars
-# (gf_var, lib/common.sh, is block-scoped to grafana:).
+# (gf_var, lib/common.sh, reads the merged grafana: block).
 GF_NS="$(gf_var '  namespace:')"
 GF_RELEASE="$(gf_var '  release:')"
 GF_URL_CFG="$(gf_var '  url:')"
 GF_LB_TYPE="$(gf_var '    type:')"
-[[ -n "$GF_NS" && -n "$GF_RELEASE" ]] || die "could not read the grafana: block from $CH_GROUP_VARS"
+[[ -n "$GF_NS" && -n "$GF_RELEASE" ]] || die "could not read the grafana: block from the merged configuration"
 
 PW_FILE="$CH_ROOT/state/grafana-admin-password"
 [[ -r "$PW_FILE" ]] || die "no admin password at $PW_FILE -- run: scripts/play.sh --tags gf-app"

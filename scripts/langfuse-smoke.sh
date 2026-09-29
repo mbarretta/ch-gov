@@ -66,13 +66,13 @@ for tool in curl jq kubectl; do have "$tool" || die "$tool not installed"; done
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars
-# (lf_var, lib/common.sh, is block-scoped to langfuse:).
+# (lf_var, lib/common.sh, reads the merged langfuse: block).
 LF_NS="$(lf_var '  namespace:')"
 LF_RELEASE="$(lf_var '  release:')"
 LF_DB="$(lf_var '  clickhouse_database:')"
 LF_URL_CFG="$(lf_var '  url:')"
 LF_LB_TYPE="$(lf_var '    type:')"
-[[ -n "$LF_NS" && -n "$LF_RELEASE" && -n "$LF_DB" ]] || die "could not read the langfuse: block from $CH_GROUP_VARS"
+[[ -n "$LF_NS" && -n "$LF_RELEASE" && -n "$LF_DB" ]] || die "could not read the langfuse: block from the merged configuration"
 
 PK_FILE="$CH_ROOT/state/langfuse-public-key"
 SK_FILE="$CH_ROOT/state/langfuse-secret-key"

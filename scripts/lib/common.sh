@@ -27,73 +27,73 @@ fail()  { printf '  %s[fail]%s %s\n'   "$C_RED" "$C_RESET" "$*"; }
 info()  { printf '  %s%s%s\n'          "$C_DIM" "$*" "$C_RESET"; }
 die()   { fail "$*"; exit 1; }
 
-# ---- group_vars / deploy-vars scalar reader ---------------------------------
-# Reads a scalar straight out of state/deploy-vars.yml (when it has the key),
-# falling back to ansible/group_vars/all.yml -- the same "local file over the
-# tracked default, key by key" result the playbook gets from Ansible's dict
-# merging. Runs before, or without, Ansible ever templating anything, so this
-# is the only source for the credential-free render and auth checks below.
-#
-#   ch_scrape_var FILE KEY            top-level key     (fips)
-#   ch_scrape_var FILE BLOCK KEY      key one level in  (aws target_profile)
-#
-# Prints nothing when the key is absent. Handles quoted or bare scalars with
-# an optional trailing comment; it does not evaluate Jinja.
-ch_scrape_var() {
-  local file="$1" block="" key
-  [[ -f "$file" ]] || return 0
-  if [[ $# -ge 3 ]]; then block="$2"; key="$3"; else key="$2"; fi
-  awk -v block="$block" -v key="$key" '
-    function clean(v) {
-      sub(/^[ \t]+/, "", v)
-      if (v ~ /^"/) { sub(/^"/, "", v); sub(/".*$/, "", v) }
-      else if (v ~ /^\047/) { sub(/^\047/, "", v); sub(/\047.*$/, "", v) }
-      else { sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v) }
-      return v
-    }
-    block == "" && index($0, key ":") == 1 { print clean(substr($0, length(key) + 2)); exit }
-    block != "" && $0 ~ ("^" block ":") { f = 1; next }
-    block != "" && f && /^[^ \t#]/ { exit }
-    block != "" && f && index($0, "  " key ":") == 1 { print clean(substr($0, length(key) + 4)); exit }
-  ' "$file"
-}
+# ---- merged configuration resolver ------------------------------------------
+# Every script reads its configuration through Ansible, the same way the
+# playbook does, so state/deploy-vars.yml (passed with -e @file) over
+# ansible/group_vars/all.yml is merged identically everywhere: dictionaries
+# merge key by key (hash_behaviour = merge in ansible/ansible.cfg, which is why
+# the call runs from ansible/) and Jinja defaults such as sso_region or the
+# per-service bucket names are evaluated. One `ansible localhost` call emits
+# every block the scripts read as JSON; it is cached in CH_VARS_JSON for the
+# life of the script. Call ch_resolve (or ch_init, below) from the main shell,
+# not inside $(...), or the cache is lost with the subshell.
+CH_VARS_JSON=""
 
-# Layered lookup: state/deploy-vars.yml wins when it sets the key, else
-# ansible/group_vars/all.yml. Same arities as ch_scrape_var. Defined ahead of
-# CH_GROUP_VARS below (which exists only after this file's first render), so
-# it names both files directly.
-ch_layered_var() {
-  local v
-  v="$(ch_scrape_var "$CH_PROJECT_ROOT/state/deploy-vars.yml" "$@")"
-  [[ -n "$v" ]] || v="$(ch_scrape_var "$CH_PROJECT_ROOT/ansible/group_vars/all.yml" "$@")"
-  printf '%s\n' "$v"
-}
-
-# One aws: value, with the two kinds of Jinja all.yml uses for it resolved:
-# a bare `{{ aws.other_key }}` reference (sso_region defaults to
-# target_region), and the derived partition.
-ch_aws_var() {
-  local key="$1" v
-  if [[ "$key" == partition ]]; then
-    case "$(ch_aws_var target_region)" in us-gov-*) echo aws-us-gov ;; *) echo aws ;; esac
+ch_resolve() {
+  [[ -z "$CH_VARS_JSON" ]] || return 0
+  have ansible || { fail "ansible is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
+  have jq      || { fail "jq is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
+  local extra=() out errf rc=0 json
+  [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]] && extra=(-e "@$CH_PROJECT_ROOT/state/deploy-vars.yml")
+  errf="$(mktemp)"
+  out="$(cd "$CH_PROJECT_ROOT/ansible" && \
+         ANSIBLE_STDOUT_CALLBACK=minimal ANSIBLE_CALLBACK_RESULT_FORMAT=json \
+         ansible localhost ${extra[@]+"${extra[@]}"} -m ansible.builtin.debug \
+           -a 'msg={{ {"fips": fips, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "langfuse": langfuse, "grafana": grafana} }}' \
+           </dev/null 2>"$errf")" || rc=$?
+  json="${out#*=> }"
+  if ((rc == 0)) && CH_VARS_JSON="$(jq -ce '.msg | select(type == "object")' <<<"$json" 2>/dev/null)" && [[ -n "$CH_VARS_JSON" ]]; then
+    rm -f "$errf"
     return 0
   fi
-  v="$(ch_layered_var aws "$key")"
-  if [[ "$v" =~ ^\{\{[[:space:]]*aws\.([a-z_]+)[[:space:]]*\}\}$ ]]; then
-    ch_aws_var "${BASH_REMATCH[1]}"
-  else
-    printf '%s\n' "$v"
-  fi
+  CH_VARS_JSON=""
+  fail "could not resolve the configuration ($CH_GROUP_VARS over state/deploy-vars.yml) with Ansible" >&2
+  { [[ -n "$out" ]] && printf '%s\n' "$out"; cat "$errf"; } | head -20 | sed 's/^/      /' >&2
+  rm -f "$errf"
+  return 1
 }
 
-# Succeeds when the persistent fips: switch is true (deploy-vars over all.yml).
-ch_fips_enabled() { [[ "$(ch_layered_var fips)" == "true" ]]; }
+# Prints one merged value by dotted path (aws.target_profile, clickhouse.
+# bucket_name, fips). Strings come back raw, booleans and numbers as
+# true/false/80, and nothing is printed when the key is absent or null.
+ch_var() {
+  ch_resolve || return 1
+  jq -r --arg p "$1" 'getpath($p | split(".")) | if . == null then empty elif type == "string" then . else tojson end' <<<"$CH_VARS_JSON"
+}
+
+# Succeeds when the persistent fips: switch is true.
+ch_fips_enabled() { [[ "$(ch_var fips)" == "true" ]]; }
 
 # sso | profile. Anything but "profile" is treated as sso, matching the
 # playbook's default.
 ch_auth_mode() {
-  local m; m="$(ch_aws_var auth_mode)"
-  [[ "$m" == profile ]] && echo profile || echo sso
+  [[ "$(ch_var aws.auth_mode)" == profile ]] && echo profile || echo sso
+}
+
+# What to tell someone whose AWS credentials do not work, for the current auth
+# mode. sso: the login command, with AWS_CONFIG_FILE prefixed only when the
+# repo-local config is the one in use. profile: refresh the named profile's
+# credentials (there is no SSO session to log in to). PROFILE defaults to the
+# deployment profile.
+ch_login_hint() {
+  local profile="${1:-$(ch_var aws.target_profile)}"
+  if [[ "$(ch_auth_mode)" == sso ]]; then
+    local prefix=""
+    [[ "${AWS_CONFIG_FILE:-}" == "$CH_PROJECT_ROOT/.aws/config" ]] && prefix="AWS_CONFIG_FILE=$AWS_CONFIG_FILE "
+    printf 'run: %saws sso login --profile %s' "$prefix" "$profile"
+  else
+    printf "refresh the credentials for AWS profile '%s' (aws.auth_mode is profile, so there is no SSO login)" "$profile"
+  fi
 }
 
 # ---- AWS config bootstrap --------------------------------------------------
@@ -126,7 +126,7 @@ render_aws_config() {
   for key in sso_session_name sso_start_url sso_region sso_role_name target_profile \
              target_account_id target_region source_ecr_profile partition \
              ecr_pull_role_name ecr_pull_session_name; do
-    val="$(ch_aws_var "$key")"
+    val="$(ch_var "aws.$key")"
     body="${body//"{{ aws.$key }}"/$val}"
   done
   if [[ -f "$out" ]] && diff -q <(grep -v '^use_fips_endpoint' "$out") \
@@ -194,24 +194,6 @@ EOF
 }
 render_deploy_vars
 
-# Activate the AWS auth mode. render_deploy_vars ran first so a fresh checkout
-# resolves against the freshly written state/deploy-vars.yml, not only all.yml.
-if [[ "$(ch_auth_mode)" == sso ]]; then
-  render_aws_config
-  export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
-elif ch_fips_enabled; then
-  export AWS_USE_FIPS_ENDPOINT=true
-fi
-# Non-empty only once state/deploy-vars.yml exists (render_deploy_vars above
-# always creates it, so in practice this is "always" -- the explicit check
-# keeps the intent, "load the override file when there is one", legible at
-# the scripts/play.sh call site, and keeps this a no-op if that ever changes).
-if [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]]; then
-  export CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
-else
-  export CH_EXTRA_VARS=""
-fi
-
 # Tracks non-fatal problems so the script can exit non-zero at the very end
 # instead of stopping at the first issue -- you want the whole report.
 PROBLEMS=0
@@ -239,19 +221,16 @@ py_at_least() {
 py_version() { "${1:-python3}" -c 'import platform; print(platform.python_version())' 2>/dev/null; }
 
 # ---- constants (from the ClickHouse Private training guide) ---------------
-# Where ClickHouse publishes its images. You never deploy into this account;
-# you only read from it, then copy images into your own ECR.
-readonly SOURCE_ECR_ACCOUNT="$(ch_aws_var source_ecr_account_id)"
-readonly SOURCE_ECR_REGION="$(ch_aws_var source_ecr_region)"
-readonly SOURCE_ECR_PROFILE="$(ch_aws_var source_ecr_profile)"
-
-# Your account, where everything actually gets built.
-readonly TARGET_PROFILE="$(ch_aws_var target_profile)"
+# The source registry and profile values (SOURCE_ECR_ACCOUNT, SOURCE_ECR_REGION,
+# SOURCE_ECR_PROFILE) and the deployment profile (TARGET_PROFILE) come from the
+# merged configuration and are set by ch_init at the bottom of this file.
 
 # The three images that make up a ClickHouse Private deployment.
 readonly CH_REPOS=(clickhouse-server clickhouse-keeper clickhouse-operator)
 
 # ---- Langfuse (optional Steps 13-15) --------------------------------------
+# The tracked defaults the resolver above merges deploy-vars over; named only
+# so the resolver's error message can say what it was reading.
 readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
 
 # The certificate the langfuse role generates into state/ when
@@ -259,23 +238,25 @@ readonly CH_GROUP_VARS="$CH_PROJECT_ROOT/ansible/group_vars/all.yml"
 # Self-signed, so it is its own CA: `curl --cacert "$LF_TLS_CERT"` trusts it.
 readonly LF_TLS_CERT="$CH_PROJECT_ROOT/state/langfuse-tls-cert.pem"
 
-# Prints one value from the langfuse: block of group_vars, e.g.
-#   lf_var '  namespace:'      lf_var '    type:'      lf_var '  enabled:'
-# The key carries its own indentation, which is what tells "  namespace:"
-# under langfuse: apart from the same key under clickhouse:. The block is last
-# in all.yml, so the scrape is block-scoped -- match the header first, then
-# the key -- and the first-match scrapes of the ClickHouse keys elsewhere are
-# unaffected. Quoted values come back without the quotes; bare ones (true,
-# 80) as written. Prints nothing when the key is absent.
-lf_var() {
-  awk -v key="$1" '
-    /^langfuse:/ { f = 1 }
-    f && index($0, key) == 1 {
-      if (split($0, q, "\"") > 2) print q[2]
-      else { sub(/^[^:]*:[ \t]*/, ""); print $1 }
-      exit
-    }' "$CH_GROUP_VARS"
+# Prints one merged value from a service block (langfuse: or grafana:) of the
+# configuration. KEY is either a dotted path inside the block (namespace,
+# load_balancer.type) or the indentation-carrying form the callers have always
+# used: two spaces for a top-level key of the block ('  namespace:') and four
+# for a key of its load_balancer: ('    type:', '    tls:', '    port:').
+# Quoted and bare scalars alike come back without quotes; nothing is printed
+# when the key is absent or null.
+_ch_block_var() {
+  local block="$1" key="$2" name lead
+  name="${key#"${key%%[! ]*}"}"; name="${name%:}"
+  lead="${key%%[! ]*}"
+  case "${#lead}" in
+    4) name="load_balancer.$name" ;;
+  esac
+  ch_var "$block.$name"
 }
+
+#   lf_var '  namespace:'      lf_var '    type:'      lf_var '  enabled:'
+lf_var() { _ch_block_var langfuse "$1"; }
 
 # Succeeds when the NLB terminates TLS -- the same effective state the
 # langfuse role computes as _lf_tls (Phase 4c): langfuse.load_balancer.tls,
@@ -331,19 +312,9 @@ lf_cacert() {
 # Self-signed, so it is its own CA: `curl --cacert "$GF_TLS_CERT"` trusts it.
 readonly GF_TLS_CERT="$CH_PROJECT_ROOT/state/grafana-tls-cert.pem"
 
-# Prints one value from the grafana: block of group_vars, e.g.
+# Same as lf_var, for the grafana: block.
 #   gf_var '  namespace:'      gf_var '    type:'      gf_var '  enabled:'
-# Same block-scoped first-match rule as lf_var above, anchored on
-# /^grafana:/ -- the new last block in all.yml -- instead of /^langfuse:/.
-gf_var() {
-  awk -v key="$1" '
-    /^grafana:/ { f = 1 }
-    f && index($0, key) == 1 {
-      if (split($0, q, "\"") > 2) print q[2]
-      else { sub(/^[^:]*:[ \t]*/, ""); print $1 }
-      exit
-    }' "$CH_GROUP_VARS"
-}
+gf_var() { _ch_block_var grafana "$1"; }
 
 # Succeeds when the NLB terminates TLS -- the same effective state the
 # grafana role computes as _gf_tls: grafana.load_balancer.tls, OR'd with the
@@ -414,3 +385,42 @@ ch_tls_client_config() {
 <config><openSSL><client><caConfig>$CH_TLS_CA</caConfig><verificationMode>strict</verificationMode><invalidCertificateHandler><name>RejectCertificateHandler</name></invalidCertificateHandler></client></openSSL></config>
 XML
 }
+
+# ---- initialise -------------------------------------------------------------
+# Resolves the configuration once and activates the AWS auth mode. Runs when
+# this file is sourced, unless the caller sets CH_DEFER_INIT=1 first and calls
+# ch_init itself later (scripts/part1-setup.sh does, because Ansible and jq are
+# what it installs). render_deploy_vars ran first so a fresh checkout resolves
+# against the freshly written state/deploy-vars.yml, not only all.yml.
+#
+# aws.auth_mode sso exports AWS_CONFIG_FILE (the repo-local .aws/config, unless
+# the caller already chose one); profile mode leaves it alone and, with fips
+# on, exports AWS_USE_FIPS_ENDPOINT in its place.
+ch_init() {
+  [[ -z "${CH_INITED:-}" ]] || return 0
+  ch_resolve || return 1
+  if [[ "$(ch_auth_mode)" == sso ]]; then
+    render_aws_config
+    export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
+  elif ch_fips_enabled; then
+    export AWS_USE_FIPS_ENDPOINT=true
+  fi
+  # Non-empty only once state/deploy-vars.yml exists (render_deploy_vars always
+  # creates it, so in practice this is "always" -- the explicit check keeps the
+  # intent, "load the override file when there is one", legible at the
+  # scripts/play.sh call site).
+  if [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]]; then
+    export CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
+  else
+    export CH_EXTRA_VARS=""
+  fi
+  # Where ClickHouse publishes its images. You never deploy into this account;
+  # you only read from it, then copy images into your own ECR.
+  SOURCE_ECR_ACCOUNT="$(ch_var aws.source_ecr_account_id)"
+  SOURCE_ECR_REGION="$(ch_var aws.source_ecr_region)"
+  SOURCE_ECR_PROFILE="$(ch_var aws.source_ecr_profile)"
+  # Your account, where everything actually gets built.
+  TARGET_PROFILE="$(ch_var aws.target_profile)"
+  CH_INITED=1
+}
+if [[ -z "${CH_DEFER_INIT:-}" ]]; then ch_init || exit 1; fi
