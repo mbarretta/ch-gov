@@ -23,10 +23,11 @@
   hosts: localhost
   gather_facts: false
 
-  # sso mode keeps AWS config project-local, matching scripts/env.sh: without
-  # it, a shell that never sourced env.sh would find no profiles at all.
-  # profile mode leaves AWS_CONFIG_FILE alone so the caller's own file (or the
-  # AWS CLI default) is used. Nothing is rendered there, so use_fips_endpoint
+  # sso mode always points AWS_CONFIG_FILE at the project-local .aws/config,
+  # matching scripts/env.sh and common.sh: without it, a shell that never
+  # sourced env.sh would find no profiles at all. profile mode leaves
+  # AWS_CONFIG_FILE alone so the caller's own file (or the AWS CLI default) is
+  # used. Nothing is rendered there, so use_fips_endpoint
   # cannot arrive through a config file; the env var carries it instead.
   environment: >-
     {{ {'AWS_CONFIG_FILE': playbook_dir ~ '/../.aws/config'}

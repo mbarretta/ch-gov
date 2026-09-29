@@ -82,7 +82,8 @@ ch_auth_mode() {
 
 # What to tell someone whose AWS credentials do not work, for the current auth
 # mode. sso: the login command, with AWS_CONFIG_FILE prefixed only when the
-# repo-local config is the one in use. profile: refresh the named profile's
+# repo-local config is the one in use (always, once ch_init has run; a caller
+# that has not run it may still point elsewhere). profile: refresh the named profile's
 # credentials (there is no SSO session to log in to). PROFILE defaults to the
 # deployment profile.
 ch_login_hint() {
@@ -111,7 +112,7 @@ ch_login_hint() {
 # deploy.yml run.
 #
 # aws.auth_mode: profile -- nothing is rendered and AWS_CONFIG_FILE is left
-# to the caller (or the AWS CLI default). With no rendered config to carry
+# untouched: the caller's value, or the AWS CLI default. With no rendered config to carry
 # use_fips_endpoint, fips: true exports AWS_USE_FIPS_ENDPOINT instead.
 render_aws_config() {
   local out="$CH_PROJECT_ROOT/.aws/config"
@@ -393,15 +394,15 @@ XML
 # what it installs). render_deploy_vars ran first so a fresh checkout resolves
 # against the freshly written state/deploy-vars.yml, not only all.yml.
 #
-# aws.auth_mode sso exports AWS_CONFIG_FILE (the repo-local .aws/config, unless
-# the caller already chose one); profile mode leaves it alone and, with fips
-# on, exports AWS_USE_FIPS_ENDPOINT in its place.
+# aws.auth_mode sso always exports AWS_CONFIG_FILE as the repo-local
+# .aws/config, replacing any value the caller had set; profile mode leaves it
+# alone and, with fips on, exports AWS_USE_FIPS_ENDPOINT in its place.
 ch_init() {
   [[ -z "${CH_INITED:-}" ]] || return 0
   ch_resolve || return 1
   if [[ "$(ch_auth_mode)" == sso ]]; then
     render_aws_config
-    export AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-$CH_PROJECT_ROOT/.aws/config}"
+    export AWS_CONFIG_FILE="$CH_PROJECT_ROOT/.aws/config"
   elif ch_fips_enabled; then
     export AWS_USE_FIPS_ENDPOINT=true
   fi
