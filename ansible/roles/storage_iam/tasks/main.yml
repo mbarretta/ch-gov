@@ -58,7 +58,7 @@
   ansible.builtin.set_fact:
     _oidc_issuer_host: "{{ _oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
     _oidc_provider_arn: >-
-      arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+      arn:{{ aws.partition }}:iam::{{ aws.target_account_id }}:oidc-provider/{{
         _oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
 
 - name: Confirm the OIDC provider is registered in IAM
@@ -103,9 +103,7 @@
       BucketName: "{{ clickhouse.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   register: _irsa_stack
 
 - name: Stop here when tearing down
@@ -151,9 +149,7 @@
     # indefinitely and quietly multiply storage cost. For the same reason the
     # tutorial says explicitly: do not add S3 lifecycle rules to this bucket.
     versioning: false
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   when: clickhouse_s3_role_arn is defined
 
 - name: Report the bucket

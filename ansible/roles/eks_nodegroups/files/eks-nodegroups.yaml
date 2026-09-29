@@ -87,18 +87,18 @@ Resources:
       ManagedPolicyArns:
         # Lets the kubelet register with the cluster and describe its own
         # instance. Without it, nodes never reach Ready.
-        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy'
         # The VPC CNI runs as a DaemonSet using the node's credentials to
         # attach ENIs and hand out VPC IPs to pods.
-        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy'
         # Pulls the ClickHouse images from your own ECR. ReadOnly is what the
         # tutorial specifies; AmazonEC2ContainerRegistryPullOnly is a tighter
         # modern alternative if you want least privilege.
-        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
         # Not required by the tutorial. It buys you `aws ssm start-session`
         # onto a node with no SSH key, no bastion and no inbound rule --
         # which is how you inspect a node that will not join.
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
       Tags:
         - {Key: Project, Value: clickhouse-private}
 

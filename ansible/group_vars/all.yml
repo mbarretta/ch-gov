@@ -76,9 +76,17 @@ infrastructure:
 
   vpc_cidr: "10.20.0.0/16"
 
+  # Tags added to the CloudFormation stacks and S3 buckets this kit creates
+  # (stack tags propagate to the resources inside), alongside its own Project
+  # and ManagedBy tags, which win on a clash. Use it for the owner or
+  # cost-center tags your account's policy requires, e.g.
+  #   extra_tags: {Owner: platform-team, CostCenter: "1234"}
+  extra_tags: {}
+
+  # Defaults to the first three AZs (a, b, c) of target_region. In us-east-1,
   # us-east-1e is deliberately excluded: it offers none of the instance types
   # below. Subnets are AZ-pinned, so this choice is baked in at VPC creation.
-  availability_zones: ["us-east-1a", "us-east-1b", "us-east-1c"]
+  availability_zones: ["{{ aws.target_region }}a", "{{ aws.target_region }}b", "{{ aws.target_region }}c"]
   public_subnet_cidrs:  ["10.20.192.0/20", "10.20.208.0/20", "10.20.224.0/20"]
   private_subnet_cidrs: ["10.20.0.0/18", "10.20.64.0/18", "10.20.128.0/18"]
 

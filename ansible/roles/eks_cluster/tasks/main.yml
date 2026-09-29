@@ -128,9 +128,7 @@
       EnableSecretsEncryption: "{{ 'true' if fips else 'false' }}"
     capabilities:
       - CAPABILITY_IAM
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   register: _eks_stack
 
 - name: Stop here when tearing down

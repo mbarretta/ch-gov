@@ -66,8 +66,8 @@ Resources:
               - Effect: Allow
                 Action: 's3:*'
                 Resource:
-                  - !Sub 'arn:aws:s3:::${BucketName}'
-                  - !Sub 'arn:aws:s3:::${BucketName}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/*'
 {% if fips %}
               # FIPS hardening Phase 2: the bucket's default encryption below
               # becomes aws:kms (see storage_iam/tasks/main.yml), backed by
@@ -108,7 +108,7 @@ Resources:
       ManagedPolicyArns:
         # Note the service-role/ path. AmazonEBSCSIDriverPolicy does not exist
         # at the top level, and the wrong ARN fails at stack creation.
-        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy'
 {% if fips %}
       Policies:
         - PolicyName: ebs-kms-access
@@ -183,7 +183,7 @@ Resources:
           - Sid: EnableRootAccountAdmin
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
       Tags:
@@ -224,7 +224,7 @@ Resources:
           - Sid: EnableRootAccountAdmin
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
       Tags:
