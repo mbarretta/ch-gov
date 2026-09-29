@@ -23,8 +23,7 @@ That single constraint explains almost every strange thing in Part 1:
 ```
   ClickHouse's AWS account                 YOUR AWS account
   ┌───────────────────────────┐            ┌──────────────────────────────┐
-  │ source ECR                │            │  your ECR                    │
-  │ <SOURCE_ECR_ACCOUNT_ID>   │  skopeo    │  <your-account-id>           │
+  │ source ECR                │  skopeo    │  your ECR                    │
   │  clickhouse-server        │ ─────────► │   clickhouse-server          │
   │  clickhouse-keeper        │   copy     │   clickhouse-keeper          │
   │  clickhouse-operator      │            │   clickhouse-operator        │
