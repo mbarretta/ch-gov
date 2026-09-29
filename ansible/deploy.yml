@@ -5,7 +5,7 @@
 #   ansible-playbook deploy.yml                    # everything, Steps 1-12
 #                                                  #   (+13-15 when langfuse.enabled,
 #                                                  #    +16-18 when grafana.enabled)
-#   ansible-playbook deploy.yml --tags images      # just ECR setup + image sync
+#   ansible-playbook deploy.yml --tags images      # just the pull-role check, ECR setup + image sync
 #   ansible-playbook deploy.yml --tags langfuse    # just the optional Steps 13-15
 #   ansible-playbook deploy.yml --tags grafana     # just the optional Steps 16-18
 #   ansible-playbook deploy.yml --check            # dry run
@@ -34,6 +34,40 @@
        else ({'AWS_USE_FIPS_ENDPOINT': 'true'} if (fips | bool) else {}) }}
 
   pre_tasks:
+    # Fail before anything touches AWS if a value the customer was meant to
+    # fill in is still its <...> placeholder. Only inputs this run will use
+    # are checked: the SSO portal URL in sso mode, the DHI login when Grafana
+    # is on. Only key names are reported -- never the values -- and assert is
+    # controller-side, so this runs with no credentials and no Python
+    # interpreter. It sits first so nothing is rendered from a placeholder.
+    # tags: [always] so a tagged invocation cannot skip it.
+    - name: Reject leftover placeholders in the deployment inputs
+      vars:
+        _aws_inputs: >-
+          {{ {'aws.target_account_id': aws.target_account_id,
+              'aws.source_ecr_account_id': aws.source_ecr_account_id}
+             | combine({'aws.sso_start_url': aws.sso_start_url}
+                       if aws.auth_mode == 'sso' else {}) }}
+        _dhi_inputs: >-
+          {{ {'dhi.username': dhi_username, 'dhi.token': dhi_token}
+             if (grafana.enabled | bool) else {} }}
+        _placeholder_keys: >-
+          {{ (_aws_inputs | dict2items
+                | selectattr('value', 'search', '<(YOUR|SOURCE_ECR)_[^<>]*>')
+                | map(attribute='key') | list)
+             + (_dhi_inputs | dict2items
+                | selectattr('value', 'search', '<[^<>]+>')
+                | map(attribute='key') | list) }}
+      ansible.builtin.assert:
+        that: _placeholder_keys | length == 0
+        fail_msg: >-
+          These settings still hold a <...> placeholder:
+          {{ _placeholder_keys | join(', ') }}.
+          Set real values in state/deploy-vars.yml (see
+          state/deploy-vars.yml.example) and re-run.
+        success_msg: "no placeholder values in the active deployment inputs"
+      tags: [always]
+
     # auth_mode: sso only. Renders ansible/files/aws-config.ini.j2 ->
     # ../.aws/config for THIS run, honoring whatever -e fips=... was passed --
     # the authoritative render.
@@ -72,9 +106,11 @@
 
   roles:
     # --- Step 1: IAM role for ECR access -----------------------------------
-    # Already satisfied: aws.ecr_pull_role_name exists in this account and the
-    # aws.source_ecr_profile profile assumes it. Verified by
-    # scripts/part1-setup.sh. No role needed here.
+    # The role is arranged with ClickHouse, never created here. This step only
+    # checks (read-only) that aws.source_ecr_profile really assumes
+    # aws.ecr_pull_role_name in your account, before any image work starts.
+    - role: ecr_pull_role
+      tags: [images, ecr, pull-role]
 
     # --- Step 2: copy container images -------------------------------------
     - role: ecr_setup

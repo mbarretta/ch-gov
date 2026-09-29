@@ -118,11 +118,15 @@
   ansible.builtin.assert:
     that:
       - dhi_username | length > 0
+      - dhi_username is not search('<[^<>]+>')
       - dhi_token | length > 0
+      - dhi_token is not search('<[^<>]+>')
     fail_msg: >-
-      An artifact sources from dhi.io but DHI_USERNAME/DHI_TOKEN are not set
-      in the environment. Export both (a Docker Hub account entitled to the
-      DHI catalog) and re-run.
+      An artifact sources from dhi.io but the DHI username/token are empty or
+      still a <...> placeholder. Set dhi.username and dhi.token in
+      state/deploy-vars.yml (a Docker Hub account entitled to the DHI
+      catalog); the DHI_USERNAME and DHI_TOKEN environment variables are the
+      fallback when those two keys are empty. Then re-run.
     success_msg: "DHI credentials present"
   when: _dhi_required
 

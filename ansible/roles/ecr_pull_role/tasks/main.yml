@@ -1,0 +1,68 @@
+---
+# Step 1: confirm the ECR pull role can be assumed. Read-only.
+#
+# The role lives in YOUR account but is arranged with ClickHouse, which sets
+# up the trust relationship that lets your principals assume it and read the
+# source registry. This kit never creates or changes it; it only proves that
+# aws.source_ecr_profile authenticates as that role, so a missing or
+# mis-trusted role fails here with a plain message rather than as a skopeo
+# error several steps later.
+#
+# check_mode: false on the lookup so --check reports the real answer (STS
+# get-caller-identity changes nothing).
+
+- name: Ask STS who the ECR pull profile authenticates as
+  ansible.builtin.command:
+    argv:
+      - aws
+      - sts
+      - get-caller-identity
+      - --profile={{ aws.source_ecr_profile }}
+      - --region={{ aws.target_region }}
+      - --query=[Account,Arn]
+      - --output=text
+  register: _pull_identity
+  changed_when: false
+  failed_when: false    # checked below, so the message can say what to fix
+  check_mode: false
+
+- name: Confirm the ECR pull profile authenticates
+  ansible.builtin.assert:
+    that: _pull_identity.rc == 0
+    fail_msg: >-
+      Profile '{{ aws.source_ecr_profile }}' could not authenticate
+      (aws exit {{ _pull_identity.rc }}):
+      {{ _pull_identity.stderr | default('', true) | trim | truncate(300) }}.
+      This profile must assume the role '{{ aws.ecr_pull_role_name }}' in
+      account {{ aws.target_account_id }}. That role, and the trust
+      relationship that lets you assume it, is arranged with ClickHouse; this
+      playbook does not create it. Ask ClickHouse to confirm it is set up for
+      your account, and check that your target profile is logged in.
+    success_msg: "profile '{{ aws.source_ecr_profile }}' authenticates"
+
+- name: Confirm the ECR pull profile is the expected assumed role
+  # An IAM user or an unrelated role can also authenticate, and would pass
+  # the check above; only the assumed-role ARN of the pull role in the target
+  # account proves the profile is doing the cross-account assume.
+  vars:
+    _pull_identity_parts: "{{ _pull_identity.stdout.split() }}"
+    _pull_role_arn_prefix: >-
+      arn:{{ aws.partition }}:sts::{{ aws.target_account_id }}:assumed-role/{{ aws.ecr_pull_role_name }}/
+  ansible.builtin.assert:
+    that:
+      - _pull_identity_parts | length == 2
+      - _pull_identity_parts[0] == aws.target_account_id | string
+      - _pull_identity_parts[1].startswith(_pull_role_arn_prefix)
+    fail_msg: >-
+      Profile '{{ aws.source_ecr_profile }}' authenticates, but not as the ECR
+      pull role. Expected the assumed role '{{ aws.ecr_pull_role_name }}' in
+      account {{ aws.target_account_id }}; got
+      {{ _pull_identity_parts[1] | default('an unrecognized identity') }}.
+      The pull role and its trust relationship are arranged with ClickHouse;
+      this playbook does not create it. Ask ClickHouse to confirm it is set up
+      for your account, then check aws.ecr_pull_role_name and
+      aws.source_ecr_profile.
+    success_msg: >-
+      '{{ aws.source_ecr_profile }}' assumes {{ aws.ecr_pull_role_name }} in
+      account {{ aws.target_account_id }}
+  when: _pull_identity.rc == 0
