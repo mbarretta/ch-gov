@@ -24,16 +24,15 @@ source "$CH_ROOT/scripts/lib/common.sh"
 STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb)
 
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
-# lf_var (lib/common.sh) is block-scoped to langfuse:, so the first-match
-# scrapes below keep landing on the ClickHouse keys.
+# lf_var (lib/common.sh) reads the merged langfuse: block, so a deploy-vars
+# override of langfuse.enabled counts.
 LF_ENABLED="$(lf_var '  enabled:')"
 [[ "$LF_ENABLED" == true ]] && STEPS+=(lf-storage lf-db lf-app)
 
 # Grafana (Steps 16-18) is optional and joins the list only when switched on,
 # after Langfuse's own three -- so a run with both on reaches the blanket
 # ClickHouse grant only once Langfuse's data already exists. gf_var
-# (lib/common.sh) is block-scoped to grafana:, so the first-match scrapes
-# below keep landing on the ClickHouse keys.
+# (lib/common.sh) reads the merged grafana: block, same as lf_var above.
 GF_ENABLED="$(gf_var '  enabled:')"
 [[ "$GF_ENABLED" == true ]] && STEPS+=(gf-storage gf-db gf-app)
 
@@ -55,11 +54,11 @@ fi
 ((SKIP_IMAGES)) && TAGS=("${TAGS[@]/images}")
 TAGS=("${TAGS[@]}"); TAGS=($(printf '%s\n' "${TAGS[@]}" | grep -v '^$'))
 
-LB_TYPE="$(awk -F'"' '/^    type:/ {print $2; exit}' "$CH_GROUP_VARS")"
+LB_TYPE="$(ch_var clickhouse.load_balancer.type)"
 
 step "Bringing up: ${TAGS[*]}"
 info "compute starts at Step 5 (nodes): ~\$2.32/hr while up, ~\$0.15/hr with nodes down"
-info "load balancer type from group_vars: ${LB_TYPE:-none}"
+info "load balancer type (clickhouse.load_balancer.type): ${LB_TYPE:-none}"
 [[ "$LF_ENABLED" == true ]] && info "langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~\$0.02/hr for its NLB)"
 [[ "$GF_ENABLED" == true ]] && info "grafana: enabled -- Steps 16-18 run after Langfuse (adds ~\$0.02/hr for its NLB)"
 info "each step is idempotent; anything already in place is left alone"

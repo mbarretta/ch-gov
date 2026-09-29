@@ -46,7 +46,7 @@ export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 # Ansible's own pre_tasks re-render it per-run, honoring -e fips=...; this one
 # only fills in a missing file, so the two never fight.
 if ! aws sts get-caller-identity --query Arn --output text >/dev/null 2>&1; then
-  die "not authenticated -- run: AWS_CONFIG_FILE=$AWS_CONFIG_FILE aws sso login --profile $AWS_PROFILE"
+  die "not authenticated -- $(ch_login_hint "$AWS_PROFILE")"
 fi
 
 # --- playbook selection ----------------------------------------------------

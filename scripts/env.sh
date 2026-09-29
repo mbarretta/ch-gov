@@ -12,10 +12,17 @@
 _ch_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 
 # Resolved in a bash subshell (common.sh is bash-only; this file is also
-# sourced from zsh): the auth mode, the deployment profile, and whether fips
-# is on, from state/deploy-vars.yml over ansible/group_vars/all.yml.
-_ch_vals="$(bash -c 'source "$1" >/dev/null 2>&1; printf "%s\t%s\t%s\n" "$(ch_auth_mode)" "$(ch_aws_var target_profile)" "$(ch_fips_enabled && echo true || echo false)"' _ "${_ch_root}/scripts/lib/common.sh")"
-IFS=$'\t' read -r _ch_mode _ch_profile _ch_fips <<< "$_ch_vals"
+# sourced from zsh): the auth mode, the deployment profile, whether fips is on,
+# and the mode-appropriate login hint, from state/deploy-vars.yml over
+# ansible/group_vars/all.yml. Any problem resolving is printed by common.sh on
+# stderr.
+_ch_vals="$(bash -c '
+  source "$1" >&2 || exit 1
+  mode="$(ch_auth_mode)"
+  [[ "$mode" == sso ]] && export AWS_CONFIG_FILE="$CH_PROJECT_ROOT/.aws/config"
+  printf "%s\t%s\t%s\t%s\n" "$mode" "$(ch_var aws.target_profile)" "$(ch_fips_enabled && echo true || echo false)" "$(ch_login_hint)"
+' _ "${_ch_root}/scripts/lib/common.sh")" || { unset _ch_root _ch_vals; return 1 2>/dev/null || exit 1; }
+IFS=$'\t' read -r _ch_mode _ch_profile _ch_fips _ch_hint <<< "$_ch_vals"
 
 # aws.auth_mode: sso keeps AWS config in the repo. profile mode leaves
 # AWS_CONFIG_FILE to you (or the AWS CLI default) and, with no rendered config
@@ -43,7 +50,7 @@ if command -v aws >/dev/null 2>&1; then
   if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then
     printf 'identity: %s\n' "$arn"
   else
-    printf 'not logged in -- run: AWS_CONFIG_FILE=%s aws sso login --profile %s\n' "$AWS_CONFIG_FILE" "$AWS_PROFILE"
+    printf 'not logged in -- %s\n' "$_ch_hint"
   fi
 fi
-unset _ch_root _ch_vals _ch_mode _ch_profile _ch_fips
+unset _ch_root _ch_vals _ch_mode _ch_profile _ch_fips _ch_hint
