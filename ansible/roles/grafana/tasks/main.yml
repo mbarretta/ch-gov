@@ -176,11 +176,14 @@
              .stack_outputs.GrafanaS3RoleArn }}
 
     - name: Name the plugin artifact and the ClickHouse endpoint
-      # Same construction as grafana_storage's own _gf_plugin_zip_name and
-      # grafana_clickhouse's own _gfdb_host -- independently reconstructed
-      # here (not a cross-role fact) so this role also works standalone.
+      # _gf_plugin_zip_name now reads the shared group_vars fact
+      # (grafana_plugin_zip_name) grafana_storage also reads, rather than
+      # re-templating the literal string (phase 7.6 quality finding q1).
+      # _gf_ch_host mirrors grafana_clickhouse's own _gfdb_host -- still
+      # independently reconstructed here (not a cross-role fact) so this
+      # role also works standalone.
       ansible.builtin.set_fact:
-        _gf_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
+        _gf_plugin_zip_name: "{{ grafana_plugin_zip_name }}"
         _gf_ch_host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local"
 
     - name: Read the Grafana ClickHouse user's password

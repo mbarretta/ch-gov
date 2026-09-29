@@ -190,7 +190,7 @@
 
 - name: Name the plugin artifact
   ansible.builtin.set_fact:
-    _gf_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
+    _gf_plugin_zip_name: "{{ grafana_plugin_zip_name }}"
   when: _gf_s3_role_arn is defined
 
 - name: Check whether the plugin zip is already mirrored

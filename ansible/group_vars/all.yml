@@ -362,6 +362,14 @@ langfuse_charts:
 # Chainguard's anonymous cgr.dev pulls above, dhi.io needs a real login
 # (dhi_username/dhi_token below), which image_sync performs only when one of
 # these entries is actually in play.
+# Single source of truth for the mirrored plugin zip's filename, derived
+# from versions.grafana_clickhouse_plugin_version. grafana_storage (fetch +
+# upload) and grafana (the presign initContainer) both reference this
+# instead of each re-templating the literal string (phase 7.6 quality
+# finding q1 -- a naming-convention change, e.g. adding a checksum suffix,
+# now only needs editing here).
+grafana_plugin_zip_name: "grafana-clickhouse-datasource-{{ versions.grafana_clickhouse_plugin_version }}.zip"
+
 grafana_images:
   - {repo: grafana, tag: "{{ versions.grafana_app }}", source: "dhi.io"}
   - {repo: grafana, tag: "{{ versions.grafana_app_dev }}", source: "dhi.io"}
