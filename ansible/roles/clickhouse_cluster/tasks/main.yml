@@ -347,6 +347,62 @@
   check_mode: false
   no_log: true            # stdin carries the credential
 
+- name: Wait for the cluster-count ResourceQuota to report its usage
+  # Read-only. The chart ships a ResourceQuota that counts ClickHouseCluster
+  # objects (count/clickhouseclusters.clickhouse.com: 1). On a fresh cluster
+  # kube-controller-manager does not fill in status.used for a just-created CRD
+  # for several minutes, and the API server rejects the ClickHouseCluster CR
+  # until it does. Observed on a cold start: helm reported
+  #   server-side apply failed for object <ns>/c-<name> ... is forbidden:
+  #   status unknown for quota: <release>-onprem-clickhouse-cluster
+  # right after the operator's CRD was created, and status.used appeared about
+  # 260 seconds later. Retrying at once fails the same way.
+  #
+  # This gate covers a quota that already exists (a re-run after that failure,
+  # or an upgrade). On a first install the chart has not created the quota yet,
+  # so there is nothing to wait on here; the install task below retries on that
+  # same error instead. Quotas are matched by the resource they count, not by
+  # name, because the chart derives the name from the release.
+  when: (cluster_state | default('present')) != 'absent'
+  vars:
+    _cl_count_key: count/clickhouseclusters.clickhouse.com
+    _cl_quotas: >-
+      {{ (_cl_quota_wait.stdout | default('{"items": []}') | from_json)['items']
+         | selectattr('spec.hard', 'defined')
+         | selectattr('spec.hard', 'contains', _cl_count_key) | list }}
+    _cl_quotas_unset: >-
+      {{ (_cl_quotas | rejectattr('status.used', 'defined') | list)
+         + (_cl_quotas | selectattr('status.used', 'defined')
+            | rejectattr('status.used', 'contains', _cl_count_key) | list) }}
+  block:
+    - name: Read the cluster-count ResourceQuota until status.used is populated
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - resourcequota
+          - --namespace={{ clickhouse.namespace }}
+          - -o=json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _cl_quota_wait
+      until: _cl_quota_wait.rc == 0 and (_cl_quotas_unset | length) == 0
+      retries: 72             # x 10 s = 12 minutes; the observed wait was ~4.5
+      delay: 10
+      failed_when: false      # the verdict, with a useful message, is next
+      changed_when: false
+      check_mode: false       # read-only, so it also gates under --check
+
+    - name: Fail clearly if the ResourceQuota never reported its usage
+      ansible.builtin.fail:
+        msg: >-
+          ResourceQuota {{ _cl_quotas_unset | map(attribute='metadata.name') | join(', ') | default('for ' ~ _cl_count_key, true) }}
+          in namespace {{ clickhouse.namespace }} still has no status.used for
+          {{ _cl_count_key }} after 12 minutes, so the API server would reject the
+          ClickHouseCluster. Check: kubectl get resourcequota -n {{ clickhouse.namespace }} -o yaml
+          (kubectl error, if any: {{ _cl_quota_wait.stderr | default('none') }})
+      when: _cl_quota_wait.rc != 0 or (_cl_quotas_unset | length) > 0
+
 - name: Install the ClickHouse cluster
   # Release name == cluster name. The chart derives everything from it: the
   # CR is c-<name>, the service account ch-<name>-sa, the Keeper StatefulSet
@@ -510,6 +566,15 @@
         loggerConfig:
           loggerLevel: "{{ clickhouse.keeper.log_level }}"
   register: _cl_release
+  # First install: the chart creates the quota and the ClickHouseCluster in one
+  # apply, so the gate above had nothing to wait on and helm hits the
+  # "status unknown for quota" rejection described there. Retry on that error
+  # only, for at least 10 minutes; any other failure stops at once.
+  until: >-
+    _cl_release is succeeded or
+    'status unknown for quota' not in ((_cl_release.msg | default('')) ~ (_cl_release.stderr | default('')))
+  retries: 72
+  delay: 10
   # The values carry both password hashes, so the result is hidden -- which
   # also hides the error when the install fails. Re-run with
   # -e show_secrets=true to see it (the hashes are sha256, not the passwords).
