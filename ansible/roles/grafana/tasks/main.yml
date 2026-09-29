@@ -4,19 +4,21 @@
 # 16 bucket, and the ClickHouse datasource pointed at the Step 17 user.
 #
 # A mirror of Step 15 (langfuse role) wherever the shape is the same:
-# preconditions (langfuse/tasks/main.yml:55-102), the load-balancer-before-
-# release ordering, the TLS-at-NLB dance (langfuse/tasks/main.yml:622-795),
-# the airgap assertion (langfuse/tasks/main.yml:1281-1290) and the explicit
-# teardown branch (langfuse/tasks/main.yml:308-384). Two things have no
-# precedent there:
+# preconditions (the langfuse role's preconditions block), the
+# load-balancer-before-release ordering, the TLS-at-NLB dance (its "Terminate
+# TLS at the load balancer" block), the airgap assertion (its "Assert no
+# container pulls from outside your registry" task) and the explicit
+# teardown branch (its "Teardown (langfuse_state=absent)" block). Two things
+# have no precedent there:
 #
-# 1. The ServiceAccount annotation is deliberately split into two moments
-#    (ac1): the CloudFormation lookup of the Step 16 role ARN happens early,
-#    in the preconditions block below (mirroring
-#    langfuse/tasks/main.yml:117-136), but the actual
+# 1. The ServiceAccount annotation is deliberately split into two moments:
+#    the CloudFormation lookup of the Step 16 role ARN happens early, in the
+#    preconditions block below (mirroring the langfuse role's "Look up the
+#    IRSA role ARN from the Step 13 stack" task), but the actual
 #    eks.amazonaws.com/role-arn annotation is only applied later, inside the
-#    Helm serviceAccount.annotations values block (mirroring
-#    langfuse/tasks/main.yml:880-887) -- the two are not contiguous because
+#    Helm serviceAccount.annotations values block (mirroring the IRSA wiring
+#    in the langfuse role's release values) -- the two are not contiguous
+#    because
 #    the lookup is an input the whole role needs early (it also gates
 #    whether Step 16 has run at all) while the annotation is one value among
 #    many the release itself needs.
@@ -26,13 +28,13 @@
 #    cluster, so Step 16 mirrors the pinned zip into S3 and this role loads
 #    it via two chained initContainers on the pulled 10.5.15 grafana/grafana
 #    chart (confirmed against the pulled chart, not assumed from any
-#    illustrative YAML -- ac4):
+#    illustrative YAML):
 #      - extraInitContainers is a real value (chart values.yaml:393) --
 #        a raw templated container list appended after the chart's own
 #        init containers (templates/_pod.tpl:591).
 #      - extraContainerVolumes is a real value (values.yaml:414) for a
 #        volume the initContainers need but the main container does not.
-#      - With persistence.enabled: false (the "no PVC" constraint), the
+#      - With persistence.enabled: false (no PVC by design), the
 #        chart itself creates an emptyDir volume named `storage`, mounted at
 #        /var/lib/grafana in the main container AND already available by
 #        name to any extraInitContainers entry that mounts it
@@ -41,9 +43,8 @@
 #        values.yaml:888) with no extra volume of our own.
 #    The S3 object itself is a private, GetObject-only IAM policy (Step 16's
 #    grafana-irsa.yaml.j2: s3:GetObject on plugins/* only, no ListBucket).
-#    Confirmed live (once a real, entitled DHI login existed to check with --
-#    see versions.grafana_app's comment) that neither image's hardened
-#    "runtime" tag has a shell, unzip, python, or busybox at all -- so the
+#    Neither image's hardened "runtime" tag has a shell, unzip, python, or
+#    busybox at all (see versions.grafana_app's comment) -- so the
 #    first initContainer (awscli) runs on versions.awscli_app, pinned to
 #    DHI's v1 "-dev" tag (v2 ships no "-dev"/shell-having tag on DHI at
 #    all), and the second runs on versions.grafana_app_dev, the "-dev" twin
@@ -56,22 +57,22 @@
 #    grafana/grafana's own pkg/cmd/grafana-cli/commands/install_command.go
 #    and pkg/plugins/repo/client.go: --pluginUrl is fetched with a plain Go
 #    http.Client, so it must be a real HTTP(S) URL, never a local file://
-#    path -- this is why the presigned-URL relay exists at all, not a local
-#    volume handoff of the raw zip, confirmed live too) to download and
-#    unzip it with Grafana's own internal Go zip handling -- just now with a
-#    real shell available to do the $(cat ...) substitution and (confirmed
-#    live, a second latent bug the shell fix exposed) an explicit
+#    path -- this is why the presigned-URL relay exists at all, rather than
+#    a local volume handoff of the raw zip) to download and unzip it with
+#    Grafana's own internal Go zip handling -- just now with a real shell
+#    available to do the $(cat ...) substitution and an explicit
 #    --homepath=/usr/share/grafana, since the image's own WorkingDir (/)
 #    isn't grafana's homepath and grafana cli has no other way to find it.
 #
-# datasource TLS (ac5): the grafana-clickhouse-datasource plugin's own
+# datasource TLS: the grafana-clickhouse-datasource plugin's own
 # config schema (confirmed by reading
 # github.com/grafana/clickhouse-datasource's src/types/config.ts:
 # tlsAuthWithCACert on CHConfig, tlsCACert on the secure-config side) accepts
 # jsonData.tlsAuthWithCACert / secureJsonData.tlsCACert directly, so this
 # role takes that path rather than Langfuse's NODE_EXTRA_CA_CERTS/mounted-CA-
-# Secret fallback (langfuse/tasks/main.yml:478-504 + 908-918) -- recorded
-# here as the choice actually made, per ac5.
+# Secret fallback (the langfuse role's "Write the ClickHouse CA Secret" task
+# and the extraVolumes/NODE_EXTRA_CA_CERTS values that consume it) -- recorded
+# here as the choice actually made.
 #
 # Credentials: the datasource's password and the plugin-install relay URL
 # never touch a ConfigMap. The chart's own datasources.<key>.secret
@@ -80,18 +81,18 @@
 # rendered into a Kubernetes Secret, <release>-config-secret, instead of the
 # plain ConfigMap the same key would otherwise land in) is what this role
 # relies on for the ClickHouse password -- not a second, redundant Secret of
-# our own. The admin password (ac7) DOES need a Secret of our own, because
+# our own. The admin password DOES need a Secret of our own, because
 # it must be the one Ansible generates into state/ and reuses, not whatever
 # random value the chart would generate for itself.
 #
-# No dashboard-provisioning sidecar or starter dashboards (plan constraint);
-# no PVC (persistence.enabled stays false, the chart's own default); no
-# fips_suffix anywhere in the grafana/awscli tag construction (ac6 -- a
+# No dashboard-provisioning sidecar or starter dashboards; no PVC
+# (persistence.enabled stays false, the chart's own default); no
+# fips_suffix anywhere in the grafana/awscli tag construction (a
 # documented gap, see versions.grafana_app's comment and docs/part-8-grafana.md).
 #
 # Teardown: ansible-playbook deploy.yml --tags gf-app -e grafana_state=absent
 #   Removes the NLB Service, the ACM certificate (with tls), the release and
-#   the namespace. Independent of every install-time fact (ac8): reachable
+#   the namespace. Independent of every install-time fact: reachable
 #   even when grafana.enabled is false, and tolerant of every step already
 #   being gone. state/grafana-admin-password and the TLS key/certificate
 #   stay; the ClickHouse user (Step 17), the plugin bucket and the IRSA
@@ -220,14 +221,15 @@
 
 # --- teardown ---------------------------------------------------------------
 # Here, before anything is built, the way langfuse's own teardown branch
-# does (langfuse/tasks/main.yml:308-384): with grafana_state=absent the
+# does (its "Teardown (langfuse_state=absent)" block): with
+# grafana_state=absent the
 # install flow below never runs (the facts it uses were never set), and
 # nothing here needs the ClickHouse cluster or the Step 16 stack to still
 # exist. The load balancer Service goes first, then (with tls) the ACM
 # certificate that NLB was using, then the release, then the namespace.
 # The ClickHouse user (Step 17), the plugin bucket and the IRSA stack
 # (Step 16) are deliberately left alone -- that is their own roles'
-# teardown -- and so is the admin password under state/ (ac8).
+# teardown -- and so is the admin password under state/.
 
 - name: Teardown (grafana_state=absent)
   when: (grafana_state | default('present')) == 'absent'
@@ -422,7 +424,8 @@
   when: _gf_present
 
 # --- TLS at the load balancer (skipped unless _gf_tls: grafana.load_balancer.tls, or fips: true with load_balancer.type not none) -----
-# Identical mechanism to langfuse/tasks/main.yml:622-795, renamed. The
+# Identical mechanism to the langfuse role's "Terminate TLS at the load
+# balancer" block, renamed. The
 # openssl CLI rather than community.crypto: the venv has no cryptography
 # module.
 
@@ -635,10 +638,9 @@
       resources:
         limits:   {cpu: "{{ grafana.pod.cpu }}", memory: "{{ grafana.pod.memory }}"}
         requests: {cpu: "{{ grafana.pod.cpu }}", memory: "{{ grafana.pod.memory }}"}
-      # No PVC, no persistence (plan constraint): the datasource is
-      # config-as-code below, and the plugin is reloaded by the
-      # initContainers on every pod start -- there is nothing here that
-      # needs to survive a restart.
+      # No PVC, no persistence: the datasource is config-as-code below, and
+      # the plugin is reloaded by the initContainers on every pod start --
+      # there is nothing here that needs to survive a restart.
       persistence:
         enabled: false
       # Chart default is port 80 (targetPort 3000) on the ClusterIP Service.
@@ -647,8 +649,8 @@
       # printed hint, and scripts/grafana-smoke.sh's fallback -- assumes the
       # Service itself listens on 3000, matching the NLB's own port. Set it
       # explicitly rather than leaving the mismatch for a port-forward to
-      # fail on (confirmed live: `kubectl port-forward svc/grafana 3000:3000`
-      # errors immediately when the Service has no port 3000 defined).
+      # fail on (`kubectl port-forward svc/grafana 3000:3000` errors
+      # immediately when the Service has no port 3000 defined).
       service:
         port: 3000
       # Grafana 13's core plugin catalog tries, at every startup, to
@@ -675,7 +677,8 @@
       serviceAccount:
         create: true
         annotations:
-          # The IRSA wiring (ac1, part two -- see this role's header). Pods
+          # The IRSA wiring, second half of the split described in this role's
+          # header. Pods
           # running as the chart's ServiceAccount (named after the release
           # by fullnameOverride above; Step 16's trust policy names the same
           # thing) get AWS_ROLE_ARN and a projected token from this one
@@ -691,7 +694,7 @@
         analytics:
           reporting_enabled: "{{ grafana.telemetry_enabled | bool }}"
           check_for_updates: "{{ grafana.telemetry_enabled | bool }}"
-      # The plugin (ac4 -- see this role's header for why two initContainers
+      # The plugin (see this role's header for why two initContainers
       # and why neither assumes unzip/python on the DHI awscli image).
       # gf-plugin-url is init-container-only: the main container never sees
       # it (extraContainerVolumes, confirmed in the pulled chart's
@@ -731,8 +734,8 @@
           # needs no ~/.aws/config (credentials come from AWS_ROLE_ARN and
           # the projected token via IRSA), but botocore still tries to
           # write its own STS AssumeRoleWithWebIdentity token cache under
-          # $HOME/.aws/cli/cache/ regardless -- confirmed live: with $HOME
-          # unset, uid 472 has no /etc/passwd entry so it falls back to
+          # $HOME/.aws/cli/cache/ regardless: with
+          # $HOME unset, uid 472 has no /etc/passwd entry so it falls back to
           # HOME=/, and / is read-only to this uid, failing with
           # "[Errno 13] Permission denied: '/.aws'" before presign ever
           # runs. HOME=/tmp (writable, world-writable tmpfs) sidesteps it.
@@ -746,9 +749,9 @@
             - {name: gf-plugin-url, mountPath: /gf-plugin}
         - name: gf-plugin-install
           # The "-dev" variant of the same grafana image/version -- not
-          # runtime, since only "-dev" has a shell (confirmed live: DHI's
-          # hardened "runtime" tag, what the main container below still
-          # uses, has none), needed for the $(cat ...) substitution below.
+          # runtime, since only "-dev" has a shell (DHI's hardened
+          # "runtime" tag, what the main container below still uses, has
+          # none), needed for the $(cat ...) substitution below.
           # Keeps the pod's default securityContext (uid 472, the image's
           # own grafana user) rather than overriding it.
           image: "{{ target_registry }}/grafana:{{ versions.grafana_app_dev }}"
@@ -762,10 +765,10 @@
           volumeMounts:
             - {name: gf-plugin-url, mountPath: /gf-plugin, readOnly: true}
             - {name: storage, mountPath: /var/lib/grafana}
-      # The ClickHouse datasource (ac5, ac7): config-as-code, not the
-      # dashboard/datasource sidecar (plan constraint: no sidecar). uid:
-      # clickhouse is fixed -- scripts/grafana-smoke.sh (task 7) and the
-      # live-verification task both depend on it. The whole entry carries a
+      # The ClickHouse datasource: config-as-code, not the
+      # dashboard/datasource sidecar (no sidecar). uid:
+      # clickhouse is fixed -- scripts/grafana-smoke.sh depends on it. The
+      # whole entry carries a
       # `secret:` sub-key so the pulled chart renders it into its own
       # Secret (<release>-config-secret) instead of the plain ConfigMap
       # every other provisioning key here would land in (confirmed in
@@ -900,7 +903,7 @@
 # --- prove it -----------------------------------------------------------------
 
 - name: List every container image in the namespace
-  # Init containers too -- ac6 covers the plugin initContainers as well as
+  # Init containers too -- the plugin initContainers pull images as well as
   # the main container.
   ansible.builtin.command:
     argv:

@@ -1,6 +1,6 @@
 ---
 # Step 17: the read-only ClickHouse user Grafana's datasource (Step 18) and
-# scripts/grafana-smoke.sh (task 7) both authenticate as.
+# scripts/grafana-smoke.sh both authenticate as.
 #
 # Unlike Step 14's Langfuse user, this role creates no database: the whole
 # point of Grafana here is ad-hoc exploration across whatever exists in the
@@ -14,14 +14,14 @@
 # langfuse.* automatically when Langfuse is on, with no separate grant.
 #
 # Every statement runs through `kubectl exec -i` in one server pod, mirroring
-# langfuse_clickhouse/tasks/main.yml:48-62 exactly: the admin password
+# _lfdb_sh in langfuse_clickhouse/tasks/main.yml exactly: the admin password
 # travels on stdin, never on argv, into a shell that reads it as the first
 # line and passes it to clickhouse-client. (That inner shell still hands the
 # password to clickhouse-client's own --password argument inside the pod --
-# a real gap langfuse_clickhouse's own header comment already flags, and
-# this plan's deferral ledger (d1 / plan-review pr7) carries a fix spanning
-# both roles to a dedicated hardening pass rather than diverging one-sided
-# here. This role deliberately mirrors the existing pattern as-is.) The user
+# a real gap langfuse_clickhouse's own header comment already flags. The fix
+# spans both roles, so it belongs in a dedicated hardening pass rather than
+# diverging one-sided here. This role deliberately mirrors the existing
+# pattern as-is.) The user
 # is created `IDENTIFIED WITH sha256_hash`, so the SQL carries the sha256 of
 # the Grafana ClickHouse password and the password itself only ever exists
 # in state/ (where Step 18 reads it into the datasource's secureJsonData)
@@ -32,8 +32,9 @@
 #
 # Idempotency: system.users does not expose password hashes (auth_params is
 # `{}` for password-based methods), so "is the stored hash still ours?" is
-# answered the same way Step 14 answers it (mirror
-# langfuse_clickhouse/tasks/main.yml:327-345): authenticate as the grafana
+# answered the same way Step 14 answers it (mirror the "Check whether the
+# stored hash is still ours" task in langfuse_clickhouse/tasks/main.yml):
+# authenticate as the grafana
 # user, over HTTP, with the password from state/. Auth succeeds: nothing to
 # do. Auth fails: ALTER USER to the current hash.
 #
@@ -43,7 +44,7 @@
 # Cost: nothing. A user in ClickHouse Private is metadata in Keeper.
 #
 # Teardown: ansible-playbook deploy.yml --tags gf-db -e grafana_db_state=absent
-#   DROP USER IF EXISTS grafana only (ac4) -- no database was ever created
+#   DROP USER IF EXISTS grafana only -- no database was ever created
 #   for Grafana, so there is nothing to DROP DATABASE.
 
 - name: Name the pieces
@@ -54,17 +55,17 @@
     _gfdb_host: "c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc"
     _gfdb_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
     # $0 = user, $1 = query; the password is the first line of stdin, exactly
-    # as langfuse_clickhouse/tasks/main.yml:58-62 (ac1).
+    # as _lfdb_sh in langfuse_clickhouse/tasks/main.yml.
     _gfdb_sh: >-
       IFS= read -r pw;
       exec clickhouse-client --user "$0" --password "$pw"
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
     # $0 = user, $1 = host, $2 = attempts; mirrors
-    # langfuse_clickhouse/tasks/main.yml:100-128 exactly, including the
+    # _lfdb_http_sh in langfuse_clickhouse/tasks/main.yml exactly, including the
     # fips-aware CA-trust and OpenSSL-provider workarounds (see that role's
     # header comment for the two wget/FIPS defects this works around) --
-    # this role's HTTP idempotency check (ac2) and final proof run through
+    # this role's HTTP idempotency check and final proof run through
     # the same ClickHouse HTTP listener that fips: true relocates.
     _gfdb_http_sh: |
       IFS= read -r pw
@@ -161,7 +162,7 @@
     - name: Generate (or reuse) the Grafana ClickHouse password
       # The password lookup writes the file on first use and reads it back on
       # every run after, so the hash below is stable across runs. 32
-      # alphanumerics, as for the admin and Langfuse passwords (ac5).
+      # alphanumerics, as for the admin and Langfuse passwords.
       ansible.builtin.set_fact:
         _gfdb_pw: "{{ lookup('ansible.builtin.password', grafana_state_files.clickhouse_password_file ~ ' length=32 chars=ascii_letters,digits') }}"
       no_log: "{{ not (show_secrets | default(false) | bool) }}"
@@ -187,7 +188,7 @@
         _gfdb_ca_stdin: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) if fips else '' }}"
 
 # --- teardown ---------------------------------------------------------------
-# ac4: DROP USER IF EXISTS only -- no database was ever created here.
+# DROP USER IF EXISTS only -- no database was ever created here.
 
 - name: Teardown (grafana_db_state=absent)
   when: (grafana_db_state | default('present')) == 'absent'
@@ -241,7 +242,7 @@
       no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
     - name: Drop the Grafana ClickHouse user
-      # ac4: no DROP DATABASE anywhere in this role -- one was never created.
+      # No DROP DATABASE anywhere in this role -- one was never created.
       ansible.builtin.command:
         argv: "{{ _gfdb_exec + [_gfdb_td_pods.stdout_lines | first, '--', 'sh', '-c', _gfdb_sh, clickhouse.admin_username, _q] }}"
         stdin: "{{ _gfdb_admin_pw }}\n"
@@ -257,7 +258,7 @@
       ansible.builtin.debug:
         msg:
           - "user {{ _gfdb_user }} removed from ClickHouse Private"
-          - "no database was ever created for Grafana (ac4) -- nothing else to drop"
+          - "no database was ever created for Grafana -- nothing else to drop"
           - "{{ grafana_state_files.clickhouse_password_file | realpath }} is kept; the next --tags gf-db reuses it if the user is recreated"
 
     - name: Stop here when tearing down
@@ -287,7 +288,8 @@
 
 - name: Check whether the stored hash is still ours
   # One attempt, as the grafana user, with the password from state/. Mirrors
-  # langfuse_clickhouse/tasks/main.yml:327-345 (ac2): a failure here is the
+  # the "Check whether the stored hash is still ours" task in
+  # langfuse_clickhouse/tasks/main.yml: a failure here is the
   # normal outcome when the password file was regenerated or the user
   # predates this role, and is what triggers the ALTER USER below.
   ansible.builtin.command:
@@ -309,7 +311,7 @@
 - name: Create the user
   # $0 = admin user, $1 = user, $2 = sha256 hex, $3 = rotate|keep. The check
   # runs server-side so the marker says what actually happened. No database
-  # anywhere in this task (ac4): this role's whole point is Grafana reading
+  # anywhere in this task: this role's whole point is Grafana reading
   # across whatever exists, so there is nothing to CREATE DATABASE.
   ansible.builtin.command:
     argv: "{{ _gfdb_exec + [_gfdb_pod, '--', 'sh', '-c', _gfdb_ensure_sh, clickhouse.admin_username, _gfdb_user, _gfdb_pw_hash, ('rotate' if _gfdb_rotate | bool else 'keep')] }}"
@@ -342,11 +344,11 @@
 - name: Grant full read access -- every real database, and system.* short of zookeeper
   # NOT literally GRANT SELECT ON *.* TO grafana: this operator's own
   # default_role revokes SELECT ON system.zookeeper from the admin itself
-  # (REVOKE SELECT ON system.zookeeper FROM default_role -- confirmed live via
+  # (REVOKE SELECT ON system.zookeeper FROM default_role -- visible in
   # SHOW GRANTS FOR default_role), a deliberate hardening of Keeper internals.
   # ClickHouse's GRANT has no "everything except one table" syntax (no
-  # EXCEPT/exclusion clause on the target list -- confirmed live: both forms
-  # tried return SYNTAX_ERROR), and *.* itself requires the grantor to hold
+  # EXCEPT/exclusion clause on the target list -- both forms return
+  # SYNTAX_ERROR), and *.* itself requires the grantor to hold
   # WITH GRANT OPTION on every object it matches, so it fails outright the
   # moment it reaches zookeeper. So this grants the same effective scope by
   # construction instead: every real database (skipping the two pseudo ones)
@@ -425,7 +427,7 @@
     fail_msg: "SHOW GRANTS FOR {{ _gfdb_user }} does not show the expected per-database/system-table SELECT grants (or unexpectedly includes zookeeper): {{ _gfdb_grants.stdout_lines }}"
 
 - name: Connect as the Grafana user over HTTP
-  # The path Step 18's datasource and scripts/grafana-smoke.sh (task 7) both
+  # The path Step 18's datasource and scripts/grafana-smoke.sh both
   # take: user + password over HTTP(S) through the server-any Service. A few
   # attempts, because a hash rotated a moment ago reaches the other replicas
   # through Keeper with a small lag.
