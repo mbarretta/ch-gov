@@ -12,18 +12,6 @@ scripts/up.sh                     # Steps 1-15 in order; --from lb if the cluste
 scripts/langfuse-smoke.sh         # post a trace, read it back from ClickHouse
 ```
 
-> **Status: run end to end on 2026-09-11** against the real stack, twice
-> (once from a running cluster, once from nodes up through the smoke test in
-> one `up.sh`). Three defects in the roles and one in the demo script showed
-> up only live; each is described below at the point where you would meet
-> it. The commands, the outputs and the digests quoted here come from
-> [`docs/part-6-langfuse-live-run.md`](part-6-langfuse-live-run.md), which is
-> the evidence for every claim of the form "this works".
->
-> **Run again on 2026-09-14 with TLS on** (§9). One more defect, this time
-> in the EKS cloud controller rather than in a role; the same file holds
-> that run's record.
-
 ---
 
 ## 1. What Langfuse is, in one paragraph
@@ -722,9 +710,9 @@ you are.
 
 ### What the 2026-09-14 run recorded
 
-Everything below is from the second live run in
-[`docs/part-6-langfuse-live-run.md`](part-6-langfuse-live-run.md): `tls:
-true`, `port: 443`, an `internal` NLB, brought up with `scripts/up.sh --from nodes`.
+Everything below shows a run with `tls: true`, `port: 443` and an `internal`
+NLB, brought up with `scripts/up.sh --from nodes`.
+
 With the listener fix in place, `--tags lf-app` ended:
 
 ```
@@ -1084,21 +1072,7 @@ And in `state/`, alongside the ClickHouse files from Part 0 §7:
 
 The same rule as Part 0: lose `state/` and you lose these. A `down.sh` /
 `up.sh --from nodes` cycle reuses them, so the rebuilt Langfuse accepts the
-same login and API keys — the live run confirmed that.
-
-## 15. Where the evidence is
-
-Every output quoted in this Part is taken from
-[`docs/part-6-langfuse-live-run.md`](part-6-langfuse-live-run.md), the
-record of two runs. The 2026-09-11 run: disabled mode, the ECR digests, the
-IRSA and grant outputs, the three `lf-app` attempts and their fixes, the
-smoke test before and after its rewrite, idempotency, the down/up cycle with
-the switch off, and check mode. The 2026-09-14 run, with `tls: true`: the
-listener that stayed `TCP` and the controller events behind it, the fix, the
-certificate and annotations, the https proof from inside the VPC, the
-`changed=0` re-run, and the teardown with the ACM deletion's retries. Where
-this Part and the design notes disagree — the Secret name, `GRANT CLUSTER`,
-`events_core`, who switches the listener — the live run is what happened.
+same login and API keys.
 
 # Checkpoint
 

@@ -14,15 +14,6 @@ scripts/up.sh                     # Steps 1-18 in order; --from lb if the cluste
 scripts/grafana-smoke.sh          # check the datasource, run a real query through it
 ```
 
-> **Status: run end to end on 2026-09-28** against the real stack, twice
-> (once from nodes through a from-scratch install with Langfuse also on, to
-> exercise the cross-database grant). Four defects showed up only live, all
-> in the Grafana role or its supporting Ansible; each is described below at
-> the point where you would meet it. The commands, the outputs and the
-> digests quoted here come from
-> [`docs/part-8-grafana-live-run.md`](part-8-grafana-live-run.md), which is
-> the evidence for every claim of the form "this works".
-
 ---
 
 ## 1. What Grafana is, in one paragraph
@@ -134,8 +125,6 @@ artifact exactly like Langfuse's chart):
 | `awscli` | `1.46.1-dev` | The presign initContainer (§6). DHI's `awscli` **v2** line ships no `-dev`/shell-having tag at all — confirmed against the live catalog — so this pins v1 instead, whose `s3 presign` takes the same flags. |
 | `helm/grafana` | `10.5.15` | The chart, from `grafana.github.io/helm-charts`. Upstream froze this chart on 2026-01-30 in favor of `grafana-community/helm-charts`, but the pinned version still installs cleanly. |
 
-Digests from the live run are in
-[`docs/part-8-grafana-live-run.md` §2](part-8-grafana-live-run.md#2-ecr-tags-and-digests).
 **Neither `grafana_app` nor `awscli_app` carries a `fips_suffix`** — a
 deliberate, documented gap. DHI requires an entitled login to even resolve
 its own tags, so the versions pinned here are a best-available proxy against
@@ -290,9 +279,8 @@ surfaced only once the shell existed: `grafana cli` needed an explicit
 `--homepath=/usr/share/grafana` (the image's own working directory isn't
 Grafana's homepath), and the presign container needed `HOME=/tmp` (botocore
 tries to cache an STS token under `$HOME/.aws/` even under IRSA, and uid
-472's default `HOME` resolves somewhere unwritable). Full detail, including
-the diagnostic probes that ruled out smuggling in a static shell, is in
-[`docs/part-8-grafana-live-run.md` §4](part-8-grafana-live-run.md#4-application).
+472's default `HOME` resolves somewhere unwritable). Smuggling in a
+static shell instead was ruled out.
 
 ### The datasource, and the FIPS CA-trust wrinkle
 
@@ -431,9 +419,7 @@ repo writes, ends in a trailing newline, and that byte landed inside the
 quoted config value and broke curl's config parser — surfacing only as an
 empty HTTP status, because the script's own error handling swallows curl's
 stderr. The fix, `tr -d '\n'` instead of `cat`, still keeps the secret off
-argv and out of any shell variable. Full detail, including the `0`-vs-`2`
-non-zero cross-database proof, is in
-[`docs/part-8-grafana-live-run.md` §5](part-8-grafana-live-run.md#5-smoke-test).
+argv and out of any shell variable.
 
 ## 11. Idempotency and check mode
 
@@ -525,29 +511,12 @@ And in `state/`, alongside the ClickHouse and Langfuse files:
 
 The same rule as Part 0: lose `state/` and you lose these. A `down.sh` /
 `up.sh --from nodes` cycle reuses them, so the rebuilt Grafana accepts the
-same admin login and the same ClickHouse credential — the live run's full
-round trip confirmed this, and confirmed `git diff` on `all.yml` shows no
-drift from the committed `enabled: false` afterward.
-
-## 15. Where the evidence is
-
-Every output quoted in this Part is taken from
-[`docs/part-8-grafana-live-run.md`](part-8-grafana-live-run.md), the record
-of the 2026-09-28 run: the disabled-mode round trip, the ECR digests, the
-Step 16/17/18 outputs including the grant-scope defect and its fix, the
-three `gf-app` install attempts and the four defects they found (two
-shell-less initContainers, a missing `--homepath`, a botocore `HOME`
-failure, a Service port mismatch, and `/tmp` permission noise), the smoke
-test before and after its own curl-config bug, idempotency, the isolated
-storage teardown/rebuild, and the full down/up round trip with both
-optional capabilities on. Where this Part and the original design
-disagree — the exact grant statement, which images need `-dev` tags — the
-live run is what happened.
+same admin login and the same ClickHouse credential.
 
 # Checkpoint
 
 - [x] `grafana.enabled: false` (the default) changes nothing: no artifact mirrored, `--tags grafana` a no-op, full down/up round trip shows `grep -ci grafana` = 0
-- [x] Step 2 mirrors three DHI images (`grafana`, `grafana-dev`, `awscli-dev`) and pushes the chart; digests recorded in the live-run doc
+- [x] Step 2 mirrors three DHI images (`grafana`, `grafana-dev`, `awscli-dev`) and pushes the chart
 - [x] Step 16: plugin-mirror bucket encrypted and blocked; IRSA role scoped to `s3:GetObject` on `plugins/*` only; bucket (deliberately, unlike Langfuse's) deleted on teardown
 - [x] Step 17: read-only user with per-database + per-system-table grants (not a literal wildcard -- `system.zookeeper` stays revoked); SQL carries a hash, password on stdin; second run `changed=0`
 - [x] Step 18: two chained initContainers load the plugin via a presigned S3 URL; both DHI images needed their `-dev` tag for a shell; airgap assertion covers both initContainers and the main container; datasource provisioned as config-as-code with uid `clickhouse`, secret-backed

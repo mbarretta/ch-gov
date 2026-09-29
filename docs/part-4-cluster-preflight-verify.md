@@ -11,14 +11,10 @@ scripts/play.sh --tags preflight    # Step 10
 scripts/play.sh --tags verify       # Step 11
 ```
 
-> **Status: run end to end on 2026-09-11.** All three steps pass and Step 9
-> is idempotent (`changed=0` on re-run). Getting there took five attempts at
-> Step 9 and four at Step 11, each of which found something the tutorial does
-> not mention; the traps are recorded below with their real error text, since
-> the error is what you will search for. Cost while running: ~$2.32/hr, all of
-> it node groups. Stop the meter with
-> `scripts/play.sh --tags nodes -e nodegroups_state=absent` — everything in
-> Kubernetes survives (as Pending pods) and comes back when nodes do.
+> **Cost while running:** ~$2.32/hr, all of it node groups. Stop the meter
+> with `scripts/play.sh --tags nodes -e nodegroups_state=absent` --
+> everything in Kubernetes survives (as Pending pods) and comes back when
+> nodes do.
 
 ---
 
