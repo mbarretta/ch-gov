@@ -344,11 +344,11 @@
 - name: Grant full read access -- every real database, and system.* short of zookeeper
   # NOT literally GRANT SELECT ON *.* TO grafana: this operator's own
   # default_role revokes SELECT ON system.zookeeper from the admin itself
-  # (REVOKE SELECT ON system.zookeeper FROM default_role -- confirmed live via
+  # (REVOKE SELECT ON system.zookeeper FROM default_role -- visible in
   # SHOW GRANTS FOR default_role), a deliberate hardening of Keeper internals.
   # ClickHouse's GRANT has no "everything except one table" syntax (no
-  # EXCEPT/exclusion clause on the target list -- confirmed live: both forms
-  # tried return SYNTAX_ERROR), and *.* itself requires the grantor to hold
+  # EXCEPT/exclusion clause on the target list -- both forms return
+  # SYNTAX_ERROR), and *.* itself requires the grantor to hold
   # WITH GRANT OPTION on every object it matches, so it fails outright the
   # moment it reaches zookeeper. So this grants the same effective scope by
   # construction instead: every real database (skipping the two pseudo ones)
