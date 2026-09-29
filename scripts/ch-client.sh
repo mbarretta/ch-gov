@@ -47,7 +47,7 @@ else die "clickhouse-client not installed: brew install clickhouse"; fi
 # 4a-spike's findings) -- 9440 is ClickHouse's own tcp_port_secure default.
 CH_PORT=9000
 SECURE_ARGS=()
-if ch_fips; then
+if ch_fips_enabled; then
   CH_PORT=9440
   ch_tls_client_config
   SECURE_ARGS=(--secure --config-file "$CH_TLS_CLIENT_CFG")
