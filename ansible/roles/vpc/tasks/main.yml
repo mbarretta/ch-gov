@@ -69,9 +69,7 @@
       PrivateSubnetCidrs: "{{ infrastructure.private_subnet_cidrs | join(',') }}"
       NatMode: "{{ infrastructure.nat_mode }}"
       EksClusterName: "{{ infrastructure.eks_cluster_name }}"
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   register: _vpc_stack
 
 - name: Record stack outputs for later steps

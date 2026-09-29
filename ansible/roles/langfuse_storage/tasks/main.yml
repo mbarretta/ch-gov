@@ -42,7 +42,7 @@
       ansible.builtin.set_fact:
         _lf_oidc_issuer_host: "{{ _lf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
         _lf_oidc_provider_arn: >-
-          arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+          arn:{{ aws.partition }}:iam::{{ aws.target_account_id }}:oidc-provider/{{
             _lf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
 
     - name: Confirm the OIDC provider is registered in IAM
@@ -110,9 +110,7 @@
       BucketName: "{{ langfuse.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   register: _lf_irsa_stack
 
 - name: Record the role and key ARN
@@ -164,9 +162,7 @@
     # itself (hence s3:DeleteObject below); versioning would retain every
     # deleted object indefinitely and quietly multiply storage cost.
     versioning: false
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   when: _lf_s3_role_arn is defined
 
 - name: Report the bucket

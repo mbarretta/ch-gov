@@ -49,7 +49,7 @@
       ansible.builtin.set_fact:
         _gf_oidc_issuer_host: "{{ _gf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}"
         _gf_oidc_provider_arn: >-
-          arn:aws:iam::{{ aws.target_account_id }}:oidc-provider/{{
+          arn:{{ aws.partition }}:iam::{{ aws.target_account_id }}:oidc-provider/{{
             _gf_oidc_issuer.stdout | trim | regex_replace('^https://', '') }}
 
     - name: Confirm the OIDC provider is registered in IAM
@@ -129,9 +129,7 @@
       BucketName: "{{ grafana.bucket_name }}"
     capabilities:
       - CAPABILITY_IAM
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   register: _gf_irsa_stack
 
 - name: Record the role ARN
@@ -165,9 +163,7 @@
       restrict_public_buckets: true
     # Versioning stays OFF: one object, replaced in place on a version bump.
     versioning: false
-    tags:
-      Project: clickhouse-private
-      ManagedBy: ansible
+    tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-private', 'ManagedBy': 'ansible'}) }}"
   when: _gf_s3_role_arn is defined
 
 - name: Report the bucket and IRSA wiring

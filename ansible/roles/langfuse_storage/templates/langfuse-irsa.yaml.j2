@@ -72,8 +72,8 @@ Resources:
                   - s3:ListBucket
                   - s3:DeleteObject
                 Resource:
-                  - !Sub 'arn:aws:s3:::${BucketName}'
-                  - !Sub 'arn:aws:s3:::${BucketName}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${BucketName}/*'
 {% if fips %}
               # FIPS hardening Phase 2: the bucket's default encryption below
               # becomes aws:kms (see langfuse_storage/tasks/main.yml), backed
@@ -121,7 +121,7 @@ Resources:
           - Sid: EnableRootAccountAdmin
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
       Tags:

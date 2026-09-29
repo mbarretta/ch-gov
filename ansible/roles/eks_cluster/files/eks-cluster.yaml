@@ -67,7 +67,7 @@ Resources:
               Service: eks.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKSClusterPolicy'
 
   # =========================================================================
   # Customer-managed KMS key for EKS Secrets envelope encryption
@@ -96,7 +96,7 @@ Resources:
           - Sid: EnableRootAccountAdmin
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
           # EKS calls these on the cluster role's behalf to wrap/unwrap
