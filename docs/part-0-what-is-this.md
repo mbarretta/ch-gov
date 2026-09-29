@@ -479,7 +479,7 @@ anyone noticing.
 | **StatefulSet** | The Kubernetes object that gives pods stable names and, optionally, disks |
 | **NLB** | AWS Network Load Balancer. Layer 4, one hostname, three healthy targets |
 | **Preflight** | ClickHouse's checklist run against the live cluster before you trust it |
-| **FIPS** | The US federal cryptography standard. The Government build uses FIPS-validated libraries, which forces x86_64 |
+| **FIPS** | The US federal cryptography standard. ClickHouse states that the Government build uses FIPS-validated libraries (a claim about the product, not one this kit certifies), which forces x86_64 |
 | **Langfuse** | An open-source tool that records what an application asked a language model and what it answered. Optional, and it stores its traces in ClickHouse |
 | **Deploy / operate** | Deploy: build the infrastructure and install the software (`scripts/up.sh`). Operate: connect, check health, stop, restart and tear down (section 8) |
 | **DHI** | Docker Hardened Images, a paid catalog that needs a login. Only Grafana's images come from it |

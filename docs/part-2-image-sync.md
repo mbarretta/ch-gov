@@ -5,7 +5,7 @@
 > - How the ECR pull role and the source-registry grant let your account read ClickHouse's images, and what the playbook checks before it copies anything (Step 1).
 > - How container images and Helm charts make one hop into your own registry with `skopeo`, why the copy uses `--all`, and what the `fips` switch changes (Step 2).
 > - What Steps 3 to 5 build (the VPC, the EKS control plane, and three node groups), why each design choice was made, and where the money starts.
-> - How to check each step yourself, and how to fix the failures people meet most often.
+> - How to check each step yourself, and how to fix the common failures.
 >
 > **Run it:** `scripts/up.sh` runs every step in order and asks before it starts. To run one step at a time while you read, see "Advanced: run individual steps" below. Steps 1 and 2 need no cluster and no compute. Step 3 is where AWS charges start, and Step 5 is where they become significant.
 
