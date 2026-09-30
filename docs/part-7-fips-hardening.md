@@ -48,9 +48,11 @@ In `profile` mode nothing is rendered, because the kit uses your own AWS configu
 | ECR image pulls (`target_registry`) | Yes | The `-fips` registry hostname |
 | ClickHouse's own in-pod S3 client (its native S3-disk backend, with its own IRSA) | Yes | `s3_endpoint`, wired into the chart's S3 disk config |
 | Langfuse's own in-pod S3 client (its own separate IRSA, for object storage) | **No** | Not wired. It still targets the standard S3 endpoint under `fips: true` |
-| Any other pod-side AWS SDK call outside the two paths above | **No**, unless independently configured | No blanket coverage exists |
+| Cognito's hosted UI and token endpoints, reached by the browser and the Langfuse pods (only with `sso.enabled`) | **No** | Not wired. They use the standard Cognito endpoints |
+| ClickHouse's fetch of Cognito's JWKS document (only with `sso.enabled` and `sso.clickhouse_jwt.enabled`) | **No** | Not wired. The server's own TLS stack requests the JWKS URL, and `use_fips_endpoint` does not reach it |
+| Any other pod-side AWS SDK call outside the paths above | **No**, unless independently configured | No blanket coverage exists |
 
-The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). VPC interface endpoints for ECR, STS, and CloudWatch, which would let an airgapped deployment drop the NAT gateway (present only in this learning environment), are outside what the kit builds. See [Scope and boundaries](limitations.md).
+The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). The two Cognito rows are named gaps in the same way: they apply only when the optional single sign-on capability is switched on, and in AWS GovCloud the Cognito endpoints are FIPS-only per AWS, which [Part 9](part-9-sso.md) section 10 covers. The controller's own calls that create the Cognito stack are covered by the first row. VPC interface endpoints for ECR, STS, and CloudWatch, which would let an airgapped deployment drop the NAT gateway (present only in this learning environment), are outside what the kit builds. See [Scope and boundaries](limitations.md).
 
 **Self-check**
 
@@ -65,10 +67,11 @@ grep -n 's3_endpoint' ansible/roles/clickhouse_cluster/tasks/main.yml           
 
 Start any `scripts/play.sh` run and read the opening banner. It should include `aws api endpoints: FIPS-validated (use_fips_endpoint)`.
 
-Two checks are still yours to make, because nothing has run them against a real cluster:
+These checks are yours to make on your own cluster:
 
 - Confirm that the endpoint hostnames your calls reach are FIPS ones. Run `aws sts get-caller-identity --debug 2>&1 | grep -i fips` and look for an `sts-fips` hostname.
 - Confirm the Langfuse gap for yourself. Langfuse's pods use the standard S3 endpoint, which is the expected result under `fips: true`.
+- If single sign-on is on, confirm the Cognito gap for yourself. `jq -r .jwks_uri state/sso-cognito-outputs.json` prints the JWKS URL ClickHouse fetches, and its hostname is the standard Cognito one in a commercial region.
 
 ---
 
