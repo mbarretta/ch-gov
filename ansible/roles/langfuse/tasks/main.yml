@@ -143,6 +143,107 @@
         _lf_admin_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
       no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
+    # --- sign-in through Cognito (only with sso.enabled and sso.langfuse.enabled) ---
+    # The Cognito user pool and the Langfuse app client come from Step 6b
+    # (--tags sso-idp), which leaves their details under state/
+    # (sso_state_files). They are read from disk here, not from facts, so this
+    # role works on its own with --tags lf-app. Everything below is skipped
+    # when SSO is off, and then nothing Langfuse renders differs from a
+    # deployment without SSO.
+
+    - name: Decide whether Langfuse signs in through Cognito
+      ansible.builtin.set_fact:
+        _lf_sso: "{{ (sso.enabled | bool) and (sso.langfuse.enabled | bool) }}"
+
+    - name: Validate the Langfuse roles given to new SSO users
+      ansible.builtin.assert:
+        that:
+          - sso.langfuse.default_org_role in _lf_sso_roles
+          - sso.langfuse.default_project_role in _lf_sso_roles
+        fail_msg: "sso.langfuse.default_org_role and default_project_role must each be one of {{ _lf_sso_roles | join(', ') }} (got '{{ sso.langfuse.default_org_role }}' and '{{ sso.langfuse.default_project_role }}')"
+      vars:
+        _lf_sso_roles: [OWNER, ADMIN, MEMBER, VIEWER, NONE]
+      when: _lf_sso
+
+    - name: The redirect address must be the one Cognito was given
+      # NextAuth sends the browser back to NEXTAUTH_URL, and Step 6b registered
+      # langfuse.url as the callback base with Cognito, which accepts https only.
+      ansible.builtin.assert:
+        that: langfuse.url is match('^https://')
+        fail_msg: "sso.langfuse.enabled needs langfuse.url set to the https address people use (got '{{ langfuse.url }}'); Cognito accepts only https callbacks. Set it, then run: ansible-playbook deploy.yml --tags sso-idp,lf-app"
+      when: _lf_sso
+
+    - name: Look for the Cognito outputs and client secret Step 6b wrote
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ sso_state_files.outputs_file }}"
+        - "{{ sso_state_files.client_secret_file }}"
+      register: _lf_sso_files
+      check_mode: false
+      when: _lf_sso
+
+    - name: Fail clearly if Step 6b has not run
+      ansible.builtin.assert:
+        that: _lf_sso_files.results | map(attribute='stat.exists') | min
+        fail_msg: >-
+          {{ sso_state_files.outputs_file }} or {{ sso_state_files.client_secret_file }}
+          is missing. Run: ansible-playbook deploy.yml --tags sso-idp
+      when: _lf_sso
+
+    - name: Read the Cognito outputs
+      # No secret in this file; the client secret has its own, read below.
+      ansible.builtin.set_fact:
+        _lf_sso_out: "{{ lookup('ansible.builtin.file', sso_state_files.outputs_file) | from_json }}"
+      when: _lf_sso
+
+    - name: Fail clearly if the Langfuse client is not in the outputs
+      ansible.builtin.assert:
+        that:
+          - (_lf_sso_out.issuer | default('')) | length > 0
+          - (_lf_sso_out.langfuse_client_id | default('')) | length > 0
+        fail_msg: "{{ sso_state_files.outputs_file }} has no issuer or langfuse_client_id; the Langfuse app client is created only when sso.langfuse.enabled and langfuse.enabled are both true. Run: ansible-playbook deploy.yml --tags sso-idp"
+      when: _lf_sso
+
+    - name: Assemble the SSO environment for the web and worker pods
+      # AUTH_COGNITO_*: Langfuse's built-in Cognito provider. Account linking
+      # lets a person who already has an email/password user (the seeded admin
+      # included) sign in through Cognito with the same address and keep their
+      # data. LANGFUSE_DEFAULT_*: where a user's first sign-in puts them --
+      # the seeded org and project, at the configured roles -- so nobody needs
+      # an invitation. The two password/domain switches are added only when
+      # configured, so an unset option leaves Langfuse's own default alone.
+      ansible.builtin.set_fact:
+        _lf_sso_env: >-
+          {{ {
+            'AUTH_COGNITO_CLIENT_ID': _lf_sso_out.langfuse_client_id,
+            'AUTH_COGNITO_CLIENT_SECRET': lookup('ansible.builtin.file', sso_state_files.client_secret_file) | trim,
+            'AUTH_COGNITO_ISSUER': _lf_sso_out.issuer,
+            'AUTH_COGNITO_ALLOW_ACCOUNT_LINKING': 'true',
+            'LANGFUSE_DEFAULT_ORG_ID': langfuse.init.org_id,
+            'LANGFUSE_DEFAULT_ORG_ROLE': sso.langfuse.default_org_role,
+            'LANGFUSE_DEFAULT_PROJECT_ID': langfuse.init.project_id,
+            'LANGFUSE_DEFAULT_PROJECT_ROLE': sso.langfuse.default_project_role
+          } | combine(
+            {'AUTH_DISABLE_USERNAME_PASSWORD': 'true'} if (sso.langfuse.disable_password_login | bool) else {}
+          ) | combine(
+            {'AUTH_DOMAINS_WITH_SSO_ENFORCEMENT': sso.langfuse.enforce_domains | join(',')} if sso.langfuse.enforce_domains | length > 0 else {}
+          ) }}
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+      when: _lf_sso
+
+    - name: Fingerprint the SSO environment
+      # Environment read through envFrom is fixed when a pod starts, so a
+      # changed Secret alone restarts nothing. This digest goes into the pods'
+      # own environment (additionalEnv in the release below): when the Secret's
+      # content changes the pod template changes with it, and the same helm
+      # upgrade rolls web and worker. A digest of a random client secret does
+      # not reveal it.
+      ansible.builtin.set_fact:
+        _lf_sso_digest: "{{ _lf_sso_env | to_json(sort_keys=true) | hash('sha256') }}"
+      no_log: "{{ not (show_secrets | default(false) | bool) }}"
+      when: _lf_sso
+
     # --- generated secrets -----------------------------------------------------
 
     - name: Ensure the state directory exists
@@ -476,6 +577,27 @@
         LANGFUSE_INIT_USER_NAME: "{{ langfuse.init.user_name | b64encode }}"
         LANGFUSE_INIT_USER_PASSWORD: "{{ _lf_init_pw | b64encode }}"
   no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Write the SSO Secret (Cognito sign-in and default org/project membership)
+  # Mounted as environment via additionalEnvFrom, next to langfuse-init. Only
+  # with sso.enabled and sso.langfuse.enabled; the release below lists it only
+  # then, and the task after the release removes it otherwise.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: langfuse-sso
+        namespace: "{{ langfuse.namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: clickhouse-private-ansible
+      type: Opaque
+      data: "{{ dict(_lf_sso_env.keys() | zip(_lf_sso_env.values() | map('b64encode'))) }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+  when: _lf_sso
 
 - name: Write the ClickHouse CA Secret (Step 9's TLS material, for the migration and runtime clients)
   # fips: true only. clickhouse_cluster (Step 9) runs before this role and
@@ -887,8 +1009,7 @@
             # trust policy names the same thing) get
             # AWS_ROLE_ARN and a projected token from this one annotation.
             eks.amazonaws.com/role-arn: "{{ _lf_s3_role_arn }}"
-        additionalEnvFrom:
-          - secretRef: {name: langfuse-init}
+        additionalEnvFrom: "{{ [{'secretRef': {'name': 'langfuse-init'}}] + ([{'secretRef': {'name': 'langfuse-sso'}}] if _lf_sso else []) }}"
         # fips: true only. NODE_EXTRA_CA_CERTS, not a chart-native clickhouse.tls.*
         # value (this chart has none -- see the CA Secret task above and the
         # `clickhouse:` block below). This name is not one of the reserved
@@ -907,7 +1028,14 @@
         # is the CA path Node actually consults, with full hostname
         # verification intact (no rejectUnauthorized override anywhere in that
         # path either).
-        additionalEnv: "{{ [{'name': 'NODE_EXTRA_CA_CERTS', 'value': '/etc/langfuse/clickhouse-ca/ca.crt'}] if fips else [] }}"
+        #
+        # SSO adds a second entry, LANGFUSE_SSO_CONFIG_DIGEST (not read by
+        # Langfuse): it fingerprints the langfuse-sso Secret so a changed
+        # Secret rolls the pods in this same upgrade (see the fingerprint task
+        # above). Absent when SSO is off.
+        additionalEnv: >-
+          {{ ([{'name': 'NODE_EXTRA_CA_CERTS', 'value': '/etc/langfuse/clickhouse-ca/ca.crt'}] if fips else [])
+             + ([{'name': 'LANGFUSE_SSO_CONFIG_DIGEST', 'value': _lf_sso_digest}] if _lf_sso else []) }}
         # Mounts the Secret written above into every langfuse deployment
         # (web and worker both need it: the worker also runs runtime
         # ClickHouse queries). extraVolumes/extraVolumeMounts are top-level
@@ -1066,6 +1194,18 @@
         mediaUpload:
           enabled: true
           prefix: "media/"
+
+- name: Remove the SSO Secret when SSO is off
+  # After the release, so the pods stop referencing the Secret before it goes
+  # (a rollout is already under way with the new pod template). A no-op when
+  # the Secret was never created.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Secret
+    name: langfuse-sso
+    namespace: "{{ langfuse.namespace }}"
+    state: absent
+  when: not _lf_sso
 
 # --- PostgreSQL role fix, then the waits -------------------------------------
 # The subchart ships a first-boot script that creates the `langfuse` role and
@@ -1515,5 +1655,6 @@
       - "login:      {{ langfuse.init.user_email }} -- password in {{ langfuse_state_files.init_user_password_file | realpath }}"
       - "api keys:   {{ langfuse_state_files.public_key_file | realpath }} (public), {{ langfuse_state_files.secret_key_file | realpath }} (secret) -- project {{ langfuse.init.project_id }}"
       - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local:{{ 8443 if fips else 8123 }} ({{ 'TLS, CA-verified' if fips else 'plaintext' }}) as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"
-      - "smoke test: scripts/langfuse-smoke.sh   (posts a trace and reads it back from ClickHouse)"
+      - "sign-in:    {{ ('Cognito (issuer ' ~ _lf_sso_out.issuer ~ '); new users join org ' ~ langfuse.init.org_id ~ ' as ' ~ sso.langfuse.default_org_role ~ ', project ' ~ langfuse.init.project_id ~ ' as ' ~ sso.langfuse.default_project_role ~ '; password login ' ~ ('disabled' if sso.langfuse.disable_password_login | bool else 'still on')) if _lf_sso else 'email and password only (sso.langfuse.enabled is false)' }}"
+      - "smoke test: scripts/langfuse-smoke.sh  (posts a trace and reads it back from ClickHouse)"
       - "teardown:   ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent   (keeps the ClickHouse data; --tags lf-db -e langfuse_db_state=absent purges it)"
