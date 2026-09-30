@@ -1,17 +1,17 @@
 # ClickHouse Government on AWS EKS: a hands-on learning kit
 
-This repository is a guided, automated way to learn ClickHouse Government by building it. You run a handful of commands, and Ansible builds an airgapped-style ClickHouse cluster on Amazon EKS in your own AWS account. The docs explain every step it takes, so you can read, run, and take it apart at your own pace or in a facilitated workshop.
+This repository is a guided, automated way to learn ClickHouse Government by building it. You run a handful of commands, and Ansible builds a ClickHouse cluster with an airgapped design on Amazon EKS in your own AWS account. The docs explain every step it takes, so you can read, run, and take it apart at your own pace or in a facilitated workshop.
 
 ClickHouse is a database built for analytics: it answers questions like "how many, by hour, by region" across billions of rows in well under a second. Two optional add-ons show what you can build on top of it. [Langfuse](https://langfuse.com) is an open-source platform for tracing and evaluating LLM applications, and it stores its data in ClickHouse. [Grafana](https://grafana.com) is a dashboarding tool, and here it queries the cluster through the ClickHouse datasource plugin.
 
 ## What ClickHouse Government is
 
-ClickHouse Government is ClickHouse Private with a FIPS-validated cryptography build. ClickHouse Private is the core of ClickHouse Cloud packaged so that you run it yourself, in your own cloud account and on your own Kubernetes cluster, with no connection back to ClickHouse once it is installed. The Government build swaps in FIPS-validated cryptography, which means x86_64 machines and different image tags, and changes little else that you would notice day to day. The design goal is an airgapped deployment: the cluster that holds your data pulls container images only from a registry in your own account, and never from the internet.
+ClickHouse Government is ClickHouse Private with a FIPS-validated cryptography build. ClickHouse Private is the core of ClickHouse Cloud packaged so that you run it yourself, in your own cloud account and on your own Kubernetes cluster, with no connection back to ClickHouse once it is installed. The Government build uses the FIPS-validated cryptography that ClickHouse provides, which means x86_64 machines and different image tags, and changes little else that you would notice day to day. ClickHouse Government is built for airgapped networks: the cluster that holds your data pulls container images only from a registry in your own account, and never from the internet. This kit adds a NAT gateway so that you can reach and test the cluster from your own machine. The gateway belongs to this learning environment and is not part of the production deployment.
 
 ## What you'll learn and see
 
-- **An airgapped-style deploy on EKS.** How container images make one hop from ClickHouse's registry into yours, and how a VPC, an EKS cluster, node groups, storage, the ClickHouse operator, and a ClickHouse cluster with three servers and three Keeper nodes fit together.
-- **FIPS 140-3 mode.** What the single `fips` switch changes, from images and instance types to AWS endpoints, encryption keys, and TLS between components, and what it does not cover.
+- **An airgapped-design deploy on EKS.** How container images make one hop from ClickHouse's registry into yours, and how a VPC, an EKS cluster, node groups, storage, the ClickHouse operator, and a ClickHouse cluster with three servers and three Keeper nodes fit together.
+- **FIPS 140-3 mode.** What the single `fips` switch changes, from images and instance types to AWS endpoints, encryption keys, and TLS between components, and what it does not cover. The validated cryptography is ClickHouse's; [limitations](docs/limitations.md) says what the kit covers and does not cover by design.
 - **Langfuse on ClickHouse (optional).** How an application uses ClickHouse Private as its analytics store, including a smoke test that sends a trace in and reads it back out of ClickHouse.
 - **Grafana with a ClickHouse datasource (optional).** How a dashboard tool is wired to the cluster with a read-only user and a plugin mirrored into your own S3 bucket.
 - **How to operate it.** How to connect, verify, watch the cost meter, stop and resume the cluster, and tear everything down.
@@ -21,7 +21,7 @@ ClickHouse Government is ClickHouse Private with a FIPS-validated cryptography b
 You need three things before you start, and all of them come from your ClickHouse account team:
 
 - **The entitlement.** Access to ClickHouse Government (ClickHouse Private), which is what lets you read its container images.
-- **Access to the image registry for your AWS account.** Share your AWS account ID with your ClickHouse contact so read access to the source registry can be arranged for it. The kit checks, before it copies anything, that your account can assume the pull role `ClickHouseAirgapECRPullRole`.
+- **Access to the image registry for your AWS account.** ClickHouse sets up the pull role `ClickHouseAirgapECRPullRole` in your AWS account, with the trust and the read access to the source registry that it needs. You do not create it. Share your AWS account ID with your ClickHouse contact, and the kit checks, before it copies anything, that your account can assume the role.
 - **The source registry's account ID.** ClickHouse tells you the AWS account that hosts the images. In the docs and in `ansible/group_vars/all.yml` it appears as the placeholder `<SOURCE_ECR_ACCOUNT_ID>`, and you set the real value as `aws.source_ecr_account_id` in `state/deploy-vars.yml`. Part 1 walks through this file.
 
 You also need an AWS account of your own with permission to create VPCs, EKS clusters, IAM roles, S3 buckets, KMS keys, and ECR repositories, and a way to sign in to it, either AWS IAM Identity Center (SSO) or a named profile you already have.
@@ -55,7 +55,7 @@ The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your 
 
 **Self-paced path.** Read Part 0 for the concepts, then Part 1 to set up your machine. Start `scripts/up.sh`, and while it runs, read Parts 2 to 5 to see what each step is doing and why. Add Part 6 and Part 8 if you switch on Langfuse or Grafana, read Part 7 if you use FIPS mode, and finish with the limitations page.
 
-**Workshop path.** Start the first deploy before the session, because it takes about an hour, and walk the participants through the Parts against the live cluster. To repeat the exercise within a session, use `scripts/down.sh` and `scripts/up.sh --from nodes`, which takes roughly 15 minutes. A facilitator can pick a subset from the table below.
+**Workshop path.** Start the first deploy before the session, because it takes about an hour, and walk the participants through the Parts against the live cluster. To repeat the exercise within a session, use `scripts/down.sh` and `scripts/up.sh --from nodes`, which takes roughly 15 minutes. A facilitator can pick a subset from the table below. The "Step N" numbers there are the kit's numbering of ClickHouse's tutorial steps, and the step table in [Part 0](docs/part-0-what-is-this.md) lists them all.
 
 | Part | What it teaches | Deploy or operate |
 |---|---|---|
@@ -71,18 +71,19 @@ The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your 
 
 ## Quickstart
 
-The first four commands prepare your machine and your configuration, and the last starts the deploy. Part 1 explains each one.
+[Part 1](docs/part-1-prerequisites.md) has the ordered setup box with the details of each command. The order matters. A first `scripts/part1-setup.sh` run installs the tools and creates `state/deploy-vars.yml`, but its AWS profile checks report failures until you have edited that file and logged in. Once you have, run `scripts/part1-setup.sh --check` to confirm, then start the deploy.
 
 ```bash
-scripts/part1-setup.sh    # install and check the tools; creates state/deploy-vars.yml
+scripts/part1-setup.sh    # install the tools; creates state/deploy-vars.yml (profile checks fail until the next two steps)
 # edit state/deploy-vars.yml: your account ID, the source registry account ID,
 # and your SSO portal URL (or set aws.auth_mode: profile to use a profile you already have)
 source scripts/env.sh     # point this shell at the project's AWS configuration
 aws sso login             # SSO mode only
+scripts/part1-setup.sh --check   # verify the tools and both AWS profiles; changes nothing
 scripts/up.sh             # prints the estimated cost, asks for a y, then builds Steps 1 to 12
 ```
 
-When `scripts/up.sh` finishes, it prints how to connect. To check that the cluster answers, run a query through the port-forward helper. It needs a local ClickHouse client, for example `brew install clickhouse`:
+When `scripts/up.sh` finishes, it prints how to connect. To check that the cluster answers, run a query through the port-forward helper. It needs a local ClickHouse client, one of the optional tools in [Part 1](docs/part-1-prerequisites.md), for example `brew install clickhouse`:
 
 ```bash
 scripts/ch-client.sh -q "SELECT version()"
@@ -100,9 +101,9 @@ Run `scripts/up.sh --help` and `scripts/down.sh --help` to see every option.
 
 ## What this kit is, and what it is not
 
-This kit is a reference for learning and evaluation. It is not a supported production deployment. It uses small sizing, a single NAT gateway, self-signed certificates, and a partial airgap, and [limitations](docs/limitations.md) lists each difference and what has and has not been exercised. For a production deployment, or for support, contact your ClickHouse account team.
+This kit is a reference for learning and workshops. It is not a supported production deployment. It uses small sizing, a single NAT gateway that the airgapped design does not include, and self-signed certificates, and [limitations](docs/limitations.md) states each difference along with what the kit does and does not cover by design. For a production deployment, or for support, contact your ClickHouse account team.
 
-For the FIPS posture on its own, read [FIPS.md](FIPS.md) for the short answer and [Part 7](docs/part-7-fips-hardening.md) for the mechanism behind each claim.
+For the FIPS posture on its own, where the validated cryptography is ClickHouse's, read [FIPS.md](FIPS.md) for the short answer and [Part 7](docs/part-7-fips-hardening.md) for the mechanism behind each claim.
 
 ## What is in the repository
 
@@ -118,7 +119,7 @@ For the FIPS posture on its own, read [FIPS.md](FIPS.md) for the short answer an
 
 Use these as a quick review or as exercises in a workshop.
 
-1. Run `kubectl get nodes -L clickhouseGroup` after `source scripts/env.sh`. You should see eight nodes labelled by job: keeper, server, and operator. Which pods would you expect on each, and why?
+1. Run `kubectl get nodes -L clickhouseGroup` after `source scripts/env.sh`. You should see eight nodes: three keeper, three server, and two operator nodes. Only the keeper and server nodes carry the `clickhouseGroup` label, with an `-arm64` suffix in the standard build (`keeper-arm64`, `server-arm64`), so the two operator nodes show `<none>`. Which pods would you expect on each, and why?
 2. Run `kubectl -n ns-default-us-01 get pods -o wide`. You should see three Keeper pods and three server pods, all Running, spread across different nodes. Why does the cluster need an odd number of Keeper nodes?
 3. Find where the estimated hourly cost is printed and compare it with the table above. What would change it?
 4. After `scripts/down.sh`, what is still running, what does it cost, and what does `scripts/up.sh --from nodes` recreate?

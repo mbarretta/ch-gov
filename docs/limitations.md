@@ -1,25 +1,25 @@
-# Learning setup vs. production
+# Scope and boundaries: the learning setup vs. production
 
-This kit is built for learning and evaluation. It shows how ClickHouse Government fits together on AWS, and it is honest about where that differs from a production deployment. This page lists each difference in one place, so you know what you can rely on and what you should treat as a starting point.
+This kit is built for learning and workshops. It shows how ClickHouse Government fits together on AWS, and it is plain about where that differs from a production deployment. This page states the scope of the kit in one place: what it does, what it leaves out on purpose, and what you should treat as a starting point.
 
 ## What you'll learn
 
-- Which parts of the airgap are complete and which are not.
+- How the airgapped design of ClickHouse Government maps onto this learning environment, and what belongs only to the learning environment.
 - What FIPS mode gives you, what it leaves out, and the commands to check it on your own cluster.
-- What the shipped smoke tests and checks cover, and which paths nothing has exercised.
-- Which sizing and resilience choices you would change before production, and why GovCloud is not supported yet.
+- What the shipped smoke tests and checks cover, and which paths they leave out by design.
+- Which sizing and resilience choices you would change before production, and why GovCloud is out of scope.
 
-## The airgap is partial
+## The airgapped design and the learning environment
 
-The design goal is a cluster that pulls container images only from your own ECR registry and never from the internet. The kit gets most of the way there:
+ClickHouse Government is built for airgapped networks: the cluster pulls container images only from your own ECR registry and never from the internet. The kit builds that image path:
 
 - **Image pulls.** The ClickHouse, operator, Langfuse, and Grafana containers all come from your ECR registry. The images make one hop, from ClickHouse's registry (and, for the optional capabilities, from `cgr.dev`, `docker.langfuse.com`, and `dhi.io`) into yours, and that copy runs from your machine, not from the cluster. The EBS CSI driver is an EKS managed add-on, so its images come from an AWS-owned registry instead.
 - **S3 traffic.** A VPC gateway endpoint keeps ClickHouse's table data traffic to S3 on the AWS network.
 - **Grafana's plugin.** The ClickHouse datasource plugin is mirrored into your own S3 bucket, so the pod never reaches out to `grafana.com`.
 
-Two things stay open:
+Two things belong to this learning environment and are not part of the airgapped design:
 
-- **A NAT gateway is present.** The private subnets route outbound traffic through it, so the cluster can reach the internet if something asks it to. The kit does not create VPC interface endpoints for ECR, STS, or CloudWatch, which is what would let you remove the NAT gateway entirely. Adding them is the next step toward a fully airgapped network.
+- **The NAT gateway.** It exists only so that you can reach and test the cluster from your own machine. The private subnets route outbound traffic through it. For the same reason the kit creates no VPC interface endpoints for ECR, STS, or CloudWatch. A production airgapped network has no NAT gateway and uses those endpoints instead.
 - **The EKS API endpoint is public by default.** `kubectl` works from your laptop because of it. A hardened posture runs `scripts/play.sh --tags eks -e eks_public_endpoint=false` and reaches the API through a bastion, VPN, or Direct Connect.
 
 ## What FIPS mode does and does not give you
@@ -35,14 +35,13 @@ Setting `fips: true` switches the whole kit to its FIPS configuration. [FIPS.md]
 
 **What it does not give you.**
 
-- **A certification.** The kit is not FIPS-validated or certified as a whole. It selects and wires cryptographic modules that ClickHouse and AWS provide, and it does not validate them. Whether the result meets your compliance target is your decision.
+- **A certification.** The FIPS-validated cryptography is ClickHouse's and AWS's, and the kit itself is not a validated module or a certified system as a whole. It selects and wires the cryptographic modules that ClickHouse and AWS provide, and it does not validate them. Whether the result meets your compliance target is your decision.
 - **Coverage of every component.** The Langfuse, PostgreSQL, Valkey, Grafana, and `awscli` images are not FIPS builds. Langfuse's own S3 client and other pod-side AWS SDK calls do not use FIPS endpoints.
 - **Full certificate verification everywhere.** Langfuse's one-time schema migration connects over TLS without verifying the certificate, because the pinned Langfuse image hardcodes that. ClickHouse's native protocol verifies the certificate chain but not the hostname.
 - **A validated certificate source.** The self-signed certificates come from whatever OpenSSL build runs on the machine driving the automation.
-- **A confirmed Keeper answer.** Whether Keeper's plaintext listener is disabled once TLS is required is unconfirmed, and the kit assumes it may still be reachable.
-- **A completed live test.** The full deployment has not been run with `fips: true` against a real cluster from start to finish. The configuration is derived from the code, the chart values, and the CloudFormation templates that ship in this repository, so the checks below are yours to run.
+- **A guarantee about Keeper's plaintext listener.** Whether it is disabled once TLS is required depends on a Kubernetes operator chart that the kit does not vendor, so the kit does not rely on it being off and treats it as possibly still reachable.
 
-**Check it on your own cluster.** With `fips: true`, run these after `source scripts/env.sh`. Each shows what you should see.
+**Check it on your own cluster.** With `fips: true`, run these after `source scripts/env.sh`. Each shows what you should see. The configuration comes from the code, the chart values, and the CloudFormation templates in this repository, so these checks are how you see it on your cluster.
 
 1. Confirm the ClickHouse images come from the FIPS registry and carry `-fips` tags. You should see hostnames of the form `<account>.dkr-ecr-fips.<region>.on.aws`.
 
@@ -97,11 +96,11 @@ The kit ships checks at three levels. Each one tells you something specific, and
 
 **Grafana (`scripts/grafana-smoke.sh`).** It checks the health of the ClickHouse datasource, runs a live query through it, and, when Langfuse is also on, runs a query against Langfuse's tables through the same datasource. It does not cover dashboards, alerting, or user management. Dashboards you build in the UI do not survive a pod restart, because Grafana runs with no persistent storage.
 
-Some paths are not exercised:
+Some paths are outside what the kit is built around:
 
-- **The `public` load balancer type.** It is not exercised for ClickHouse, Langfuse, or Grafana. The tested path is `internal`. `public` changes an annotation and the subnets the load balancer uses, and it requires `allowed_cidrs`.
-- **Grafana with `grafana.load_balancer.tls: true`.** It is not exercised. It shares its code with the Langfuse TLS path, which is exercised on an `internal` load balancer.
-- **The Langfuse smoke test over https from outside the VPC.** It is not possible against an `internal` load balancer, because that address does not answer from outside the VPC. The script falls back to a `kubectl port-forward` tunnel. Its https path is exercised only where the load balancer answers, which means from inside the VPC or over a VPN.
+- **The `public` load balancer type.** The kit is built around `internal`, for ClickHouse, Langfuse, and Grafana. `public` changes an annotation and the subnets the load balancer uses, and it requires `allowed_cidrs`.
+- **Grafana with `grafana.load_balancer.tls: true`.** It uses the same code as the Langfuse TLS path, with an `internal` load balancer.
+- **The Langfuse smoke test over https from outside the VPC.** An `internal` load balancer does not answer from outside the VPC, so the script falls back to a `kubectl port-forward` tunnel. Its https path runs only where the load balancer answers, which means from inside the VPC or over a VPN.
 
 One behavior worth knowing: a `scripts/down.sh` followed by `scripts/up.sh --from nodes` reuses the generated secrets in `state/`. Langfuse and Grafana come back with the same logins and credentials, as long as you keep `state/`.
 
@@ -125,19 +124,19 @@ These defaults are convenient for learning and worth changing for production.
 - **Broad Grafana read access.** Grafana's ClickHouse user can read almost everything, including system tables and Langfuse's data. This is a deliberate convenience for exploring, not least privilege.
 - **A seeded organization in Langfuse.** Langfuse starts with a seeded organization, project, and admin login, with sign-up disabled.
 
-## GovCloud is not supported yet
+## GovCloud is out of scope
 
-Deploying into AWS GovCloud is not supported. The kit derives the right ARN partition from a `us-gov-` region, but nothing else has been adapted or tested there:
+Deploying into AWS GovCloud is out of scope for this kit. It derives the right ARN partition from a `us-gov-` region, but nothing else is adapted for GovCloud:
 
 - **The image source is in the commercial partition.** ClickHouse's source registry is an ECR registry in the commercial `aws` partition, and the kit reads it from a commercial region.
-- **FIPS hostnames are untested in GovCloud.** The `dkr-ecr-fips` and `s3-fips` hostname shapes are unverified there.
-- **Instance availability is untested.** The standard build uses `m7g` instances, and whether they are offered in the GovCloud region you would use is unchecked.
+- **FIPS hostnames follow the commercial pattern.** The kit uses the `dkr-ecr-fips` and `s3-fips` hostname shapes and does not adapt them for GovCloud.
+- **Instance types are not matched to GovCloud.** The standard build uses `m7g` instances, and the kit does not check whether the GovCloud region you would use offers them.
 
 If you need GovCloud, raise it with your ClickHouse account team.
 
 ## Check yourself
 
-1. Name two ways the network in this kit differs from a fully airgapped one. What would you add to close each?
+1. Name two ways the network in this learning environment differs from the airgapped design. What would you change to close each?
 2. Under `fips: true`, which traffic is TLS-encrypted with a verified certificate, and which is not? Run the ClickHouse check from the FIPS section and explain why it uses port 9440.
-3. The Langfuse smoke test falls back to a tunnel when the load balancer does not answer. Why does an `internal` load balancer not answer from your laptop, and what would make its https path testable?
+3. The Langfuse smoke test falls back to a tunnel when the load balancer does not answer. Why does an `internal` load balancer not answer from your laptop, and where can its https path run directly?
 4. Pick one item from the sizing list and describe what you would change first for a production cluster, and what it would cost.
