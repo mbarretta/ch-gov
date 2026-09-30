@@ -21,6 +21,16 @@ ansible_python_interpreter: "{{ playbook_dir }}/../.venv/bin/python3"
 # ---------------------------------------------------------------------------
 fips: false
 
+# ---------------------------------------------------------------------------
+# Deployment size. minimal = the default: the same node types as before, with
+# pod resources trimmed so the ClickHouse components stay under 74 GB of
+# memory. tutorial = the upstream tutorial's node and pod sizes. The profiles
+# are defined in size_profiles below.
+#   size: minimal | tutorial
+# Override in state/deploy-vars.yml, or per run with -e size=tutorial.
+# ---------------------------------------------------------------------------
+size: "minimal"
+
 aws:
   # How this kit authenticates to AWS.
   #   sso     -- the kit renders a project-local .aws/config (SSO session plus
@@ -96,32 +106,41 @@ infrastructure:
   nat_mode: "single"
 
   # Instance types differ by build, because FIPS crypto is not validated on
-  # ARM64 -- the FIPS build must run x86_64 throughout.
+  # ARM64 -- the FIPS build must run x86_64 throughout. Every size-dependent
+  # value below comes from the active profile (`size`, see size_profiles).
   #
-  # These are LEARNING sizes, deliberately smaller than the tutorial's
-  # (m7g.2xlarge / m7gd.16xlarge / m7i.2xlarge, ~$12.04/hr). They are not
-  # arbitrary: the onprem-clickhouse-cluster chart requests 4 CPU / 8Gi per
-  # server pod and 2 CPU / 4Gi per keeper pod, and a node's allocatable CPU
-  # is a little under its vCPU count once kubelet reservations are taken.
-  # So a 4-vCPU node cannot hold a 4-CPU server pod, and a 2-vCPU node
-  # cannot hold a 2-CPU keeper pod -- these are the smallest types that fit.
-  # Shrinking further means overriding the chart's resource requests too.
+  # The profiles. minimal keeps the node types this kit has always used and
+  # changes only pod resources, so its instance-hour cost is unchanged.
+  # tutorial is the upstream tutorial's sizing, on larger nodes.
+  #
+  # minimal is sized to keep the ClickHouse components' allocated memory under
+  # 74 GB decimal: 3 servers x 20G + 3 keepers x 4G = 72G, which leaves under
+  # 2G for the operator. Pod memory is written in decimal G, never Gi, because
+  # the budget is decimal: 72Gi would be 77.3 GB. Requests equal limits
+  # throughout, so the figure is what the pods can actually use.
+  #
+  # The onprem-clickhouse-cluster chart's own requests are 4 CPU / 8Gi per
+  # server pod and 2 CPU / 4Gi per keeper pod, and a node's allocatable CPU is
+  # a little under its vCPU count once kubelet reservations are taken. A
+  # 6-CPU server pod needs an 8-vCPU node and a 2-CPU keeper pod needs a
+  # 4-vCPU node, which is why minimal keeps m7gd.2xlarge / m7g.xlarge (or their
+  # x86 equivalents).
   keeper:
-    instance_type: "{{ 'm7i.xlarge' if fips else 'm7g.xlarge' }}"
+    instance_type: "{{ sz.keeper_instance_type['fips' if fips else 'arm'] }}"
     node_count: 3            # always 3: Keeper needs an odd quorum
   server:
     # The trailing "d" is required, not cosmetic: it means local NVMe SSD,
     # which is where ClickHouse puts its read cache (/nvme/disk).
-    instance_type: "{{ 'm6id.2xlarge' if fips else 'm7gd.2xlarge' }}"
-    min_nodes: 3             # matches the chart's server.replicaCount
-    max_nodes: 6
+    instance_type: "{{ sz.server_instance_type['fips' if fips else 'arm'] }}"
+    min_nodes: "{{ sz.server_min_nodes }}"   # matches the chart's server.replicaCount
+    max_nodes: "{{ sz.server_max_nodes }}"
   operator:
     # x86_64 in both builds -- the tutorial specifies AL2023_x86_64 for this
     # group only. It is also the only untainted group, so cluster add-ons
     # (CoreDNS, EBS CSI controller) land here.
-    instance_type: "m7i.xlarge"
-    min_nodes: 2
-    max_nodes: 4
+    instance_type: "{{ sz.operator_instance_type['fips' if fips else 'arm'] }}"
+    min_nodes: "{{ sz.operator_min_nodes }}"
+    max_nodes: "{{ sz.operator_max_nodes }}"
   # Root EBS per node: OS and container images only. ClickHouse data goes on
   # separate EBS volumes the Helm chart provisions.
   node_boot_disk_gb: 20
@@ -149,6 +168,55 @@ pricing:
   # plus pennies of EBS (two small PVCs) and S3.
 
 # ---------------------------------------------------------------------------
+# Size profiles -- the values `size` chooses between. Only size-dependent
+# values live here; infrastructure.* and clickhouse.* read them through `sz`
+# (see Derived values). Instance types are {arm, fips} pairs: the arm entry is
+# used when fips is false, the fips entry when it is true. Pod memory is
+# decimal G on purpose (see the profiles note in the infrastructure block).
+#
+# Operator sizing, from the pinned chart (versions.operator_chart): the
+# operator Deployment runs one replica, fixed in the chart's template rather
+# than a value. Of its two containers, only the operator manager takes a
+# resources value; kube-rbac-proxy exposes none, so it runs unbounded and small.
+# The manager is given 1G with requests equal to limits, which keeps 1 replica
+# x 1G, plus the proxy's small footprint, under 2G.
+# ---------------------------------------------------------------------------
+size_profiles:
+  minimal:
+    keeper_instance_type:   {arm: "m7g.xlarge",    fips: "m7i.xlarge"}
+    server_instance_type:   {arm: "m7gd.2xlarge",  fips: "m6id.2xlarge"}
+    operator_instance_type: {arm: "m7i.xlarge",    fips: "m7i.xlarge"}
+    server_min_nodes: 3
+    server_max_nodes: 6
+    operator_min_nodes: 2
+    operator_max_nodes: 4
+    server_cpu: "6"
+    server_memory: "20G"
+    keeper_cpu: "2"
+    keeper_memory: "4G"
+    keeper_disk: "10Gi"
+    cache_disk_size: "300Gi"
+    operator_cpu: "500m"
+    operator_memory: "1G"
+  # The upstream tutorial's sizing; same keys as minimal.
+  tutorial:
+    keeper_instance_type:   {arm: "m7g.xlarge",    fips: "m7i.xlarge"}
+    server_instance_type:   {arm: "m7gd.2xlarge",  fips: "m6id.2xlarge"}
+    operator_instance_type: {arm: "m7i.xlarge",    fips: "m7i.xlarge"}
+    server_min_nodes: 3
+    server_max_nodes: 6
+    operator_min_nodes: 2
+    operator_max_nodes: 4
+    server_cpu: "6"
+    server_memory: "20G"
+    keeper_cpu: "2"
+    keeper_memory: "4G"
+    keeper_disk: "10Gi"
+    cache_disk_size: "300Gi"
+    operator_cpu: "500m"
+    operator_memory: "1G"
+
+# ---------------------------------------------------------------------------
 # ClickHouse cluster identity and sizing (Steps 6-11)
 # ---------------------------------------------------------------------------
 clickhouse:
@@ -171,31 +239,36 @@ clickhouse:
   admin_username: "default"
 
   # --- pod sizing (Step 9) ---
-  # These are requests AND limits (the chart sets both to the same value).
-  # They have to fit the node types in `infrastructure` above with kubelet
-  # reservations taken out: m7gd.2xlarge is 8 vCPU / 32Gi, m7g.xlarge is
-  # 4 vCPU / 16Gi. Server memory is the AWS base configuration's own 16Gi
-  # rather than the chart's 8Gi default -- the node has the room, and the SSD
-  # cache is sized per Gi of RAM, so more RAM also means a bigger cache.
+  # These are requests AND limits (the chart sets both to the same value). All
+  # values come from the active size profile (see size_profiles and the
+  # profiles note in `infrastructure`), including the 74 GB memory budget and
+  # why memory is decimal G. They have to fit the node types chosen there with
+  # kubelet reservations taken out. The SSD cache is sized per Gi of RAM, so
+  # more RAM also means a bigger cache.
   server:
     replicas: 3
-    cpu: "4"
-    memory: "16Gi"
+    cpu: "{{ sz.server_cpu }}"
+    memory: "{{ sz.server_memory }}"
     # SSD read cache on the node's local NVMe (/nvme/disk, mounted in Step 5).
     # The disk is ~442Gi; the preflight check fails at >=80% of it, and
     # ClickHouse can overshoot the limit briefly during merges, so leave
     # headroom. 300Gi is ~68%.
-    cache_disk_size: "300Gi"
+    cache_disk_size: "{{ sz.cache_disk_size }}"
     # The chart default is `trace`, which is a firehose. Servers here have no
     # persistent volume, so logs go to stdout and the node's container log
     # rotation -- `information` keeps that readable.
     log_level: "information"
   keeper:
     replicas: 3            # always 3: quorum
-    cpu: "2"
-    memory: "4Gi"
-    disk: "10Gi"           # EBS, gp3-encrypted; Keeper's only persistent state
+    cpu: "{{ sz.keeper_cpu }}"
+    memory: "{{ sz.keeper_memory }}"
+    disk: "{{ sz.keeper_disk }}"   # EBS, gp3-encrypted; Keeper's only persistent state
     log_level: "information"
+  # The operator's own container (requests = limits). See the operator note in
+  # size_profiles for what the chart lets us pin.
+  operator:
+    cpu: "{{ sz.operator_cpu }}"
+    memory: "{{ sz.operator_memory }}"
   storage_class: "gp3-encrypted"
 
   # --- Step 12: how clients outside the cluster reach ClickHouse ---
@@ -293,6 +366,10 @@ versions:
 # ---------------------------------------------------------------------------
 # Derived values -- do not edit; change `fips` or `versions` instead.
 # ---------------------------------------------------------------------------
+
+# The active size profile; every size-dependent leaf in infrastructure.* and
+# clickhouse.* reads from it.
+sz: "{{ size_profiles[size] }}"
 
 # Only the three CONTAINER images have -fips variants. The helm charts are
 # shared between both builds, so they never take the suffix.

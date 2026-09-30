@@ -35,6 +35,18 @@
        else ({'AWS_USE_FIPS_ENDPOINT': 'true'} if (fips | bool) else {}) }}
 
   pre_tasks:
+    # An unknown `size` would otherwise surface as an undefined-variable error
+    # deep in a role. tags: [always] so a tagged invocation cannot skip it.
+    - name: Reject an unknown size
+      ansible.builtin.assert:
+        that: size in size_profiles
+        fail_msg: >-
+          size '{{ size }}' is not a known profile. Valid sizes:
+          {{ size_profiles.keys() | list | sort | join(', ') }}. Set size in
+          state/deploy-vars.yml or pass -e size=<name>.
+        success_msg: "size '{{ size }}' is a known profile"
+      tags: [always]
+
     # Fail before anything touches AWS if a value the customer was meant to
     # fill in is still its <...> placeholder. Only inputs this run will use
     # are checked: the SSO portal URL in sso mode, the DHI login when Grafana
