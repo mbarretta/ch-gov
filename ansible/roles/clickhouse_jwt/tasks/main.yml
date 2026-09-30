@@ -1,2 +1,208 @@
 ---
-[]
+# Step 11b (optional): ClickHouse roles for Cognito sign-in.
+#
+# Step 9 (clickhouse_cluster) adds the JWT user directory to the server config
+# when sso.enabled and sso.clickhouse_jwt.enabled. The directory authenticates a
+# token; it has no users or roles of its own to manage. This role creates the
+# ClickHouse roles the token's cognito:groups claim is matched against:
+#
+#   - one role per configured group, named exactly like the group (the claim
+#     value is the role name). The groups are sso.cognito.groups that start with
+#     sso.clickhouse_jwt.group_prefix, plus any group named in role_grants;
+#   - the permission-limit role, which caps every token-authenticated user. It
+#     is granted every group role, so its permissions are the union of theirs.
+#
+# How rights resolve: a login gets the roles named in its groups claim, and the
+# rights of those roles are granted to it directly, limited to what the
+# permission-limit role allows (the intersection). currentRoles() stays empty
+# for these users, so read effective access with SHOW GRANTS. A group with no
+# role here is dropped without an error and leaves the login with no rights.
+# Only the roles are created here: to reach a database or table, a group needs a
+# statement under sso.clickhouse_jwt.role_grants.
+#
+# The password for the admin session travels on stdin and is exported inside the
+# pod as CLICKHOUSE_PASSWORD, as in clickhouse_verify; it is never on argv. Roles
+# live in the replicated access storage, so one server pod is enough.
+#
+# Idempotent: the role and grant tables are read before and after the statements
+# run, and the task reports "changed" only when they differ.
+#
+# Teardown: ansible-playbook deploy.yml --tags ch-jwt -e ch_jwt_state=absent
+#   Drops the group roles and the permission-limit role. The JWT user directory
+#   stays in the server config until the cluster is re-applied with
+#   sso.clickhouse_jwt.enabled false (--tags cluster).
+
+- name: Work out the role names
+  ansible.builtin.set_fact:
+    _jw_prefix: "{{ sso.clickhouse_jwt.group_prefix | default('', true) }}"
+    _jw_prefix_re: "{{ sso.clickhouse_jwt.group_prefix | default('', true) | regex_escape }}"
+    _jw_ceiling: "{{ sso_jwt_ceiling_role }}"
+    _jw_grants: "{{ sso.clickhouse_jwt.role_grants | default({}, true) }}"
+
+- name: List the group roles
+  ansible.builtin.set_fact:
+    _jw_roles: >-
+      {{ ((sso.cognito.groups | default([], true) | select('match', _jw_prefix_re) | list)
+          + (_jw_grants.keys() | list)) | unique | list }}
+
+- name: Check the names and statements before they reach SQL
+  ansible.builtin.assert:
+    that:
+      - (_jw_roles + [_jw_ceiling]) | reject('match', '^[A-Za-z0-9_.-]+$') | list | length == 0
+      - _jw_ceiling not in _jw_roles
+      - _jw_grants.keys() | reject('match', _jw_prefix_re) | list | length == 0
+      - >-
+        _jw_grants.values() | flatten
+        | reject('match', '(?i)^\s*GRANT\s[^;`]*$') | list | length == 0
+      - >-
+        _jw_grants.values() | flatten
+        | select('search', '(?i)\sTO\s') | list | length == 0
+    fail_msg: >-
+      Role names may use letters, digits, underscore, dot and hyphen only, and the
+      permission-limit role ({{ _jw_ceiling }}) must not be a group role. Every
+      role_grants key must start with group_prefix ('{{ _jw_prefix }}'). Every
+      statement must be one GRANT with no semicolon, no backtick and no TO clause;
+      the group's role is added as the grantee.
+  when: (ch_jwt_state | default('present')) != 'absent'
+
+- name: Check the role names
+  ansible.builtin.assert:
+    that:
+      - (_jw_roles + [_jw_ceiling]) | reject('match', '^[A-Za-z0-9_.-]+$') | list | length == 0
+    fail_msg: "Role names may use letters, digits, underscore, dot and hyphen only."
+  when: (ch_jwt_state | default('present')) == 'absent'
+
+- name: Read the admin password
+  ansible.builtin.set_fact:
+    # Teardown runs without the file when the cluster never existed.
+    _jw_pw: "{{ lookup('ansible.builtin.file', admin_password_file, errors='ignore') | default('', true) }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Wait for a server pod to be Ready
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace={{ clickhouse.namespace }}
+      - --for=condition=Ready
+      - --timeout=300s
+      - pod
+      - --selector=app.kubernetes.io/name=clickhouse-server
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _jw_ready
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  # Teardown must not stall for five minutes against a cluster that is gone.
+  when: (ch_jwt_state | default('present')) != 'absent'
+
+- name: Fail clearly if the cluster is not up
+  ansible.builtin.assert:
+    that: _jw_ready.rc == 0
+    fail_msg: >-
+      No Ready ClickHouse server pod in {{ clickhouse.namespace }}
+      ({{ _jw_ready.stderr | default('') | trim }}). Run --tags cluster first, or
+      --tags nodes if the node groups are down.
+  when: (ch_jwt_state | default('present')) != 'absent'
+
+- name: List the running server pods
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ clickhouse.namespace }}
+      - --selector=app.kubernetes.io/name=clickhouse-server
+      - --field-selector=status.phase=Running
+      - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _jw_pods
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Nothing to tear down when the cluster is already gone
+  ansible.builtin.debug:
+    msg: "no running ClickHouse server pod in {{ clickhouse.namespace }}; the roles went with the cluster's metadata."
+  when:
+    - (ch_jwt_state | default('present')) == 'absent'
+    - _jw_pods.stdout_lines | length == 0
+
+- name: Create or drop the roles
+  when: (_jw_pods.stdout_lines | length > 0)
+  vars:
+    _jw_all: "{{ [_jw_ceiling] + _jw_roles }}"
+    # Names are validated above, so quoting them by joining is safe.
+    _jw_list: "{{ '`' ~ (_jw_all | join('`, `')) ~ '`' }}"
+    _jw_in: "{{ \"'\" ~ (_jw_all | join(\"', '\")) ~ \"'\" }}"
+    _jw_roles_list: "{{ '`' ~ (_jw_roles | join('`, `')) ~ '`' }}"
+    # What the before/after comparison reads: which of these roles exist, what
+    # is granted to them, and which roles they hold.
+    _jw_snapshot: >-
+      SELECT name FROM system.roles WHERE name IN ({{ _jw_in }}) ORDER BY name FORMAT TSV;
+      SELECT role_name, access_type, database, table, column, is_partial_revoke, grant_option
+      FROM system.grants WHERE role_name IN ({{ _jw_in }}) ORDER BY ALL FORMAT TSV;
+      SELECT role_name, granted_role_name FROM system.role_grants
+      WHERE role_name IN ({{ _jw_in }}) ORDER BY ALL FORMAT TSV
+    # Statements in role_grants carry no TO clause; the group's role is the
+    # grantee. The permission-limit role then holds every group role.
+    _jw_apply_present: >-
+      CREATE ROLE IF NOT EXISTS {{ _jw_list }};
+      {% for role in _jw_roles %}
+      {% for stmt in (_jw_grants[role] | default([], true)) %}
+      {{ stmt | trim }} TO `{{ role }}`;
+      {% endfor %}
+      {% endfor %}
+      {% if _jw_roles | length > 0 %}
+      GRANT {{ _jw_roles_list }} TO `{{ _jw_ceiling }}`
+      {% else %}
+      SELECT 1 FORMAT Null
+      {% endif %}
+    _jw_apply_absent: "DROP ROLE IF EXISTS {{ _jw_list }}"
+    # $0 = user, $1 = snapshot SQL, $2 = SQL to apply; the password is the first
+    # line of stdin. The client gets /dev/null as stdin for the reason given in
+    # clickhouse_verify. fips: true adds --secure --port 9440 (the plaintext
+    # port is off), as there.
+    _jw_sh: >-
+      IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+      u="$0"; snap="$1"; apply="$2";
+      ch() { clickhouse-client --user "$u" {{ '--secure --port 9440' if fips else '' }}
+      --multiquery --query "$1" </dev/null; };
+      before=$(ch "$snap") || exit 1;
+      ch "$apply" || exit 1;
+      after=$(ch "$snap") || exit 1;
+      if [ "$before" = "$after" ]; then echo CH_JWT_UNCHANGED; else echo CH_JWT_CHANGED; fi
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - exec
+      - -i
+      - --namespace={{ clickhouse.namespace }}
+      - -c
+      - c-{{ clickhouse.cluster_name }}-server
+      - "{{ _jw_pods.stdout_lines[0] }}"
+      - --
+      - sh
+      - -c
+      - "{{ _jw_sh }}"
+      - "{{ clickhouse.admin_username }}"
+      - "{{ _jw_snapshot }}"
+      - "{{ _jw_apply_absent if (ch_jwt_state | default('present')) == 'absent' else _jw_apply_present }}"
+    stdin: "{{ _jw_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _jw_apply
+  changed_when: "'CH_JWT_CHANGED' in _jw_apply.stdout"
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Summary
+  ansible.builtin.debug:
+    msg: >-
+      {{ [('dropped group roles: ' if (ch_jwt_state | default('present')) == 'absent' else 'group roles: ') ~ (_jw_roles | join(', ') or 'none'),
+          'permission-limit role: ' ~ _jw_ceiling]
+         + (['the JWT user directory stays in the server config until --tags cluster runs with sso.clickhouse_jwt.enabled false']
+            if (ch_jwt_state | default('present')) == 'absent' else
+            ['a role with no statement under sso.clickhouse_jwt.role_grants grants nothing']) }}
