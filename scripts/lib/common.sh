@@ -194,6 +194,10 @@ dhi:
 # Optional switches. Uncomment only the ones you want; every other key keeps
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
+# Deployment size: minimal (the default) or tutorial (the upstream tutorial's
+# larger node and pod sizes). See ansible/group_vars/all.yml for both profiles.
+# size: tutorial
+#
 # FIPS build (x86_64, FIPS image tags and endpoints). See
 # docs/part-7-fips-hardening.md.
 # fips: false
