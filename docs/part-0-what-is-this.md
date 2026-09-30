@@ -6,11 +6,11 @@
 > - What this kit builds in your AWS account, and why the build is shaped the way it is.
 > - What it means to *deploy* and to *operate* the system, and which two commands you type to do both.
 
-This is the page to read first if you have never touched ClickHouse and someone handed you this repository. It assumes you know what a server, a database, a container and an AWS account are, and nothing else. Parts 1–8 go deep on each step and explain the traps you can meet. This part tells you what the thing *is*, why it is shaped the way it is, and which commands you will actually run.
+This is the page to read first if you have never touched ClickHouse and someone handed you this repository. It assumes you know what a server, a database, a container and an AWS account are, and nothing else. Parts 1–9 go deep on each step and explain the traps you can meet. This part tells you what the thing *is*, why it is shaped the way it is, and which commands you will actually run.
 
 Two words come up constantly, so here is what they mean in this repository:
 
-- **Deploy** means building everything the software needs and then installing it. You create a private network, a Kubernetes cluster, storage and permissions in AWS, then install ClickHouse (and, if you choose, Langfuse and Grafana) on top and check that it works. `scripts/up.sh` does all of it.
+- **Deploy** means building everything the software needs and then installing it. You create a private network, a Kubernetes cluster, storage and permissions in AWS, then install ClickHouse (and, if you choose, Langfuse, Grafana and single sign-on) on top and check that it works. `scripts/up.sh` does all of it.
 - **Operate** means what you do after that to keep the system healthy and affordable. You connect to it, look at its state, run its health checks, stop the machines when you are not using them, start them again, and tear everything down when you are finished. Section 8 lists exactly what the kit gives you for that. The kit is sized for learning and workshops, not production, so it is a place to learn these tasks, not a production runbook.
 
 ---
@@ -74,6 +74,10 @@ A busy application produces a steady stream of traces that are written once and 
 
 Grafana is a dashboarding tool. It is also optional, and Part 8 covers it. In this kit it reads from ClickHouse and, if Langfuse is on, from Langfuse's tables too.
 
+### Single sign-on
+
+Single sign-on is the third optional capability: people sign in to Langfuse and to ClickHouse as themselves, through an Amazon Cognito user pool, instead of sharing the generated passwords. Part 9 covers it. Service connections, such as Langfuse's own connection to ClickHouse, keep their passwords.
+
 ## 3. The parts, and what each one is for
 
 The ClickHouse cluster is a handful of cooperating pieces:
@@ -129,7 +133,7 @@ Nothing here is exotic. It is a normal EKS build with two deliberate oddities: t
 
 ## 5. How a deployment goes, in general
 
-ClickHouse publishes a tutorial for this deployment, and this project follows its steps in order. The kit numbers them 1 to 12 and adds optional Steps 13 to 18 for Langfuse and Grafana. In plain terms:
+ClickHouse publishes a tutorial for this deployment, and this project follows its steps in order. The kit numbers them 1 to 12 and adds optional Steps 13 to 18 for Langfuse and Grafana, and optional Steps 6b and 11b for single sign-on. In plain terms:
 
 | Step | What happens | What it gives you |
 |---|---|---|
@@ -139,11 +143,13 @@ ClickHouse publishes a tutorial for this deployment, and this project follows it
 | 4 | EKS control plane | Kubernetes itself |
 | 5 | Node groups | The machines, in three groups by job |
 | 6 | S3 bucket and IAM role | Storage for the data, and permission for server pods to reach it |
+| 6b (optional) | A Cognito user pool with groups and two app clients | The identity source that Langfuse and ClickHouse sign-in trust |
 | 7 | Kubernetes prerequisites (StorageClass, namespaces) | The disk type and the namespaces the software lives in |
 | 8 | Install the operator | The controller that builds and repairs the cluster |
 | 9 | Deploy a ClickHouseCluster | The cluster itself: you describe it, the operator builds it |
 | 10 | Preflight checks | ClickHouse's own inspection of the live cluster |
 | 11 | Verify | Proof that a table written on one server is readable from another |
+| 11b (optional) | ClickHouse roles that Cognito group names map to | People log in to ClickHouse with a Cognito token and get only the rights their group grants |
 | 12 | Load balancer | One stable address for clients |
 | 13 (optional) | S3 bucket and IAM role for Langfuse | Storage for Langfuse's raw events, with its own permission |
 | 14 (optional) | A database and user for Langfuse inside ClickHouse | Access to one database, not the whole cluster |
@@ -161,6 +167,10 @@ Steps 13–15 are off by default and change nothing when they are off. Switched 
 ### Optional: Grafana on top
 
 Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1 §3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
+
+### Optional: single sign-on
+
+Steps 6b and 11b are also off by default, and independent of Langfuse and Grafana. Switched on (`sso.enabled: true`), Step 6b builds an Amazon Cognito user pool, which can also federate to an external SAML identity provider. Langfuse can then offer Cognito sign-in (`sso.langfuse.enabled`), and ClickHouse can accept a Cognito token as a login (`sso.clickhouse_jwt.enabled`), with Step 11b creating the roles that Cognito group names map to. `scripts/ch-client.sh --sso` logs you in to ClickHouse as yourself, and `scripts/sso-smoke.sh` checks the setup. The architecture, the variables, the server's JWT caveats, the reason service users keep their passwords and the GovCloud notes are in **Part 9**.
 
 ## 6. How to deploy it with this project
 
@@ -289,7 +299,7 @@ appropriate if the cluster matters.
 
 ## 8. Operating it
 
-To *operate* the system, you connect to it, look at its state, check its health, control its cost, and tear it down. The kit gives you these tools for that: `scripts/ch-client.sh` (an SQL session, section 9), `kubectl` with the kubeconfig in `state/`, the preflight and verify checks below, `scripts/langfuse-smoke.sh` and `scripts/grafana-smoke.sh` for the optional layers, and `scripts/up.sh` and `scripts/down.sh` to start and stop. It does not include procedures beyond these.
+To *operate* the system, you connect to it, look at its state, check its health, control its cost, and tear it down. The kit gives you these tools for that: `scripts/ch-client.sh` (an SQL session, section 9), `kubectl` with the kubeconfig in `state/`, the preflight and verify checks below, `scripts/langfuse-smoke.sh`, `scripts/grafana-smoke.sh` and `scripts/sso-smoke.sh` for the optional layers, and `scripts/up.sh` and `scripts/down.sh` to start and stop. It does not include procedures beyond these.
 
 ### The meter
 
@@ -334,6 +344,7 @@ Grafana too), and the script handles them:
   cluster and the node groups, whether or not `grafana.enabled` is still
   `true`. Part 8 §13 has the details, including the one bucket this project
   actually deletes on teardown rather than keeping.
+- The Cognito stack (optional Step 6b) is removed by `down.sh` after Langfuse, when one exists. The pool and its users go with it. Part 9 §12 has the details.
 
 ### Up again
 
@@ -487,6 +498,7 @@ anyone noticing.
 | **FIPS** | The US federal cryptography standard. ClickHouse states that the Government build uses FIPS-validated libraries (a claim about the product, not one this kit certifies), which forces x86_64 |
 | **Langfuse** | An open-source tool that records what an application asked a language model and what it answered. Optional, and it stores its traces in ClickHouse |
 | **Deploy / operate** | Deploy: build the infrastructure and install the software (`scripts/up.sh`). Operate: connect, check health, stop, restart and tear down (section 8) |
+| **Cognito / JWT** | Amazon Cognito is AWS's user-sign-in service. A JWT is the signed token it issues after a login. With single sign-on on, Langfuse accepts the login and ClickHouse accepts the token, and Cognito group names decide which ClickHouse rights a person gets. Optional, and covered in Part 9 |
 | **DHI** | Docker Hardened Images, a paid catalog that needs a login. Only Grafana's images come from it |
 | **`auth_mode`** | The `aws.auth_mode` setting: `sso` renders a project-local AWS config, `profile` uses a profile you already have |
 | **state/** | The gitignored folder holding kubeconfig, passwords and reports. Back it up |

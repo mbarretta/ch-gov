@@ -31,6 +31,7 @@ This page describes a **fresh install** brought up with `fips: true` from the st
 
 - **Images other than ClickHouse's three.** The Langfuse application, Chainguard PostgreSQL and Valkey, Grafana, and `awscli` images have no FIPS variant in this kit.
 - **Langfuse's own S3 access.** Its in-pod S3 client, on its own separate IAM role, does not use FIPS endpoints. This is a real gap that remains open. See Part 7 section 1.
+- **The Cognito and JWKS endpoints, when single sign-on is on (`sso.enabled`).** The browser and the Langfuse pods reach Cognito's hosted UI and token endpoints, and ClickHouse fetches Cognito's JWKS document, over the standard Cognito endpoints. None of it is routed by the kit's `use_fips_endpoint` setting. Only the controller's own Cognito and CloudFormation calls are. See [Part 9](docs/part-9-sso.md) section 9 and Part 7 section 1.
 - **Any other pod-side AWS SDK call** outside the two explicitly wired paths above. The controller's AWS configuration says nothing about what a pod's own SDK, under its own credentials, routes through.
 - **Langfuse's one-time schema-migration connection to ClickHouse.** It is TLS-encrypted, but the pinned Langfuse application image hardcodes certificate verification off for that one migration step, independent of any setting this deployment controls. This is an upstream limitation of that image, not a choice made here.
 - **Hostname and identity verification on ClickHouse's native protocol.** The chart's TLS surface offers CA-chain verification only, with no hostname-matching option to turn on.

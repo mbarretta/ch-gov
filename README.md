@@ -68,6 +68,7 @@ The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your 
 | [Part 6](docs/part-6-langfuse.md) | Steps 13 to 15: Langfuse on ClickHouse, TLS, the smoke test, and teardown order | Deploy, then operate: smoke test and teardown |
 | [Part 7](docs/part-7-fips-hardening.md) | What `fips: true` changes: endpoints, encryption keys, and TLS | Deploy: configuration and self-checks |
 | [Part 8](docs/part-8-grafana.md) | Steps 16 to 18: Grafana with a ClickHouse datasource, and its smoke test | Deploy, then operate: smoke test and teardown |
+| [Part 9](docs/part-9-sso.md) | Steps 6b and 11b: single sign-on with Amazon Cognito for Langfuse and ClickHouse, and its smoke test | Deploy, then operate: log in, smoke test and teardown |
 
 ## Quickstart
 
