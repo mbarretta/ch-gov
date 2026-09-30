@@ -52,7 +52,7 @@ The pull role lives in *your* account and points *outward*. ClickHouse sets it u
 
 1. **The grant.** Share your AWS account ID with your ClickHouse contact. They arrange read access to the source registry for your account.
 2. **The role.** ClickHouse sets up `ClickHouseAirgapECRPullRole` (the name is `aws.ecr_pull_role_name`) in your account. Its trust relationship lets your deploying identity assume it, and it carries the read access to the three source repositories the kit uses. You do not create it. Part 1 lists the exact actions under [What the pull role needs](part-1-prerequisites.md#what-the-pull-role-needs).
-3. **The profile.** `aws.source_ecr_profile` (default `ch-gov-ecr-pull`) assumes that role, chaining off your target profile. In SSO mode the kit renders it for you. In profile mode you add it to your own AWS config, as Part 1 shows under Path B in [AWS access: one setting, two paths](part-1-prerequisites.md#3-aws-access-one-setting-two-paths).
+3. **The profile.** `aws.source_ecr_profile` (default `ch-gov-ecr-pull`) assumes that role, chaining off your target profile. In SSO mode the kit renders it for you. In profile mode you add it to your own AWS config, as Part 1 shows under [Path B: an existing profile](part-1-prerequisites.md#path-b-an-existing-profile-auth_mode-profile).
 
 The kit never creates or changes the role, and the playbook only proves that you can assume it.
 
@@ -391,14 +391,13 @@ The upstream tutorial specifies `m7g.2xlarge`, `m7gd.16xlarge` and `m7i.2xlarge`
 source scripts/env.sh
 REGION="$(aws configure get region)"
 REGISTRY="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$REGION.amazonaws.com"
-CHART_VERSION=$(aws ecr describe-images --repository-name helm/onprem-clickhouse-cluster \
-  --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text)
+CHART_VERSION=$(awk '/^ +cluster_chart:/{gsub(/"/,"",$2); print $2}' ansible/group_vars/all.yml)
 aws ecr get-login-password | helm registry login --username AWS --password-stdin "$REGISTRY"
 helm pull "oci://$REGISTRY/helm/onprem-clickhouse-cluster" --version "$CHART_VERSION" --untar
 grep -A12 'podPolicy:' onprem-clickhouse-cluster/values.yaml
 ```
 
-The region comes from your profile (`target_region`), and the chart version is the tag the kit copied, which is `versions.cluster_chart`. With `fips: true`, use the host name `<YOUR_ACCOUNT_ID>.dkr-ecr-fips.$REGION.on.aws` for `REGISTRY` instead, and keep the chart version as it is, because charts take no `-fips` suffix. The chart's defaults amount to this:
+The region comes from your profile (`target_region`), and the chart version is `versions.cluster_chart`, which is the tag the kit copied. With `fips: true`, use the host name `<YOUR_ACCOUNT_ID>.dkr-ecr-fips.$REGION.on.aws` for `REGISTRY` instead, and keep the chart version as it is, because charts take no `-fips` suffix. The chart's defaults amount to this:
 
 ```yaml
 server.podPolicy.resources.requests:   {cpu: "4", memory: 8Gi}
