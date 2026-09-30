@@ -32,6 +32,16 @@
 #     PVC-backed storage (no persistence, by design), so its namespace
 #     deletion does not need the nodes-alive guard below -- it works even
 #     with zero nodes. Only what exists is torn down, same as Langfuse.
+#   * The Cognito stack (optional single sign-on, Step 6b) goes AFTER Langfuse
+#     and the ClickHouse cluster, the two things that trust it: Langfuse's
+#     sign-in and the cluster's JWT user directory both point at its issuer
+#     and signing keys, so removing it first would leave them holding a dead
+#     endpoint. It needs neither the nodes nor the cluster, only the AWS
+#     account. The group roles created inside ClickHouse (Step 11b, ch-jwt)
+#     go with the cluster, so like lf-db they are not a separate default step:
+#     `scripts/play.sh --tags ch-jwt -e ch_jwt_state=absent` drops just them.
+#     The state/ files describing the pool are kept. Only what exists is torn
+#     down, same as Langfuse.
 #
 # What each mode leaves behind and what it costs:
 #   --nodes-only  VPC, EKS, IRSA, operator, StorageClass, cluster objects (Pending),
@@ -80,9 +90,9 @@ GF_RELEASE="$(gf_var '  release:')"
 # grafana_db_state).
 case "$MODE" in
   nodes)   PLAN=(nodes:nodegroups_state) ;;
-  default) PLAN=(lf-app:langfuse_state gf-app:grafana_state lb:lb_state cluster:cluster_state nodes:nodegroups_state) ;;
+  default) PLAN=(lf-app:langfuse_state gf-app:grafana_state lb:lb_state cluster:cluster_state sso-idp:sso_idp_state nodes:nodegroups_state) ;;
   all)     PLAN=(lf-app:langfuse_state lf-db:langfuse_db_state gf-app:grafana_state gf-db:grafana_db_state
-                 lb:lb_state cluster:cluster_state
+                 lb:lb_state cluster:cluster_state sso-idp:sso_idp_state
                  operator:operator_state prereqs:prereqs_state lf-storage:langfuse_storage_state gf-storage:grafana_storage_state
                  nodes:nodegroups_state storage:storage_state eks:eks_state vpc:vpc_state) ;;
 esac
@@ -121,6 +131,14 @@ gf_storage_exists() {
   aws cloudformation describe-stacks --stack-name "${ENVIRONMENT_NAME}-grafana-irsa" \
     --profile "$TARGET_PROFILE" --region "$REGION" >/dev/null 2>&1
 }
+# --- Cognito: keep sso-idp only when its stack exists ---------------------------
+# deploy.yml tears the stack down whenever sso_idp_state is absent, whether or
+# not sso.enabled is still true, so a previously-deployed-then-disabled pool
+# still gets removed; with no stack there is nothing to delete.
+sso_idp_exists() {
+  aws cloudformation describe-stacks --stack-name "${ENVIRONMENT_NAME}-sso" \
+    --profile "$TARGET_PROFILE" --region "$REGION" >/dev/null 2>&1
+}
 LF_STORAGE=0; GF_STORAGE=0
 kept=()
 for entry in "${PLAN[@]}"; do
@@ -131,6 +149,7 @@ for entry in "${PLAN[@]}"; do
     gf-app)     gf_app_exists || continue ;;
     gf-db)      kubectl get namespace "$GF_NAMESPACE" >/dev/null 2>&1 || continue ;;
     gf-storage) gf_storage_exists || continue; GF_STORAGE=1 ;;
+    sso-idp)    sso_idp_exists || continue ;;
   esac
   kept+=("$entry")
 done

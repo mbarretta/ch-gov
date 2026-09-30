@@ -49,7 +49,7 @@ ch_resolve() {
   out="$(cd "$CH_PROJECT_ROOT/ansible" && \
          ANSIBLE_STDOUT_CALLBACK=minimal ANSIBLE_CALLBACK_RESULT_FORMAT=json \
          ansible localhost ${extra[@]+"${extra[@]}"} -m ansible.builtin.debug \
-           -a 'msg={{ {"fips": fips, "size": size, "pricing": pricing, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "langfuse": langfuse, "grafana": grafana} }}' \
+           -a 'msg={{ {"fips": fips, "size": size, "pricing": pricing, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "sso": sso, "langfuse": langfuse, "grafana": grafana} }}' \
            </dev/null 2>"$errf")" || rc=$?
   json="${out#*=> }"
   if ((rc == 0)) && CH_VARS_JSON="$(jq -ce '.msg | select(type == "object")' <<<"$json" 2>/dev/null)" && [[ -n "$CH_VARS_JSON" ]]; then
@@ -392,6 +392,174 @@ gf_url() {
 gf_cacert() {
   gf_tls && [[ -r "$GF_TLS_CERT" ]] || return 1
   printf '%s\n' "$GF_TLS_CERT"
+}
+
+# ---- Single sign-on (optional Steps 6b and 11b) -----------------------------
+# sso: sits before langfuse: in group_vars, and these helpers read it through
+# ch_var like everything else, so state/deploy-vars.yml is merged over all.yml
+# key by key exactly as the playbook resolves it (nested mappings merge, lists
+# replace). Nothing here scrapes the YAML file.
+
+# The file the sso_cognito role writes (sso_state_files.outputs_file): issuer,
+# jwks_uri, hosted-UI and token endpoints, both app client IDs and callback
+# URLs. It carries no secret.
+readonly SSO_OUTPUTS="$CH_PROJECT_ROOT/state/sso-cognito-outputs.json"
+
+# Prints one merged value from the sso: block by dotted path:
+#   sso_var enabled      sso_var langfuse.enabled      sso_var clickhouse_jwt.enabled
+sso_var() { ch_var "sso.$1"; }
+
+# Succeed when the master switch is on / the Langfuse sign-in is wanted (it
+# needs Langfuse itself too, as in the sso_cognito role) / ClickHouse accepts
+# Cognito tokens (Step 11b).
+sso_enabled()          { [[ "$(sso_var enabled)" == true ]]; }
+sso_langfuse_enabled() { sso_enabled && [[ "$(sso_var langfuse.enabled)" == true && "$(lf_var '  enabled:')" == true ]]; }
+sso_jwt_enabled()      { sso_enabled && [[ "$(sso_var clickhouse_jwt.enabled)" == true ]]; }
+
+# Prints one key of the outputs file (nothing for an absent or null key).
+sso_out() {
+  [[ -r "$SSO_OUTPUTS" ]] || return 1
+  jq -r --arg k "$1" '.[$k] // empty' "$SSO_OUTPUTS"
+}
+
+# Dies unless the outputs file exists, naming the step that writes it.
+sso_require_outputs() {
+  [[ -r "$SSO_OUTPUTS" ]] || die "no SSO outputs at $SSO_OUTPUTS -- run: scripts/play.sh --tags sso-idp"
+}
+
+# Signs in through the Cognito hosted UI and prints the ClickHouse app client's
+# ID token on stdout (progress goes to stderr). Authorization-code flow with
+# PKCE: the app client is public, so the code exchange carries the PKCE
+# verifier instead of a secret. A loopback listener on the callback URL the
+# stack registered (clickhouse_callback_url, fixed at http://localhost:8765/
+# callback) catches the redirect. Only the ID token carries the aud claim the
+# ClickHouse JWT directory requires, so that is the token returned.
+#
+# The token lives in the caller's variable only: nothing is written to disk.
+# Set CH_SSO_NO_BROWSER=1 to print the sign-in URL without opening a browser,
+# and CH_SSO_TIMEOUT=<seconds> to change the 180-second wait.
+#
+# Call as TOKEN="$(sso_login_id_token)" || exit 1.
+sso_login_id_token() {
+  have python3 || { fail "python3 is required for the browser sign-in" >&2; return 1; }
+  have jq      || { fail "jq is not installed" >&2; return 1; }
+  [[ -r "$SSO_OUTPUTS" ]] || { fail "no SSO outputs at $SSO_OUTPUTS -- run: scripts/play.sh --tags sso-idp" >&2; return 1; }
+  local authz token_ep client redirect
+  authz="$(sso_out authorization_endpoint)"; token_ep="$(sso_out token_endpoint)"
+  client="$(sso_out clickhouse_client_id)"; redirect="$(sso_out clickhouse_callback_url)"
+  [[ -n "$authz" && -n "$token_ep" && -n "$client" && -n "$redirect" ]] \
+    || { fail "$SSO_OUTPUTS lacks authorization_endpoint, token_endpoint, clickhouse_client_id or clickhouse_callback_url -- re-run: scripts/play.sh --tags sso-idp" >&2; return 1; }
+  python3 - "$authz" "$token_ep" "$client" "$redirect" <<'PY'
+import base64, hashlib, http.server, json, os, secrets, sys, time, urllib.error, urllib.parse, urllib.request, webbrowser
+
+authz, token_ep, client_id, redirect = sys.argv[1:5]
+timeout = int(os.environ.get("CH_SSO_TIMEOUT", "180"))
+
+
+def die(msg):
+    print("  [fail] " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+cb = urllib.parse.urlsplit(redirect)
+if cb.scheme != "http" or cb.hostname not in ("localhost", "127.0.0.1") or not cb.port:
+    die("the callback URL must be http://localhost:<port>/<path>, got " + redirect)
+
+verifier = secrets.token_urlsafe(64)
+challenge = b64url(hashlib.sha256(verifier.encode()).digest())
+state = secrets.token_urlsafe(24)
+nonce = secrets.token_urlsafe(24)
+got = {}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+        if url.path != (cb.path or "/") or params.get("state") != state:
+            # Not our redirect (a stray request): refuse it and keep waiting.
+            self.send_response(400)
+            self.end_headers()
+            return
+        got.update(params)
+        body = b"Signed in. You can close this tab and return to the terminal.\n"
+        if "code" not in params:
+            body = b"Sign-in failed. See the terminal for details.\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+try:
+    # Threaded, so an idle speculative connection a browser opens ahead of the
+    # redirect cannot stall the real request behind it.
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", cb.port), Handler)
+except OSError as exc:
+    die("cannot listen on 127.0.0.1:%d (%s); stop whatever holds that port" % (cb.port, exc))
+server.daemon_threads = True
+server.timeout = 1
+
+query = urllib.parse.urlencode({
+    "response_type": "code",
+    "client_id": client_id,
+    "redirect_uri": redirect,
+    "scope": "openid email profile",
+    "state": state,
+    "nonce": nonce,
+    "code_challenge": challenge,
+    "code_challenge_method": "S256",
+})
+sign_in = authz + ("&" if "?" in authz else "?") + query
+print("  Sign in to Cognito in your browser:\n    " + sign_in, file=sys.stderr)
+if not os.environ.get("CH_SSO_NO_BROWSER"):
+    webbrowser.open(sign_in)
+
+deadline = time.time() + timeout
+while not got and time.time() < deadline:
+    server.handle_request()
+server.server_close()
+if not got:
+    die("no sign-in within %d seconds" % timeout)
+if "code" not in got:
+    die("Cognito returned %s: %s" % (got.get("error", "no code"), got.get("error_description", "")))
+
+form = urllib.parse.urlencode({
+    "grant_type": "authorization_code",
+    "client_id": client_id,
+    "code": got["code"],
+    "redirect_uri": redirect,
+    "code_verifier": verifier,
+}).encode()
+request = urllib.request.Request(token_ep, data=form, headers={"Content-Type": "application/x-www-form-urlencoded"})
+try:
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        tokens = json.load(resp)
+except urllib.error.HTTPError as exc:
+    die("the token endpoint answered HTTP %d: %s" % (exc.code, exc.read(400).decode("utf-8", "replace")))
+except (urllib.error.URLError, OSError) as exc:
+    die("cannot reach the token endpoint: %s" % exc)
+
+id_token = tokens.get("id_token")
+if not id_token:
+    die("the token response has no id_token")
+try:
+    payload = id_token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+except (IndexError, ValueError):
+    die("the id_token is not a JWT")
+if claims.get("aud") != client_id or claims.get("nonce") != nonce:
+    die("the id_token does not match this sign-in (aud or nonce)")
+print(id_token)
+PY
 }
 
 # ---- fips (shared by ch-client.sh's TLS handling) -------------------------
