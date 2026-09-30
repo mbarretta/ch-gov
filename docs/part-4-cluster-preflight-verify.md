@@ -148,7 +148,7 @@ Two related tools help when a task fails. The role hides its output with `no_log
 
 ### Sizing, and where the cache number comes from
 
-The default sizes are for learning and evaluation, not production. [Learning setup vs. production](limitations.md) lists what to change before you rely on a deployment.
+The default sizes are for learning and workshops, not production. [Learning setup vs. production](limitations.md) lists what to change before you rely on a deployment.
 
 | | Node | Pod request = limit | Why |
 |---|---|---|---|

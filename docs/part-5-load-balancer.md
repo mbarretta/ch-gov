@@ -44,7 +44,7 @@ $ kubectl get clickhousecluster c-default-us-01 -n ns-default-us-01 -o jsonpath=
 internal clickhouse.example.internal
 ```
 
-And then nothing happens. No Service of type `LoadBalancer` appears (the three Services stay `ClusterIP`), the operator log says nothing about it, and the hostname reaches neither the server config nor the pod. In ClickHouse Cloud these fields drive components such as Istio gateways, DNS and certificate SANs. A private deployment does not run those components, so in this deployment the fields are metadata.
+And then nothing happens. No Service of type `LoadBalancer` appears (the three Services stay `ClusterIP`), the operator log says nothing about it, and the hostname reaches neither the server config nor the pod. In ClickHouse Cloud these fields drive components such as Istio gateways, DNS and certificate SANs. A private deployment does not include those components, so in this deployment the fields are metadata.
 
 The consequence is that **Step 12 has to create the load balancer itself**. The `clickhouse_loadbalancer` role leaves the chart values at `none`, so nobody later reads `type: internal` on the CR and believes it did something.
 
@@ -127,7 +127,7 @@ An internal NLB has a private address. If you resolve it from outside the VPC, y
 
 1. **`scripts/ch-client.sh` (no `--lb`)** still works. It port-forwards through the Kubernetes API server. The load balancer is for *applications in the VPC*.
 2. **A VPN or peering into the VPC.** After that, `scripts/ch-client.sh --lb` and any other client work with the hostname directly.
-3. **`type: public` with `allowed_cidrs: ["<your egress IP>/32"]`.** This suits a lab, but without `fips: true` it is plain TCP: the native protocol on 9000 and HTTP on 8123 both carry credentials in the clear. With `fips: true` the ports are the TLS ones, and the certificate is self-signed. Either way, treat `public` as a convenience. [Learning setup vs. production](limitations.md) notes that the `public` type has not been exercised.
+3. **`type: public` with `allowed_cidrs: ["<your egress IP>/32"]`.** This suits a lab, but without `fips: true` it is plain TCP: the native protocol on 9000 and HTTP on 8123 both carry credentials in the clear. With `fips: true` the ports are the TLS ones, and the certificate is self-signed. Either way, treat `public` as a convenience: the kit is built around `internal`, and [Learning setup vs. production](limitations.md) lists `public` as outside that design.
 
 ## Cost
 
