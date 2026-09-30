@@ -200,11 +200,12 @@ Tokens last hours, not days. Every script checks your credentials first and prin
 |---|---|---|
 | `aws.auth_mode` | `sso` | How the kit authenticates to AWS: `sso` or `profile` |
 | `fips` | `false` | Standard ARM64 build, or the Government (FIPS) x86_64 build. Changes images, instance types, registry |
+| `size` | `minimal` | `minimal` keeps the ClickHouse pods under a 74 GB memory budget on modest nodes. `tutorial` uses the upstream tutorial's larger nodes and pods |
 | `infrastructure.eks_version` | `"1.36"` | Kubernetes version |
 | `infrastructure.nat_mode` | `single` | One NAT gateway (cheap) or one per zone (resilient) |
-| `infrastructure.*.instance_type` | learning sizes | Machine shapes per node group. Sized for learning and workshops, not production, and smaller than the tutorial's |
+| `infrastructure.*.instance_type` | set by `size` | Machine shapes per node group. `minimal` is sized for learning and workshops, not production, and is smaller than the tutorial's, which `size: tutorial` selects |
 | `clickhouse.cluster_name` | `default-us-01` | Names everything else. Must match `^[a-z]+-[a-z]{2}-[0-9]{2}$` |
-| `clickhouse.server` / `.keeper` | 3 × 4cpu/16Gi, 3 × 2cpu/4Gi | Pod sizes. Must fit the instance types |
+| `clickhouse.server` / `.keeper` | set by `size`: 3 × 6cpu/20G and 3 × 2cpu/4G with `minimal` | Pod sizes. Must fit the instance types |
 | `clickhouse.load_balancer.type` | `internal` | `none`, `internal` (private address) or `public` |
 | `clickhouse.load_balancer.allowed_cidrs` | `[]` | Who may connect. Empty means the VPC for `internal`, an error for `public` |
 

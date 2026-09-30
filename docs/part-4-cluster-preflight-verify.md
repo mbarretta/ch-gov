@@ -148,18 +148,22 @@ Two related tools help when a task fails. The role hides its output with `no_log
 
 ### Sizing, and where the cache number comes from
 
-The default sizes are for learning and workshops, not production. [Learning setup vs. production](limitations.md) lists what to change before you rely on a deployment.
+The default sizes are for learning and workshops, not production. [Learning setup vs. production](limitations.md) lists what to change before you rely on a deployment. The `size:` switch in `ansible/group_vars/all.yml` chooses between two profiles: `minimal` (the default, described below) and `tutorial` (the upstream tutorial's node and pod sizes).
 
 | | Node | Pod request = limit | Why |
 |---|---|---|---|
-| server | `m7gd.2xlarge` (8 vCPU, 32Gi, 442Gi NVMe) | 4 CPU / **16Gi** | The chart's default is 8Gi. 16Gi is the AWS base configuration's own value, the node has room, and the cache scales with RAM (below). |
-| keeper | `m7g.xlarge` (4 vCPU, 16Gi) | 2 CPU / 4Gi | The chart's default. |
+| server | `m7gd.2xlarge` (8 vCPU, 32Gi, 442Gi NVMe) | 6 CPU / **20G** | The chart's default is 4 CPU / 8Gi. 6 CPU / 20G fits the node and the memory budget below, and the cache scales with RAM (below). |
+| keeper | `m7g.xlarge` (4 vCPU, 16Gi) | 2 CPU / 4G | The chart's default is 2 CPU / 4Gi, written here in decimal G to keep the budget. |
 
 With `fips: true` the kit uses x86_64 instance types instead (`m6id.2xlarge` for servers and `m7i.xlarge` for Keeper).
 
-The SSD read cache is specified as `cacheDiskSize: 300Gi`, and the chart converts it: **`bytesPerGiRAM = cacheDiskSize / memory limit`**, so 300Gi / 16 = `18Gi`, which is what lands in the CR. 300Gi is about 68% of the 442Gi disk that Step 5 mounts at `/nvme/disk`. Two constraints set that number: the preflight check fails at 80% or more, and ClickHouse can briefly exceed the cache limit during merges. If you change the memory limit, the cache ratio changes with it. That is why the kit expresses the cache as a size and not as the raw ratio.
+Memory is written in decimal `G`, not `Gi`, because `minimal` is sized to keep the ClickHouse components under 74 GB of memory, a decimal figure. Three servers at 20G and three Keeper pods at 4G make 72G, and the operator manager is pinned to 1G, so the whole set is 73G. Requests equal limits, so that is what the pods can actually use. Written as `Gi`, the same pods would total 72Gi, which is 77.3 GB and over the budget.
 
-Servers get **no EBS volume**. `featureFlags.disableMetadataPersistentVolumes` defaults to `true`, which sets `disableServerStorageVolumes` and `enableDatabaseDisk` on the CR. Data lives in S3, table metadata lives in Keeper through the Shared Catalog, and nothing sits on local disk except the cache. Keeper keeps a 10Gi `gp3-encrypted` volume per replica. It is the only persistent state in the cluster, and the only thing teardown has to clean up.
+With `size: tutorial` the kit uses the upstream tutorial's sizes instead: servers on `m7gd.16xlarge` (`m6id.16xlarge` for FIPS) with 60 CPU / 232Gi pods and a 2552Gi cache, and Keeper on `m7g.2xlarge` (`m7i.2xlarge` for FIPS) with 4 CPU / 16Gi pods and 50Gi volumes. Set it in `state/deploy-vars.yml` or per run with `-e size=tutorial`. The compute then costs roughly $12 an hour.
+
+The SSD read cache is specified as `cacheDiskSize: 300Gi`, and the chart converts it: **`bytesPerGiRAM = cacheDiskSize / memory limit`**, so 300Gi / 20G is 300Gi / 18.63Gi, about 16.1, and the chart uses the whole number `16Gi`, which is what lands in the CR. The cache the server actually gets is 16Gi × 18.63 = about 298Gi, which is about 67% of the 442Gi disk that Step 5 mounts at `/nvme/disk`. The 80% failure line for that disk is about 353Gi. Two constraints set that number: the preflight check fails at 80% or more, and ClickHouse can briefly exceed the cache limit during merges. If you change the memory limit, the cache ratio changes with it. That is why the kit expresses the cache as a size and not as the raw ratio.
+
+Servers get **no EBS volume**. `featureFlags.disableMetadataPersistentVolumes` defaults to `true`, which sets `disableServerStorageVolumes` and `enableDatabaseDisk` on the CR. Data lives in S3, table metadata lives in Keeper through the Shared Catalog, and nothing sits on local disk except the cache. Keeper keeps a 10Gi `gp3-encrypted` volume per replica (50Gi with `size: tutorial`). It is the only persistent state in the cluster, and the only thing teardown has to clean up.
 
 Log level is `information` for both, not the chart's `trace`. Servers have no volume, so logs go to stdout and the node's rotation, and `trace` would make `kubectl logs` unusable.
 
@@ -184,8 +188,8 @@ When the step finishes, the role prints a summary in this shape:
 
 ```
 cluster:   c-default-us-01 in ns-default-us-01
-server:    3 x <server version>  (4 CPU / 16Gi, cache 300Gi)
-keeper:    3 x <keeper version>  (2 CPU / 4Gi, 10Gi EBS each)
+server:    3 x <server version>  (6 CPU / 20G, cache 300Gi)
+keeper:    3 x <keeper version>  (2 CPU / 4G, 10Gi EBS each)
 s3:        <N>+ objects in s3://<BUCKET_NAME> under ch-s3-*/<uuid>/
 admin:     user 'default', password in state/clickhouse-admin-password
 ```
@@ -334,7 +338,7 @@ The script does the tutorial's port-forward, reads the admin password from `stat
 
 ## Cost check
 
-Steps 9–11 add nothing to the hourly rate. The pods fit on the node groups that Step 5 already pays for, servers have no volume, and Keeper's three 10Gi gp3 volumes cost pennies. With the default sizing the rate stays at about **$2.32/hr** with nodes up and about $0.15/hr with them down. S3 data is billed by the GB and survives everything except a deliberate delete.
+Steps 9–11 add nothing to the hourly rate. The pods fit on the node groups that Step 5 already pays for, servers have no volume, and Keeper's three 10Gi gp3 volumes cost pennies. With the default `minimal` size the rate stays at about **$2.32/hr** with nodes up and about $0.15/hr with them down. S3 data is billed by the GB and survives everything except a deliberate delete.
 
 ## Self-checks
 
@@ -361,7 +365,7 @@ NS=ns-default-us-01
    kubectl get pvc -n "$NS"
    ```
 
-   You should see three `Bound` claims of `10Gi` on `gp3-encrypted`, all for Keeper, and none for servers.
+   You should see three `Bound` claims of `10Gi` (`50Gi` with `size: tutorial`) on `gp3-encrypted`, all for Keeper, and none for servers.
 
 3. **Every container, init containers included, pulls from your registry.**
 
@@ -423,6 +427,25 @@ NS=ns-default-us-01
 
    On a healthy cluster nothing needs to change, so the play recap should report `changed=0`.
 
-10. **You know how to stop the meter.** Run `scripts/down.sh --nodes-only` when you finish for the day, and `scripts/up.sh --from nodes` to resume.
+10. **The memory requests fit the 74 GB budget.** This sums the memory requests of every container in the ClickHouse namespace and the operator namespace, in bytes, and compares the total with 74 GB (74,000,000,000 bytes). The expression reads both decimal suffixes (`k`, `M`, `G`, `T`) and binary ones (`Ki`, `Mi`, `Gi`, `Ti`), and a container with no memory request counts as zero.
+
+   ```bash
+   kubectl get pods -A -o json | jq --arg ch "$NS" --arg op clickhouse-operator-system '
+     def bytes:
+       capture("^(?<n>[0-9.]+)(?<u>[A-Za-z]*)$")
+       | (.n | tonumber) * ({"": 1, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12,
+           "Ki": 1024, "Mi": 1048576, "Gi": 1073741824, "Ti": 1099511627776}[.u]);
+     [ .items[]
+       | select(.metadata.namespace == $ch or .metadata.namespace == $op)
+       | .spec.containers[]
+       | (.resources.requests.memory // "0") | bytes ]
+     | add | {requested_bytes: ., budget_bytes: 74000000000, within_budget: (. <= 74000000000)}'
+   ```
+
+   With `size: minimal` you should see `within_budget: true`, with a total of about 73 billion bytes: 72 GB for the servers and Keeper pods plus the operator manager's 1 GB. With `size: tutorial` the pods are far larger, so `within_budget` is `false`, which is expected because that profile is not sized for the budget.
+
+   **Exercise:** why does the total change if you write the same servers as `20Gi` instead of `20G`?
+
+11. **You know how to stop the meter.** Run `scripts/down.sh --nodes-only` when you finish for the day, and `scripts/up.sh --from nodes` to resume.
 
 **Next:** [Part 5](part-5-load-balancer.md) puts a load balancer in front of the servers.
