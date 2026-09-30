@@ -23,6 +23,10 @@ source "$CH_ROOT/scripts/lib/common.sh"
 # this order when no tags are given, so the list here only serves --from.
 STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb)
 
+# Resolve the configuration once here; the $(...) lookups below run in
+# subshells that inherit the cached result instead of each re-running Ansible.
+ch_resolve || exit 1
+
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
 # lf_var (lib/common.sh) reads the merged langfuse: block, so a deploy-vars
 # override of langfuse.enabled counts.
@@ -55,9 +59,13 @@ fi
 TAGS=("${TAGS[@]}"); TAGS=($(printf '%s\n' "${TAGS[@]}" | grep -v '^$'))
 
 LB_TYPE="$(ch_var clickhouse.load_balancer.type)"
+# The all-in hourly figure follows the configured size and fips, so it agrees
+# with the cost table in docs/part-2-image-sync.md for that profile.
+SIZE="$(ch_var size)"
+HOURLY="$(ch_hourly_cost)"
 
 step "Bringing up: ${TAGS[*]}"
-info "compute starts at Step 5 (nodes): ~\$2.32/hr while up, ~\$0.15/hr with nodes down"
+info "compute starts at Step 5 (nodes): ~\$${HOURLY}/hr while up (size: $SIZE), ~\$0.15/hr with nodes down"
 info "load balancer type (clickhouse.load_balancer.type): ${LB_TYPE:-none}"
 [[ "$LF_ENABLED" == true ]] && info "langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~\$0.02/hr for its NLB)"
 [[ "$GF_ENABLED" == true ]] && info "grafana: enabled -- Steps 16-18 run after Langfuse (adds ~\$0.02/hr for its NLB)"
@@ -111,7 +119,7 @@ if ((rc == 0)); then
     fi
     ok "          scripts/grafana-smoke.sh        (checks the ClickHouse datasource health and a live query)"
   fi
-  info "meter:    ~\$2.32/hr. Stop it with scripts/down.sh (keeps VPC/EKS, ~\$0.15/hr) or scripts/down.sh --all"
+  info "meter:    ~\$${HOURLY}/hr (size: $SIZE). Stop it with scripts/down.sh (keeps VPC/EKS, ~\$0.15/hr) or scripts/down.sh --all"
 else
   step "Failed (exit $rc)"
   info "fix the cause and re-run; every step picks up where it left off"
