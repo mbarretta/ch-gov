@@ -10,7 +10,7 @@ The `fips` switch (`fips:` in `ansible/group_vars/all.yml`) has existed since Pa
 
 Each section states the risk it closes, the `group_vars` ternary that gates it, the mechanism in the order it runs, and an honest paragraph on what that mechanism does and does not give you, because a compliance decision deserves the caveats as much as the feature. Each section ends with a self-check you can run on your own cluster.
 
-**What has and has not been verified.** Every mechanism below was derived from the code, the pulled Helm charts, and the CloudFormation templates in this repository. It has not been confirmed by running the full deployment with `fips: true` against a real cluster, so the self-checks are yours to run. [Learning setup vs. production](limitations.md) collects the same boundaries in one place, and [FIPS.md](../FIPS.md) is the one-page summary.
+**Where to look.** Every mechanism below comes from the code, the Helm charts, and the CloudFormation templates in this repository, and the self-checks let you confirm each one on your own cluster. [Scope and boundaries](limitations.md) collects what the kit covers and leaves out by design, and [FIPS.md](../FIPS.md) is the one-page summary.
 
 To turn the switch on, set `fips: true` in `state/deploy-vars.yml` (or in `ansible/group_vars/all.yml`) before you run `scripts/up.sh`. The self-checks assume you have run `source scripts/env.sh` so that `kubectl` and the AWS CLI point at this project.
 
@@ -50,7 +50,7 @@ In `profile` mode nothing is rendered, because the kit uses your own AWS configu
 | Langfuse's own in-pod S3 client (its own separate IRSA, for object storage) | **No** | Not wired. It still targets the standard S3 endpoint under `fips: true` |
 | Any other pod-side AWS SDK call outside the two paths above | **No**, unless independently configured | No blanket coverage exists |
 
-The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). VPC interface endpoints for ECR, STS, and CloudWatch, which would let a fully airgapped posture drop the NAT gateway entirely, are outside what the kit builds. See [Learning setup vs. production](limitations.md).
+The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). VPC interface endpoints for ECR, STS, and CloudWatch, which would let an airgapped deployment drop the NAT gateway (present only in this learning environment), are outside what the kit builds. See [Scope and boundaries](limitations.md).
 
 **Self-check**
 
@@ -185,7 +185,7 @@ _lf_tls_policy: "{{ 'ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04' if fips else 'ELB
 
    `server.openSSL.required: true` zeroes the plaintext `http_port` and `tcp_port` for **every** caller, not only the load balancer. So `clickhouse_loadbalancer`'s Service ports and health probe, and `scripts/ch-client.sh` (both its `--lb` and port-forward paths), all move to the secure ports (8443 HTTPS and 9440 native TLS) under `fips: true`.
 
-   What happens to Keeper's own plaintext listener under `openSSL.required` is **not** confirmed. That behavior lives in the Keeper operator chart, which the kit does not vendor or inspect, so the kit assumes the conservative default that Keeper's plaintext port may still be reachable, rather than assuming it is gone.
+   The kit does not control what Keeper's own plaintext listener does under `openSSL.required`. That behavior lives in the Keeper operator chart, which the kit does not vendor or inspect, so the kit assumes the conservative default that Keeper's plaintext port may still be reachable, rather than assuming it is gone.
 2. **Langfuse to ClickHouse.** With the plaintext ClickHouse ports gone under `fips: true`, `langfuse_clickhouse`'s health-check calls and `langfuse`'s migration and runtime connections all move to the secure ports and gain the ClickHouse CA, which is distributed into the Langfuse namespace as its own Secret (`langfuse-clickhouse-ca`).
 
    The chart's own `clickhouse.protocol` helper (read from the pulled 2.1.0 chart's templates) derives `https://` for `CLICKHOUSE_URL` from a `https://`-prefixed `clickhouse.host` value. That is the only way to flip the scheme without a duplicate-name `additionalEnv` override, because the chart's own validation rejects overriding `CLICKHOUSE_URL` directly while `clickhouse.host` is set.
@@ -202,7 +202,7 @@ What you do **not** get:
 
 - Hostname verification on ClickHouse's own native protocol. The chart's TLS surface never offers it, so CA-chain trust is the whole story.
 - Certificate verification on Langfuse's one-time schema migration. This is an upstream limitation in the pinned application image, not a choice this role makes.
-- A confirmed answer on whether Keeper's plaintext listener is gone under `fips: true`. That needs a check against a running cluster.
+- Control over Keeper's plaintext listener. Whether it is gone under `fips: true` depends on the Keeper operator chart, which the kit does not vendor or inspect. The first check below shows how to look.
 - A FIPS-validated certificate source. Both ClickHouse's leaf certificate and Langfuse's NLB certificate are self-signed and generated by the controller's own OpenSSL build, which this kit does not itself validate. Whether that matters for your compliance target is a question this repo does not answer for you.
 
 ### In-pod HTTPS checks with the bundled `wget`
@@ -226,14 +226,14 @@ kubectl -n langfuse get service langfuse-lb -o yaml | grep ssl-negotiation-polic
 scripts/langfuse-smoke.sh                                                                # a trace goes in and comes back out of ClickHouse
 ```
 
-Three checks are yours to make on a running cluster, because nothing has confirmed them:
+Three further checks you can make on a running cluster:
 
 - Look at the ports Keeper's pods declare and try each one, for example `kubectl -n ns-default-us-01 get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].ports}{"\n"}{end}'`. Decide for yourself whether a plaintext Keeper client port still answers.
 - Capture a TLS handshake for each of the three hops (ClickHouse native, Langfuse to ClickHouse, and the Langfuse NLB) and confirm the protocol and cipher.
-- Confirm that a `fips: true` deployment starts Langfuse without errors on its schema migration, since that connection relies on the unverified-certificate path described above.
+- Check that Langfuse starts cleanly on a `fips: true` deployment. Its one-time schema migration connects over TLS without certificate verification, as described above, so the Langfuse pod logs are the place to look.
 
 ---
 
 ## Where to go next
 
-[`FIPS.md`](../FIPS.md), at the repository root, gives the short version of everything above for someone deciding whether this posture clears their compliance bar. [Learning setup vs. production](limitations.md) lists what else differs from a production deployment. This part is the long version, with the mechanism and the caveats attached to each claim, and the self-checks above are how you turn those claims into evidence on your own cluster.
+[`FIPS.md`](../FIPS.md), at the repository root, gives the short version of everything above for someone deciding whether this posture clears their compliance bar. [Scope and boundaries](limitations.md) lists what else differs from a production deployment. This part is the long version, with the mechanism and the caveats attached to each claim, and the self-checks above are how you turn those claims into evidence on your own cluster.

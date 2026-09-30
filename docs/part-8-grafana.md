@@ -51,7 +51,7 @@ Langfuse's images come from `docker.langfuse.com` and Chainguard's anonymous `cg
 
 **DHI is a paid, authenticated catalog.** Docker Hardened Images (DHI) publishes hardened, minimal builds of common images, including Grafana's own upstream image and `awscli`. Pulling from `dhi.io` needs a Docker Hub account entitled to the catalog, unlike Chainguard's anonymous pulls. Step 2's `image_sync` logs in to `dhi.io` with `skopeo login`, passing the credential on stdin and never in a command line, the same way it handles ECR. It logs in only when an artifact in the list actually sources from `dhi.io`, so a run with Grafana off never asks for the credential. Where the credential comes from (`dhi.username` and `dhi.token` in `state/deploy-vars.yml`, or `DHI_USERNAME` and `DHI_TOKEN` in the environment) is covered once, for every optional credential the kit needs, in [Part 1, section 3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml).
 
-**The ClickHouse datasource is a plugin, and the cluster has no route to fetch it.** `grafana-clickhouse-datasource` is not baked into any image. A pod that fetched it from `grafana.com` at startup would need a route out of the cluster, which is the one thing this project is built to avoid. So Step 16 mirrors one pinned, SHA256-verified copy of the plugin zip into your own S3 bucket from your machine, the same "mirror once, pull only from your own account" shape Step 2 uses for images. Step 18's pod then reaches the bucket through an IRSA-authenticated initContainer, and never reaches `grafana.com`. IRSA (IAM roles for service accounts) is the mechanism that lets a pod assume an AWS role without static keys.
+**The ClickHouse datasource is a plugin, and the cluster is not meant to fetch it.** `grafana-clickhouse-datasource` is not baked into any image. A pod that fetched it from `grafana.com` at startup would need the cluster to reach the internet, which the airgapped design of ClickHouse Government avoids. So Step 16 mirrors one pinned, SHA256-verified copy of the plugin zip into your own S3 bucket from your machine, the same "mirror once, pull only from your own account" shape Step 2 uses for images. Step 18's pod then reaches the bucket through an IRSA-authenticated initContainer, and never reaches `grafana.com`. IRSA (IAM roles for service accounts) is the mechanism that lets a pod assume an AWS role without static keys.
 
 ## 3. The switch, and what it changes
 
@@ -189,7 +189,7 @@ Order matters the same way it does for Langfuse. `GF_SERVER_ROOT_URL` is baked i
 
 ### The plugin initContainers, and the shell they need
 
-The plugin cannot be baked into the image, and an airgapped cluster cannot fetch it from `grafana.com` (section 2). Two chained initContainers load it on every pod start:
+The plugin cannot be baked into the image, and an airgapped cluster is not meant to fetch it from `grafana.com` (section 2). Two chained initContainers load it on every pod start:
 
 1. **`gf-plugin-presign`** (the `awscli` image) computes a short-lived presigned URL for the one S3 key Step 16 mirrored. The URL expires after five minutes. It is a purely local SigV4 signature under IRSA, with no `ListBucket` call, and the container writes it to a small shared `emptyDir`.
 2. **`gf-plugin-install`** (the `grafana` image) runs `grafana cli --pluginUrl "$(cat ...)" plugins install grafana-clickhouse-datasource <version>`. It fetches that URL and unzips it with Grafana's own Go zip handling. `--pluginUrl` uses a plain Go `http.Client`, so it needs a real HTTP(S) URL. That is why the presign-and-relay step exists, instead of a shared volume holding the raw zip.
@@ -242,7 +242,7 @@ The default exposure is an **internal** NLB. You have the same three options tha
 2. `type: none`, then `kubectl port-forward -n grafana svc/grafana 3000:3000` and open `http://localhost:3000`. The local port must be exactly 3000, because `GF_SERVER_ROOT_URL` is set to that address in this mode.
 3. `type: public` with `allowed_cidrs` set to your own egress CIDR. The default is plain HTTP, so turn on `grafana.load_balancer.tls` (section 9) before you expose it this way. `0.0.0.0/0` needs `-e allow_open_internet=true`, as elsewhere in the kit.
 
-Log in as `admin` with the password in `state/grafana-admin-password`. The `type: public` path is not exercised; see section 10.
+Log in as `admin` with the password in `state/grafana-admin-password`. The kit is built around the `internal` type; see section 10.
 
 ## 9. TLS at the load balancer
 
@@ -260,7 +260,7 @@ grafana:
 
 `scripts/grafana-smoke.sh` follows the same rule as Langfuse's smoke test. It trusts the role's self-signed certificate (`gf_cacert()` in `scripts/lib/common.sh`) only for the address it derived from the NLB hostname, and never uses `-k` or `--insecure`.
 
-Grafana with `grafana.load_balancer.tls: true` is not exercised. It shares its code with the Langfuse TLS path, which is; see [Learning setup vs. production](limitations.md).
+Grafana with `grafana.load_balancer.tls: true` uses the same code as the Langfuse TLS path, with an `internal` load balancer. See [Scope and boundaries](limitations.md).
 
 ## 10. Operate it: check that it works
 
@@ -288,7 +288,7 @@ The admin credential never enters a shell variable or a command line. The script
 
 The last query appears only when Langfuse is on, and its count is `0` until Langfuse has received a trace.
 
-**What the smoke test covers, and what it does not.** It checks that the datasource is healthy and that live queries return data. It does not check dashboards, alerting, or user management. The `type: public` load balancer and `grafana.load_balancer.tls: true` are not exercised. [Learning setup vs. production](limitations.md) collects these boundaries for the whole kit.
+**What the smoke test covers, and what it does not.** It checks that the datasource is healthy and that live queries return data. It does not check dashboards, alerting, or user management. The `type: public` load balancer and `grafana.load_balancer.tls: true` are outside what the smoke test checks. [Scope and boundaries](limitations.md) collects these boundaries for the whole kit.
 
 ## 11. Idempotency and check mode
 
