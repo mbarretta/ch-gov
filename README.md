@@ -35,7 +35,7 @@ You also need an AWS account of your own with permission to create VPCs, EKS clu
 
 > **Tear down when you finish.** A running cluster bills every hour whether or not you use it. Run `scripts/down.sh --all` when you are done. The default `scripts/down.sh` stops the expensive part but keeps the VPC, EKS control plane, and NAT gateway, which still cost about $0.15 an hour.
 
-The figures below are planning estimates for `us-east-1` with the default `minimal` size. They cover the hourly price of compute, the EKS control plane, and one NAT gateway. Data transfer, EBS volumes, S3 storage, and CloudWatch logs are extra and small at learning scale. The `size: tutorial` setting uses the upstream tutorial's much larger nodes, and the compute alone then costs roughly $12 an hour.
+The figures below are planning estimates for `us-east-1` with the default `minimal` size. They cover the hourly price of compute, the EKS control plane, and one NAT gateway. Data transfer, EBS volumes, S3 storage, and CloudWatch logs are extra and small at learning scale. The `size: tutorial` setting uses the upstream tutorial's much larger nodes, and the compute alone then costs roughly $12 an hour, or $13.41 an hour with `fips: true`.
 
 | State | Approximate cost | How you get there |
 |---|---|---|
