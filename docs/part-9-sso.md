@@ -76,7 +76,7 @@ Put overrides in `state/deploy-vars.yml`. `ansible/group_vars/all.yml` holds the
 | `sso.cognito.saml_metadata_url` | `""` | A SAML metadata URL from your identity provider. Empty means users are held in the Cognito pool itself |
 | `sso.cognito.groups` | `clickhouse-readonly`, `clickhouse-admin` | Cognito groups created in the pool. Names must be distinct and contain no spaces |
 | `sso.langfuse.enabled` | `false` | Creates the Langfuse app client and wires Langfuse's Cognito sign-in. Needs `langfuse.enabled: true` |
-| `sso.langfuse.disable_password_login` | `false` | `true` hides the email and password form so Cognito is the only way in |
+| `sso.langfuse.disable_password_login` | `false` | `true` hides the email and password form so Cognito is the only way in. While it is `false`, password self-registration is open too (see section 5) |
 | `sso.langfuse.enforce_domains` | `[]` | Email domains Langfuse limits sign-in to. Empty means no restriction |
 | `sso.langfuse.default_org_role` | `"VIEWER"` | Organization role a user gets at first sign-in. One of `OWNER`, `ADMIN`, `MEMBER`, `VIEWER`, `NONE` |
 | `sso.langfuse.default_project_role` | `"VIEWER"` | Project role at first sign-in, same choices |
@@ -84,7 +84,7 @@ Put overrides in `state/deploy-vars.yml`. `ansible/group_vars/all.yml` holds the
 | `sso.clickhouse_jwt.permission_limit_role` | `""` | Name of the role that caps every token login. Empty means `jwt_ceiling` |
 | `sso.clickhouse_jwt.group_prefix` | `"clickhouse-"` | Only groups whose name starts with this prefix map to ClickHouse roles |
 | `sso.clickhouse_jwt.role_grants` | `{}` | Group name to a list of `GRANT` statements for that group's role |
-| `sso.clickhouse_jwt.networks` | `[]` | Source networks ClickHouse accepts token logins from. Empty means the VPC CIDR (`infrastructure.vpc_cidr`) |
+| `sso.clickhouse_jwt.networks` | `[]` | Source networks ClickHouse accepts token logins from. Empty means the VPC CIDR (`infrastructure.vpc_cidr`) and `127.0.0.1/32`. A list you set is used exactly as given |
 
 A complete override that turns on both consumers looks like this:
 
@@ -139,6 +139,7 @@ Cognito creates no users for you. Add them in the console or with `aws cognito-i
 
 Step 15 assembles the `langfuse-sso` Secret from the outputs file and the client secret: `AUTH_COGNITO_CLIENT_ID`, `AUTH_COGNITO_CLIENT_SECRET`, `AUTH_COGNITO_ISSUER` and `AUTH_COGNITO_ALLOW_ACCOUNT_LINKING`, plus the `LANGFUSE_DEFAULT_ORG_ID`, `LANGFUSE_DEFAULT_ORG_ROLE`, `LANGFUSE_DEFAULT_PROJECT_ID` and `LANGFUSE_DEFAULT_PROJECT_ROLE` values that place a new user in the seeded organization and project. Langfuse documents the [`AUTH_*` variables](https://langfuse.com/self-hosting/security/authentication-and-sso) and the [`LANGFUSE_DEFAULT_*` variables](https://langfuse.com/self-hosting/configuration) on its own pages. Two more are added only when you set them: `AUTH_DISABLE_USERNAME_PASSWORD` (from `disable_password_login`) and `AUTH_DOMAINS_WITH_SSO_ENFORCEMENT` (from `enforce_domains`).
 
+- **Sign-up is open while Cognito sign-in is on.** Langfuse creates a first-time Cognito user through its sign-up path, and with `AUTH_DISABLE_SIGNUP=true` that user fails with `OAuthCreateAccount`. So when `sso.enabled` and `sso.langfuse.enabled` are both `true`, Step 15 renders sign-up open whatever `langfuse.signup_disabled` says; with SSO off it still renders that value. The consequence is that, while password login is enabled, anyone who can reach Langfuse can also register with an email and password, and the new account receives the default organization and project role. Three settings limit it: `sso.langfuse.disable_password_login: true` makes Cognito the only way in, `sso.langfuse.enforce_domains` limits sign-in to your email domains, and `langfuse.load_balancer.allowed_cidrs` limits who can reach the page at all.
 - **Account linking is on.** A person who already has an email and password user, the seeded admin included, can sign in through Cognito with the same address and keep their data.
 - **New users land as VIEWER** in the seeded organization and project unless you change the two default roles.
 - **Changing the Secret rolls the pods.** The release carries a fingerprint of the Secret in the pods' own environment, so the same `helm upgrade` that changes the Secret restarts web and worker.
@@ -177,7 +178,7 @@ These are properties of the server's JWT user directory, taken from ClickHouse's
 | Behaviour | Consequence | What the kit does |
 |---|---|---|
 | `aud` is mandatory, in the configuration and on the token. The server refuses to start without it in the configuration, and rejects a token without an `aud` claim or with a different one | A token is accepted only for the audience you configured. Cognito ID tokens carry `aud` equal to the app client ID, per [Cognito's ID token documentation](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-id-token.html) | `aud` is the ClickHouse app client ID, and `ch-client.sh --sso` presents the ID token, not the access token |
-| `iss` is not validated in JWKS mode | The issuer is not an access control. Trust rests on the JWKS signing keys plus `aud`: any token signed by a key in that JWKS and carrying the right `aud` is accepted | `iss` only shapes the user name. The audience is limited to a dedicated app client, and `networks` limits where logins may come from (the VPC CIDR unless you set it) |
+| `iss` is not validated in JWKS mode | The issuer is not an access control. Trust rests on the JWKS signing keys plus `aud`: any token signed by a key in that JWKS and carrying the right `aud` is accepted | `iss` only shapes the user name. The audience is limited to a dedicated app client, and `networks` limits where logins may come from (the VPC CIDR and `127.0.0.1/32` unless you set it) |
 | Keys are RS256 and the signature is checked against the JWKS | Tokens signed with another key, expired tokens and unknown key IDs are refused | No shared secret exists, so no JWT signing secret is stored anywhere |
 | Roles are read only from the remapped claim, `cognito:groups`, which must be a top-level array | A string instead of an array is refused. Any other claim name is ignored. A group with no matching ClickHouse role is dropped without an error and leaves the login with no rights | Step 11b creates a role per group, named exactly like the group |
 | `currentRoles()` is always empty for a JWT user, because the granted rights are flattened onto the user | A check on `currentRoles()` tells you nothing | Read effective access with `SHOW GRANTS`. The smoke test does |
@@ -205,7 +206,9 @@ scripts/ch-client.sh --sso -q "SELECT currentUser()"      # JWT::<issuer>::<clie
 scripts/ch-client.sh --sso -q "SHOW GRANTS"               # the effective rights; currentRoles() is empty by design
 ```
 
-A user in no group, or in a group with no role, logs in but has no rights beyond what every user can read. `networks` is matched against the client address the server sees. If a token login is refused with an authentication error on one path (for example the port-forward) and accepted on another (`--lb`), compare that path's source address with the `sso.clickhouse_jwt.networks` list, and remember that a list you set replaces the VPC CIDR default.
+A user in no group, or in a group with no role, logs in but has no rights beyond what every user can read. `networks` is matched against the client address the server sees. If a token login is refused with an authentication error on one path (for example the port-forward) and accepted on another (`--lb`), compare that path's source address with the `sso.clickhouse_jwt.networks` list.
+
+The default list is the VPC CIDR plus `127.0.0.1/32`. The port-forward path (`ch-client.sh --sso` without `--lb`) reaches the server as `::ffff:127.0.0.1`, which `127.0.0.1/32` covers and the VPC CIDR does not. `127.0.0.1` is reachable only from inside the pod's network namespace and through `kubectl port-forward`, so the entry adds no access for anyone without cluster access. The `--lb` path is admitted by the VPC CIDR because the load balancer preserves the client address. A list you set is used exactly as given and replaces that default, so include `127.0.0.1/32` in it if you want the port-forward path.
 
 ## 7. Operating it
 

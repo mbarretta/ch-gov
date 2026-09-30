@@ -329,7 +329,7 @@ The default exposure is an **internal** NLB, so the same three options as Part 5
 2. `type: none` in `langfuse.load_balancer`, then `kubectl port-forward -n langfuse svc/langfuse-web 3000:3000` and open `http://localhost:3000`. The port must be exactly 3000, because that is the `NEXTAUTH_URL` the role sets for this mode.
 3. `type: public` with `allowed_cidrs: ["<your egress IP>/32"]`. This uses plain HTTP by default, which is fine for a lab and for nothing else. Turn on `langfuse.load_balancer.tls` (section 9) before you expose it this way, and read there what a self-signed certificate does and does not give you. `0.0.0.0/0` is refused unless you also pass `-e allow_open_internet=true`, as in Step 12. The kit is built around the `internal` type; [Scope and boundaries](limitations.md) lists what the kit covers and what it leaves out.
 
-If people reach Langfuse by a name the role cannot discover (a VPN alias, or a DNS record you put in front of the NLB), set `langfuse.url` and re-run `scripts/up.sh`. Log in as `admin@example.com` with the password in `state/langfuse-admin-password`. Sign-up is disabled and telemetry is off.
+If people reach Langfuse by a name the role cannot discover (a VPN alias, or a DNS record you put in front of the NLB), set `langfuse.url` and re-run `scripts/up.sh`. Log in as `admin@example.com` with the password in `state/langfuse-admin-password`. Sign-up is disabled (unless Cognito sign-in is on, which opens it; see [Part 9](part-9-sso.md)) and telemetry is off.
 
 ## 9. TLS at the load balancer
 

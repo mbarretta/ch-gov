@@ -83,6 +83,11 @@ dhi:
 #       - "clickhouse-admin"
 #   langfuse:
 #     enabled: false
+#     # While this is on, Langfuse sign-up is open whatever langfuse.signup_disabled says
+#     # (Langfuse creates a first-time Cognito user through the sign-up path), so with
+#     # disable_password_login false anyone who can reach Langfuse can also register with
+#     # an email and password. To limit that: true here, enforce_domains, and
+#     # langfuse.load_balancer.allowed_cidrs.
 #     disable_password_login: false
 #     enforce_domains: []   # for example ["<YOUR_EMAIL_DOMAIN>"]
 #     default_org_role: "VIEWER"
@@ -95,4 +100,9 @@ dhi:
 #     #  role_grants:
 #     #    clickhouse-readonly:
 #     #      - "GRANT SELECT ON *.*"
-#     networks: []   # empty means the VPC CIDR
+#     # Empty means the VPC CIDR and 127.0.0.1/32. The second entry is the address the server
+#     # sees for a kubectl port-forward (the default scripts/ch-client.sh --sso path); 127.0.0.1
+#     # is reachable only inside the pod's network namespace and through kubectl port-forward,
+#     # so it adds no access for anyone without cluster access. A list you set is used exactly
+#     # as given, so include "127.0.0.1/32" in it to keep the port-forward path.
+#     networks: []
