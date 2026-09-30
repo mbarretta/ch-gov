@@ -6,6 +6,8 @@
 #   scripts/up.sh --skip-images   # skip the Step 2 image hop (already mirrored)
 #   scripts/up.sh --from nodes    # start at a step: images|vpc|eks|nodes|storage|
 #                                 #   prereqs|operator|cluster|preflight|verify|lb
+#                                 #   (plus sso-idp after storage and ch-jwt after
+#                                 #   verify when single sign-on is switched on)
 #   scripts/up.sh --yes           # no confirmation prompt
 #
 # Every step is idempotent, so running the whole thing over an existing stack
@@ -19,13 +21,28 @@ CH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$CH_ROOT/scripts/lib/common.sh"
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0; }
 
-# Deployment order. Each entry is a playbook tag; deploy.yml runs them in
-# this order when no tags are given, so the list here only serves --from.
-STEPS=(images vpc eks nodes storage prereqs operator cluster preflight verify lb)
-
 # Resolve the configuration once here; the $(...) lookups below run in
 # subshells that inherit the cached result instead of each re-running Ansible.
 ch_resolve || exit 1
+
+# Deployment order. Each entry is a playbook tag; deploy.yml runs them in
+# this order when no tags are given, so the list here only serves --from.
+#
+# Single sign-on (Steps 6b and 11b) is optional and splices into the list at
+# the two places deploy.yml runs it: the Cognito stack (sso-idp) right after
+# storage, so it exists before the cluster step reads its issuer, and the
+# ClickHouse roles for token logins (ch-jwt) right after verify, once the
+# cluster answers. sso_enabled/sso_jwt_enabled (lib/common.sh) read the merged
+# sso: block, so a state/deploy-vars.yml override counts. --from slices this
+# same list, so it keeps the order.
+SSO_ENABLED=false; SSO_JWT=false
+sso_enabled && SSO_ENABLED=true
+sso_jwt_enabled && SSO_JWT=true
+STEPS=(images vpc eks nodes storage)
+[[ "$SSO_ENABLED" == true ]] && STEPS+=(sso-idp)
+STEPS+=(prereqs operator cluster preflight verify)
+[[ "$SSO_JWT" == true ]] && STEPS+=(ch-jwt)
+STEPS+=(lb)
 
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
 # lf_var (lib/common.sh) reads the merged langfuse: block, so a deploy-vars
@@ -68,6 +85,7 @@ step "Bringing up: ${TAGS[*]}"
 info "compute starts at Step 5 (nodes): ~\$${HOURLY}/hr while up (size: $SIZE), ~\$0.15/hr with nodes down"
 info "load balancer type (clickhouse.load_balancer.type): ${LB_TYPE:-none}"
 [[ "$LF_ENABLED" == true ]] && info "langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~\$0.02/hr for its NLB)"
+[[ "$SSO_ENABLED" == true ]] && info "sso: enabled -- Step 6b (Cognito) runs after storage$([[ "$SSO_JWT" == true ]] && echo ', Step 11b (ClickHouse token roles) after verify')"
 [[ "$GF_ENABLED" == true ]] && info "grafana: enabled -- Steps 16-18 run after Langfuse (adds ~\$0.02/hr for its NLB)"
 info "each step is idempotent; anything already in place is left alone"
 if ((!YES)); then
@@ -83,6 +101,8 @@ if ((rc == 0)); then
   step "Up in ${mins}m"
   ok "connect:  scripts/ch-client.sh            (port-forward from this machine)"
   [[ "${LB_TYPE:-none}" != none ]] && ok "          scripts/ch-client.sh --lb       (via the $LB_TYPE NLB, where its address is reachable)"
+  [[ "$SSO_JWT" == true ]] && ok "          scripts/ch-client.sh --sso      (sign in as yourself with Cognito)"
+  [[ "$SSO_ENABLED" == true ]] && ok "sso:      scripts/sso-smoke.sh            (checks the Cognito issuer, Langfuse sign-in and a ClickHouse token login)"
   if [[ "$LF_ENABLED" == true ]]; then
     # The address NEXTAUTH_URL was baked with: langfuse.url if set, else the
     # NLB hostname via lf_url (https with the port appended unless it is 443
