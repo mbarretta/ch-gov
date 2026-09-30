@@ -363,7 +363,7 @@ CoreDNS pending with nothing to schedule on is exactly right. The control plane 
 
 **Run it:** `scripts/play.sh --tags nodes`
 
-This is the first step that starts real compute, and it is the most expensive thing in the whole deployment. Steps 1 to 4 cost about $3.50 a day (the control plane and one NAT gateway). The node groups add roughly $52 a day at the default sizes, and roughly $290 a day at the sizes the upstream tutorial specifies. The step takes 5 to 10 minutes.
+This is the first step that starts real compute, and it is the most expensive thing in the whole deployment. Steps 1 to 4 cost about $3.50 a day (the control plane and one NAT gateway). The node groups add roughly $52 a day with the default `minimal` profile, and roughly $290 a day with the `tutorial` profile. The step takes 5 to 10 minutes.
 
 **Tear down only this step**, leaving the cluster and VPC in place:
 
@@ -383,9 +383,39 @@ That drops the bill back to about $0.15 an hour. `scripts/up.sh --from nodes` re
 
 That last row is the one people miss. If you taint every node group, CoreDNS never schedules and DNS inside the cluster silently never works.
 
-### Picking sizes: let the chart tell you the floor
+### Picking sizes: two profiles, one switch
 
-The upstream tutorial specifies `m7g.2xlarge`, `m7gd.16xlarge` and `m7i.2xlarge`. The kit uses smaller ones, sized for learning and workshops rather than production. They are not arbitrarily smaller, because the floor is set by what the `onprem-clickhouse-cluster` chart actually asks for. Pull the chart from your registry and look:
+The kit ships two size profiles, and one setting chooses between them. `minimal` is the default. It uses small node types and gives the ClickHouse pods a modest, fixed amount of CPU and memory, so it suits learning and workshops. `tutorial` is the sizing the upstream tutorial specifies: much larger nodes and pods.
+
+To select a profile, set `size` in `state/deploy-vars.yml`, or pass it for a single run:
+
+```yaml
+size: tutorial     # or minimal, the default
+```
+
+```bash
+scripts/play.sh --tags nodes -e size=tutorial
+```
+
+Choose the profile before Step 5. The profiles use different instance types, and changing an instance type makes CloudFormation replace the node group (see "Why the node groups have no names" below). Both profiles are defined in `size_profiles:` in `ansible/group_vars/all.yml`, and every value in the table comes from there.
+
+| | `minimal` (default) | `tutorial` |
+|---|---|---|
+| keeper node, standard / `fips: true` | `m7g.xlarge` / `m7i.xlarge` | `m7g.2xlarge` / `m7i.2xlarge` |
+| server node, standard / `fips: true` | `m7gd.2xlarge` / `m6id.2xlarge` | `m7gd.16xlarge` / `m6id.16xlarge` |
+| operator node, both builds | `m7i.xlarge` | `m7i.2xlarge` |
+| node counts | 3 keeper, 3 server (up to 6), 2 operator (up to 4) | 3 keeper, 3 server (up to 6), 2 operator (up to 4) |
+| server pod (CPU / memory) | 6 / 20G | 60 / 232Gi |
+| keeper pod (CPU / memory) | 2 / 4G | 4 / 16Gi |
+| operator pod (CPU / memory) | 500m / 1G | 500m / 1G |
+| read cache size per server | 300Gi | 2552Gi |
+| keeper disk (EBS) | 10Gi | 50Gi |
+
+`minimal` changes the pod resources, not the node types: its instance types are the smallest that hold its pods. It sizes those pods to keep the memory of the whole ClickHouse set inside a budget of 74 GB, counted in decimal gigabytes. Three servers at 20G plus three keepers at 4G make 72G, which leaves under 2G for the operator, and the operator is pinned at 1G, so the whole set stays under 74 GB. The pod memory is written as `G` and not `Gi` on purpose: `G` is 10^9 bytes and `Gi` is 2^30 bytes, so 72Gi would be about 77.3 GB and would break the budget. Requests equal limits, so those figures are what the pods can use.
+
+Now the subtlety that sets the node types: **a node's allocatable CPU is less than its vCPU count.** The kubelet reserves some CPU for itself and the OS, so a 4-vCPU node advertises a little under 4,000m of allocatable CPU. A pod that requests as many CPUs as the node has vCPUs therefore does *not* fit. It stays `Pending` with `Insufficient cpu`, which is a maddening error to debug because the node looks big enough. That is why the 2-CPU Keeper pod needs a 4-vCPU node and not a 2-vCPU one, and why the 6-CPU server pod needs an 8-vCPU node. The `tutorial` profile applies the same rule at scale: its 60-CPU server pod sits on a 64-vCPU node, and the CPU and memory the kubelet holds back still leave room for the pod plus the cluster's DaemonSets.
+
+The `onprem-clickhouse-cluster` chart also asks for a fixed amount of CPU and memory by default, and you can read those defaults from the chart itself. Pull it from your registry and look:
 
 ```bash
 source scripts/env.sh
@@ -406,33 +436,21 @@ server.replicaCount: 3
 keeper.replicaCount: 3
 ```
 
-The kit raises the server memory to 16Gi (`clickhouse.server.memory` in `ansible/group_vars/all.yml`), which the 32Gi server nodes hold comfortably.
-
-Now the subtlety: **a node's allocatable CPU is less than its vCPU count.** The kubelet reserves some for itself and the OS, so a 4-vCPU node advertises a little under 4,000m of allocatable CPU. A pod that requests exactly `4` CPU therefore does *not* fit on a 4-vCPU node. It stays `Pending` with `Insufficient cpu`, which is a maddening error to debug because the node looks big enough.
-
-So the smallest types that actually work are one size class up from the pod request:
-
-| Group | Pod request | Smallest node that fits (standard) | With `fips: true` | Upstream tutorial size |
-|---|---|---|---|---|
-| keeper | 2 CPU / 4Gi | `m7g.xlarge` (4 vCPU, 16Gi) | `m7i.xlarge` | `m7g.2xlarge` |
-| server | 4 CPU / 8Gi | `m7gd.2xlarge` (8 vCPU, 32Gi, local NVMe) | `m6id.2xlarge` | `m7gd.16xlarge` |
-| operator | none | `m7i.xlarge` (4 vCPU, 16Gi) | `m7i.xlarge` | `m7i.2xlarge` |
-
-To go smaller than this you must also override the chart's resource requests. This is the floor for an unmodified chart.
+Whichever profile you pick, the kit replaces these defaults with the profile's pod resources (`clickhouse.server` and `clickhouse.keeper` in `ansible/group_vars/all.yml`), and the operator's resources come from the profile too.
 
 ### What the sizes cost
 
-These figures are approximate. They come from the static price table (`pricing:`) in `ansible/group_vars/all.yml`, which lists us-east-1 on-demand prices for the default instance types. Refresh that table when AWS changes its prices.
+These figures are approximate. They come from the static price table (`pricing:`) in `ansible/group_vars/all.yml`, which lists us-east-1 on-demand prices for the instance types of both profiles. Refresh that table when AWS changes its prices.
 
-| Standard build | Nodes | Approximate cost |
+| Standard build | `minimal` | `tutorial` |
 |---|---|---|
-| keeper | 3 × `m7g.xlarge` | $0.49 an hour |
-| server | 3 × `m7gd.2xlarge` | $1.28 an hour |
-| operator | 2 × `m7i.xlarge` | $0.40 an hour |
-| **compute** | | **$2.17 an hour** |
-| plus control plane and NAT | | **$2.32 an hour, about $56 a day** |
+| keeper | 3 × `m7g.xlarge`, $0.49 an hour | 3 × `m7g.2xlarge`, $0.98 an hour |
+| server | 3 × `m7gd.2xlarge`, $1.28 an hour | 3 × `m7gd.16xlarge`, $10.25 an hour |
+| operator | 2 × `m7i.xlarge`, $0.40 an hour | 2 × `m7i.2xlarge`, $0.81 an hour |
+| **compute** | **$2.17 an hour** | **$12.04 an hour** |
+| plus control plane and NAT | **$2.32 an hour, about $56 a day** | **$12.18 an hour, about $292 a day** |
 
-At the upstream tutorial's sizes the compute alone is roughly $12 an hour. The role prints this estimate before it creates anything. Note that `max_nodes` costs nothing until something scales, because only `min_nodes` is running. The knobs are under `infrastructure` in `ansible/group_vars/all.yml`, and the `vpc` role re-validates any instance type you choose against the zones before it is used.
+With `fips: true` the compute figure is $2.43 an hour for `minimal` and $13.41 an hour for `tutorial`, because the x86 node types cost more than the ARM ones. The role prints this estimate before it creates anything. Note that `max_nodes` costs nothing until something scales, because only `min_nodes` is running. The knobs are under `infrastructure` in `ansible/group_vars/all.yml`, and the `vpc` role re-validates any instance type you choose against the zones before it is used.
 
 ### Labels: the `-arm64` suffix and the chart's node selector
 
@@ -705,7 +723,7 @@ source scripts/env.sh
     kubectl get nodes -o custom-columns=NAME:.metadata.name,GROUP:.metadata.labels.clickhouseGroup,CPU:.status.allocatable.cpu
     ```
 
-    You should see values a little under the vCPU count, such as `3920m` for a 4-vCPU node and `7910m` for an 8-vCPU node. That gap is why the server group is `2xlarge`, not `xlarge`. It is also the first number to check when a pod is inexplicably `Pending`.
+    You should see values a little under the vCPU count, such as `3920m` for a 4-vCPU node and `7910m` for an 8-vCPU node, which are the `minimal` profile's node sizes. That gap is why the `minimal` server group is `2xlarge`, not `xlarge`. It is also the first number to check when a pod is inexplicably `Pending`.
 
 17. **The NVMe cache is a real disk.**
 
