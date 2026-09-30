@@ -180,7 +180,7 @@ helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver 
 The kit uses the **EKS managed add-on** instead. This is a deliberate deviation:
 
 - The Helm route requires reaching a public Helm repository at deploy time, which is the same airgap problem as the CRD URLs.
-- The add-on's images come from an AWS-owned ECR registry, reachable over PrivateLink with no internet route at all. It is *more* airgap-friendly, not less.
+- The add-on's images come from an AWS-owned ECR registry, so no public Helm repository or third-party registry is involved. In an airgapped network that registry is reachable through ECR VPC endpoints (PrivateLink), so pulling the images does not depend on the public internet. The learning environment has no such endpoints and pulls through its NAT gateway. The add-on is *more* airgap-friendly, not less.
 - EKS selects the driver version that matches the cluster's Kubernetes version and keeps it patched, instead of pinning a chart version that ages.
 
 The tutorial's Helm path is still the right answer for Kubernetes outside EKS. On EKS, the add-on is the supported one.
@@ -329,7 +329,7 @@ If any container in the operator namespace pulls from anywhere but your registry
 
 ## Cost check
 
-Steps 6–8 add essentially nothing. An empty S3 bucket, two IAM roles, a CSI driver DaemonSet and one operator pod all fit inside the compute that is already running. With the default sizing, the rate stays at about **$2.32/hr** while the nodes are up, unchanged from the end of Step 5. The kit sizes the nodes for learning and evaluation, not production. To stop the meter when you finish, run `scripts/down.sh`.
+Steps 6–8 add essentially nothing. An empty S3 bucket, two IAM roles, a CSI driver DaemonSet and one operator pod all fit inside the compute that is already running. With the default sizing, the rate stays at about **$2.32/hr** while the nodes are up, unchanged from the end of Step 5. The kit sizes the nodes for learning and workshops, not production. To stop the meter when you finish, run `scripts/down.sh`.
 
 ## Self-checks
 
