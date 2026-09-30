@@ -157,10 +157,14 @@ stack_tags: "{{ infrastructure.extra_tags | combine({'Project': 'clickhouse-priv
 # missing here simply counts as 0. Refresh when AWS changes its list prices.
 pricing:
   instance_hourly_usd:
-    m7g.xlarge:   0.1632
-    m7gd.2xlarge: 0.4271
-    m7i.xlarge:   0.2016
-    m6id.2xlarge: 0.4746
+    m7g.xlarge:    0.1632
+    m7gd.2xlarge:  0.4271
+    m7i.xlarge:    0.2016
+    m6id.2xlarge:  0.4746
+    m7g.2xlarge:   0.3264
+    m7gd.16xlarge: 3.4171
+    m7i.2xlarge:   0.4032
+    m6id.16xlarge: 3.7968
   eks_control_plane_hourly_usd: 0.10
   nat_gateway_hourly_usd: 0.045
   # Langfuse (optional Steps 13-15) adds no instances: it runs on the operator
@@ -199,20 +203,55 @@ size_profiles:
     operator_cpu: "500m"
     operator_memory: "1G"
   # The upstream tutorial's sizing; same keys as minimal.
+  #
+  # Nodes: keepers on m7g.2xlarge (m7i.2xlarge for FIPS), servers on
+  # m7gd.16xlarge (m6id.16xlarge for FIPS, the x86 NVMe type of the same 64
+  # vCPU / 256GiB shape), operators on m7i.2xlarge in both builds. All four
+  # types are offered in every zone of infrastructure.availability_zones.
+  #
+  # Hourly compute, from pricing.instance_hourly_usd, for 3 keepers + 3 servers
+  # + 2 operators (control plane and NAT excluded):
+  #   arm : 3 x 0.3264 + 3 x 3.4171 + 2 x 0.4032 = 12.04 USD/hr
+  #   fips: 3 x 0.4032 + 3 x 3.7968 + 2 x 0.4032 = 13.41 USD/hr
+  # The arm figure agrees with the roughly $12 an hour the docs quote; the
+  # FIPS figure is higher because its server type costs more.
+  #
+  # Server pod, 60 CPU / 232Gi. A 64 vCPU / 256GiB node cannot hold a pod of
+  # that full size, because kubelet keeps part of the node back. Kube-reserved
+  # CPU is 6% of the first core, 1% of the second, 0.5% of each of the next
+  # two and 0.25% of every core after that: 60 + 10 + 10 + 60 x 2.5 = 230m, so
+  # allocatable is about 63.77 CPU. Kube-reserved memory is 255Mi + 11Mi per
+  # possible pod, and this size allows up to 737 pods (15 network interfaces
+  # x 49 addresses + 2), so 255 + 8107 = 8362Mi, plus the 100Mi hard eviction
+  # threshold; allocatable is then 262144 - 8362 - 100 = 253682Mi, about
+  # 247.7Gi. The pod takes 60 of 63.77 CPU and 232 of 247.7Gi, which leaves
+  # about 3.7 CPU and 15Gi for the kube-system DaemonSets (network plugin,
+  # kube-proxy, EBS CSI node) and for anything else that lands on the node.
+  #
+  # Keeper pod, 4 CPU / 16Gi with 50Gi of EBS, on an 8 vCPU / 32GiB node whose
+  # allocatable CPU is about 7.9 (60 + 10 + 10 + 4 x 2.5 = 90m reserved).
+  #
+  # Read cache: the tutorial's 11Gi per Gi of RAM, so 11 x 232 = 2552Gi. The
+  # two server types have the same instance store, 2 x 1900GB striped into one
+  # volume: 3800GB, or about 3539Gi. 2552Gi is about 72% of it, under the 80%
+  # at which the preflight check fails and with room for merge overshoot.
+  #
+  # Operator pins are the same as minimal: the operator is one small manager
+  # container whatever the cluster size.
   tutorial:
-    keeper_instance_type:   {arm: "m7g.xlarge",    fips: "m7i.xlarge"}
-    server_instance_type:   {arm: "m7gd.2xlarge",  fips: "m6id.2xlarge"}
-    operator_instance_type: {arm: "m7i.xlarge",    fips: "m7i.xlarge"}
+    keeper_instance_type:   {arm: "m7g.2xlarge",   fips: "m7i.2xlarge"}
+    server_instance_type:   {arm: "m7gd.16xlarge", fips: "m6id.16xlarge"}
+    operator_instance_type: {arm: "m7i.2xlarge",   fips: "m7i.2xlarge"}
     server_min_nodes: 3
     server_max_nodes: 6
     operator_min_nodes: 2
     operator_max_nodes: 4
-    server_cpu: "6"
-    server_memory: "20G"
-    keeper_cpu: "2"
-    keeper_memory: "4G"
-    keeper_disk: "10Gi"
-    cache_disk_size: "300Gi"
+    server_cpu: "60"
+    server_memory: "232Gi"
+    keeper_cpu: "4"
+    keeper_memory: "16Gi"
+    keeper_disk: "50Gi"
+    cache_disk_size: "2552Gi"
     operator_cpu: "500m"
     operator_memory: "1G"
 
@@ -250,9 +289,10 @@ clickhouse:
     cpu: "{{ sz.server_cpu }}"
     memory: "{{ sz.server_memory }}"
     # SSD read cache on the node's local NVMe (/nvme/disk, mounted in Step 5).
-    # The disk is ~442Gi; the preflight check fails at >=80% of it, and
-    # ClickHouse can overshoot the limit briefly during merges, so leave
-    # headroom. 300Gi is ~68%.
+    # The preflight check fails at >=80% of the disk, and ClickHouse can
+    # overshoot the limit briefly during merges, so leave headroom. minimal's
+    # 300Gi is ~68% of the ~442Gi on its node; tutorial's sizing is worked out
+    # in size_profiles.
     cache_disk_size: "{{ sz.cache_disk_size }}"
     # The chart default is `trace`, which is a firehose. Servers here have no
     # persistent volume, so logs go to stdout and the node's container log
