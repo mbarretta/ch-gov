@@ -6,7 +6,8 @@
 # PVCs and config maps that make up an actual cluster. Nothing ClickHouse-ish
 # exists until Step 9 creates one of those resources.
 #
-# Cheap: two small pods on the operator node group.
+# Cheap: one small Deployment (one replica, two containers) on the operator
+# node group.
 #
 # Teardown: ansible-playbook deploy.yml --tags operator -e operator_state=absent
 
