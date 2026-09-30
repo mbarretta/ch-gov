@@ -1,2 +1,256 @@
 ---
-[]
+# Step 6b (optional): the Cognito user pool that Langfuse (OIDC) and ClickHouse
+# (JWT) both trust for sign-in.
+#
+# One CloudFormation stack holds the pool, its hosted-UI domain, its groups, an
+# optional SAML identity provider and the two app clients. The role then reads
+# the pool's live OpenID discovery document, fetches the Langfuse client secret
+# and writes both into state/ (see sso_state_files in group_vars/all.yml) for the
+# later roles and scripts to read from disk.
+#
+# Runs only when sso.enabled is true, or when tearing down (the role-level
+# `when` in deploy.yml); with the switch off nothing here runs and nothing in
+# AWS changes.
+#
+# Teardown: ansible-playbook deploy.yml --tags sso-idp -e sso_idp_state=absent
+#   (deletes the stack; the files under state/ are kept)
+
+# --- teardown ---------------------------------------------------------------
+# First, before any input is validated: a teardown must work whatever the
+# sso: block currently says, including after sso.enabled went back to false.
+
+- name: Teardown (sso_idp_state=absent)
+  when: (sso_idp_state | default('present')) == 'absent'
+  block:
+    - name: Delete the SSO stack
+      amazon.aws.cloudformation:
+        stack_name: "{{ infrastructure.environment_name }}-sso"
+        state: absent
+        region: "{{ aws.target_region }}"
+        profile: "{{ aws.target_profile }}"
+
+    - name: Report what teardown kept
+      ansible.builtin.debug:
+        msg:
+          - "The Cognito user pool, its users, groups and both app clients are deleted with the stack."
+          - "state files kept (delete by hand when no longer needed):"
+          - "  {{ sso_state_files.outputs_file }}"
+          - "  {{ sso_state_files.client_secret_file }}"
+          - "They describe a pool that no longer exists; the next run overwrites them."
+
+    - name: Stop here when tearing down
+      ansible.builtin.meta: end_play
+
+# --- what this run is asked to build ---------------------------------------
+
+- name: Work out whether the Langfuse app client is wanted
+  # Both switches: a deployment with Langfuse off, or with Langfuse sign-in
+  # off, gets a ClickHouse-only pool and never needs langfuse.url.
+  ansible.builtin.set_fact:
+    _sso_lf: "{{ (sso.langfuse.enabled | bool) and (langfuse.enabled | bool) }}"
+    _sso_lf_base: "{{ (langfuse.url | default('') | trim) | regex_replace('/+$', '') }}"
+
+- name: Fail clearly when the hosted-UI domain prefix is missing or invalid
+  ansible.builtin.assert:
+    that:
+      - sso.cognito.domain_prefix | default('') | length > 0
+      - sso.cognito.domain_prefix is match('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$')
+      - "'aws' not in sso.cognito.domain_prefix"
+      - "'amazon' not in sso.cognito.domain_prefix"
+      - "'cognito' not in sso.cognito.domain_prefix"
+    fail_msg: >-
+      sso.cognito.domain_prefix must be set when sso.enabled is true: lowercase
+      letters, digits and hyphens, unique within {{ aws.target_region }}, and
+      without "aws", "amazon" or "cognito". Set it in state/deploy-vars.yml.
+    success_msg: "Hosted-UI domain prefix: {{ sso.cognito.domain_prefix }}"
+
+- name: Fail clearly when the group list is not usable
+  ansible.builtin.assert:
+    that:
+      - sso.cognito.groups is sequence
+      - sso.cognito.groups is not string
+      - sso.cognito.groups | select('string') | select('match', '^\S+$') | list | length == sso.cognito.groups | length
+      - sso.cognito.groups | unique | list | length == sso.cognito.groups | length
+    fail_msg: >-
+      sso.cognito.groups must be a list of distinct group names with no spaces.
+
+- name: Fail clearly when Langfuse sign-in has no HTTPS URL to return to
+  # Cognito only accepts an https:// callback (http is allowed for localhost
+  # alone), and the self-signed NLB hostname Langfuse falls back to is not a
+  # target it should redirect a browser to. The URL is used exactly as given.
+  ansible.builtin.assert:
+    that: _sso_lf_base is match('^https://[^/]')
+    fail_msg: >-
+      sso.langfuse.enabled and langfuse.enabled are both true, so Cognito needs
+      a callback for Langfuse, and that must be https://. langfuse.url is
+      "{{ langfuse.url | default('') }}". Set langfuse.url to the full
+      https:// address people reach Langfuse at, or turn off
+      sso.langfuse.enabled.
+    success_msg: "Langfuse callback base: {{ _sso_lf_base }}"
+  when: _sso_lf | bool
+
+- name: Work out the callback URLs
+  ansible.builtin.set_fact:
+    _sso_lf_callback: "{{ (_sso_lf_base ~ '/api/auth/callback/cognito') if (_sso_lf | bool) else '' }}"
+    _sso_lf_logout: "{{ _sso_lf_base if (_sso_lf | bool) else '' }}"
+    # Cognito matches the redirect URI exactly, port included, so the client
+    # helper listens on this fixed loopback port.
+    _sso_ch_callback: "http://localhost:8765/callback"
+
+# --- the stack ----------------------------------------------------------------
+
+- name: Deploy the SSO stack
+  amazon.aws.cloudformation:
+    stack_name: "{{ infrastructure.environment_name }}-sso"
+    state: "present"
+    region: "{{ aws.target_region }}"
+    profile: "{{ aws.target_profile }}"
+    # lookup('template', ...): the groups are rendered into the file, see the
+    # note at the top of cognito.yaml.
+    template_body: "{{ lookup('template', role_path ~ '/files/cognito.yaml') }}"
+    template_parameters:
+      EnvironmentName: "{{ infrastructure.environment_name }}"
+      DomainPrefix: "{{ sso.cognito.domain_prefix }}"
+      SamlMetadataUrl: "{{ sso.cognito.saml_metadata_url | default('') | trim }}"
+      LangfuseCallbackUrl: "{{ _sso_lf_callback }}"
+      LangfuseLogoutUrl: "{{ _sso_lf_logout }}"
+      ClickHouseCallbackUrl: "{{ _sso_ch_callback }}"
+    tags: "{{ stack_tags }}"
+  register: _sso_stack
+
+# stack_outputs is absent under --check when the stack does not exist yet, so
+# everything below that reads the live pool waits for it.
+- name: Read the pool's OpenID discovery document
+  # The issuer and the JWKS location are taken from this document, not
+  # assembled from the region, so they hold in any partition whatever host
+  # pattern its issuer uses. Cognito reports the pool URL without a scheme.
+  ansible.builtin.uri:
+    url: "{{ _sso_provider_base }}/.well-known/openid-configuration"
+    return_content: true
+  vars:
+    _sso_provider_url: "{{ _sso_stack.stack_outputs.ProviderUrl }}"
+    _sso_provider_base: "{{ _sso_provider_url if _sso_provider_url.startswith('https://') else 'https://' ~ _sso_provider_url }}"
+  register: _sso_disc
+  until: _sso_disc is succeeded
+  retries: 10
+  delay: 3
+  changed_when: false
+  check_mode: false
+  when: _sso_stack.stack_outputs is defined
+
+- name: Confirm the discovery document names an issuer and a JWKS location
+  ansible.builtin.assert:
+    that:
+      - _sso_disc.json.issuer | default('') | length > 0
+      - _sso_disc.json.jwks_uri | default('') | length > 0
+    fail_msg: "The discovery document for {{ _sso_stack.stack_outputs.ProviderUrl }} has no issuer or jwks_uri."
+  when: _sso_stack.stack_outputs is defined
+
+# --- the Langfuse client secret ----------------------------------------------
+# Cognito only hands the secret out through the API, never through stack
+# outputs. The CLI's stdout is the secret: no_log on every task that holds it,
+# and it goes straight to a mode-0600 file. The only argv is the AWS CLI's own
+# call, which names the pool and client but carries no secret.
+
+- name: Ensure the state directory exists
+  ansible.builtin.file:
+    path: "{{ state_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Fetch the Langfuse app client secret
+  ansible.builtin.command:
+    argv:
+      - aws
+      - cognito-idp
+      - describe-user-pool-client
+      - --user-pool-id={{ _sso_stack.stack_outputs.UserPoolId }}
+      - --client-id={{ _sso_stack.stack_outputs.LangfuseClientId }}
+      - --profile={{ aws.target_profile }}
+      - --region={{ aws.target_region }}
+      - --query=UserPoolClient.ClientSecret
+      - --output=text
+  register: _sso_lf_secret
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when:
+    - _sso_lf | bool
+    - _sso_stack.stack_outputs is defined
+
+- name: Confirm a client secret came back
+  ansible.builtin.assert:
+    that:
+      - _sso_lf_secret.stdout | trim | length > 0
+      - _sso_lf_secret.stdout | trim != 'None'
+    fail_msg: "Cognito returned no client secret for the Langfuse app client."
+  no_log: true
+  when:
+    - _sso_lf | bool
+    - _sso_stack.stack_outputs is defined
+
+- name: Write the Langfuse client secret to state/
+  ansible.builtin.copy:
+    dest: "{{ sso_state_files.client_secret_file }}"
+    content: "{{ _sso_lf_secret.stdout | trim }}"
+    mode: "0600"
+  no_log: true
+  when:
+    - _sso_lf | bool
+    - _sso_stack.stack_outputs is defined
+
+# --- the outputs file ---------------------------------------------------------
+
+- name: Work out the hosted-UI endpoints
+  # Taken from the discovery document when it lists them, otherwise derived
+  # from the domain prefix (GovCloud's hosted UI sits under auth-fips).
+  ansible.builtin.set_fact:
+    _sso_ui_domain: >-
+      {{ (_sso_disc.json.authorization_endpoint | urlsplit('hostname'))
+         if (_sso_disc.json.authorization_endpoint | default('') | length > 0)
+         else (sso.cognito.domain_prefix ~ '.auth' ~ ('-fips' if aws.partition == 'aws-us-gov' else '')
+               ~ '.' ~ aws.target_region ~ '.amazoncognito.com') }}
+  when: _sso_stack.stack_outputs is defined
+
+- name: Write the SSO outputs file
+  # No secret in here; the client secret has its own file above. The two
+  # Langfuse keys stay in the file as null when there is no Langfuse client.
+  ansible.builtin.copy:
+    dest: "{{ sso_state_files.outputs_file }}"
+    content: "{{ _sso_outputs | to_nice_json(sort_keys=true) }}\n"
+    mode: "0600"
+  vars:
+    _sso_out: "{{ _sso_stack.stack_outputs }}"
+    _sso_ui_url: "https://{{ _sso_ui_domain | trim }}"
+    _sso_outputs: >-
+      {{ {
+        'region': aws.target_region,
+        'pool_id': _sso_out.UserPoolId,
+        'issuer': _sso_disc.json.issuer,
+        'jwks_uri': _sso_disc.json.jwks_uri,
+        'hosted_ui_domain': _sso_ui_domain | trim,
+        'hosted_ui_url': _sso_ui_url,
+        'authorization_endpoint': _sso_disc.json.authorization_endpoint | default(_sso_ui_url ~ '/oauth2/authorize'),
+        'token_endpoint': _sso_disc.json.token_endpoint | default(_sso_ui_url ~ '/oauth2/token'),
+        'langfuse_client_id': (_sso_out.LangfuseClientId if (_sso_lf | bool) else none),
+        'langfuse_callback_url': (_sso_lf_callback if (_sso_lf | bool) else none),
+        'clickhouse_client_id': _sso_out.ClickHouseClientId,
+        'clickhouse_callback_url': _sso_ch_callback
+      } }}
+  when: _sso_stack.stack_outputs is defined
+
+# --- summary -----------------------------------------------------------------
+
+- name: Report the SSO setup
+  ansible.builtin.debug:
+    msg:
+      - "user pool:            {{ _sso_stack.stack_outputs.UserPoolId }}"
+      - "issuer:               {{ _sso_disc.json.issuer }}"
+      - "hosted UI:            https://{{ _sso_ui_domain | trim }}"
+      - "groups:               {{ sso.cognito.groups | join(', ') }}"
+      - "users:                {{ 'federated through SAML (' ~ sso.cognito.saml_metadata_url ~ ')' if (sso.cognito.saml_metadata_url | default('') | trim | length > 0) else 'held in the Cognito pool' }}"
+      - "clickhouse callback:  {{ _sso_ch_callback }}"
+      - "langfuse callback:    {{ _sso_lf_callback if (_sso_lf | bool) else '(no Langfuse app client: sso.langfuse.enabled and langfuse.enabled are not both true)' }}"
+      - "state files:          {{ sso_state_files.outputs_file }}{{ ', ' ~ sso_state_files.client_secret_file if (_sso_lf | bool) else '' }}"
+      - "teardown: ansible-playbook deploy.yml --tags sso-idp -e sso_idp_state=absent"
+  when: _sso_stack.stack_outputs is defined

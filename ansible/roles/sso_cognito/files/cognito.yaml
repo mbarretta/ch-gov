@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ClickHouse Private on EKS -- single sign-on. One Amazon Cognito user pool with
+  a hosted-UI domain, its groups, an optional SAML identity provider, an
+  app client for Langfuse (OIDC, confidential) and an app client for ClickHouse
+  (public, authorization code with PKCE).
+
+# NOTE: this file is rendered by Jinja before CloudFormation sees it, like the
+# IRSA template in storage_iam. The one thing that needs it is the groups: their
+# number comes from sso.cognito.groups, and CloudFormation cannot create a
+# variable number of resources from a parameter (Fn::ForEach would need every
+# group name to be a valid logical ID, which names such as clickhouse-readonly
+# are not). Everything else arrives as a stack parameter.
+#
+# Nothing in this template builds an ARN. The pool's ARN is read back with
+# Fn::GetAtt, which carries the right partition in every region.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Name prefix for all resources.
+  DomainPrefix:
+    Type: String
+    Description: Hosted-UI domain prefix, unique within the region.
+  SamlMetadataUrl:
+    Type: String
+    Default: ''
+    Description: >-
+      Metadata URL of an external SAML identity provider. Empty keeps users in
+      the Cognito pool itself and creates no identity provider.
+  LangfuseCallbackUrl:
+    Type: String
+    Default: ''
+    Description: >-
+      Full OIDC redirect URI for Langfuse. Empty means no Langfuse app client
+      is created.
+  LangfuseLogoutUrl:
+    Type: String
+    Default: ''
+  ClickHouseCallbackUrl:
+    Type: String
+    Description: Loopback redirect URI the ClickHouse client helper listens on.
+
+Conditions:
+  HasSaml: !Not [!Equals [!Ref SamlMetadataUrl, '']]
+  HasLangfuse: !Not [!Equals [!Ref LangfuseCallbackUrl, '']]
+
+Resources:
+  # -------------------------------------------------------------- user pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${EnvironmentName}-sso"
+      # Email is the sign-in name and is required. Changing UsernameAttributes
+      # replaces the pool (and every user in it), so it is fixed here.
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      # Accounts are created by an administrator or come from the SAML
+      # provider; nobody can sign themselves up.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - {Name: verified_email, Priority: 1}
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref DomainPrefix
+      UserPoolId: !Ref UserPool
+
+  # ----------------------------------------------------------------- groups
+  # One per sso.cognito.groups entry. A user's memberships travel in the
+  # cognito:groups claim of the ID token; clickhouse_jwt maps them to roles.
+{% for group in sso.cognito.groups %}
+  Group{{ loop.index0 }}:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: {{ group | to_json }}
+{% endfor %}
+
+  # ----------------------------------------------------- optional SAML IdP
+  # Users the provider authenticates arrive in the pool as federated users. The
+  # provider does not assign Cognito groups: add a federated user to a group in
+  # the pool for their token to carry cognito:groups.
+  SamlProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: HasSaml
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: saml-idp
+      ProviderType: SAML
+      ProviderDetails:
+        MetadataURL: !Ref SamlMetadataUrl
+      AttributeMapping:
+        email: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
+
+  # --------------------------------------------------------- Langfuse client
+  # Confidential client: Langfuse's server exchanges the authorization code
+  # with a client secret. Only created when Langfuse sign-in is wanted.
+  LangfuseClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: HasLangfuse
+    Properties:
+      ClientName: !Sub "${EnvironmentName}-langfuse"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: [!Ref LangfuseCallbackUrl]
+      LogoutURLs: [!Ref LangfuseLogoutUrl]
+      SupportedIdentityProviders: !If
+        - HasSaml
+        - [COGNITO, !Ref SamlProvider]
+        - [COGNITO]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+
+  # -------------------------------------------------------- ClickHouse client
+  # Public client: it runs on a person's machine and cannot keep a secret, so
+  # it has none and the authorization-code exchange is protected by PKCE
+  # instead. The ClickHouse server checks the ID token's aud against this
+  # client's ID, and only ID tokens carry aud -- hence the short ID-token life.
+  ClickHouseClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${EnvironmentName}-clickhouse"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: [!Ref ClickHouseCallbackUrl]
+      SupportedIdentityProviders: !If
+        - HasSaml
+        - [COGNITO, !Ref SamlProvider]
+        - [COGNITO]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+        RefreshToken: days
+      IdTokenValidity: 60
+      AccessTokenValidity: 60
+      RefreshTokenValidity: 1
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolArn:
+    Value: !GetAtt UserPool.Arn
+  # The pool's issuer URL as Cognito reports it, possibly without a scheme. The
+  # role fetches the discovery document from it and takes the issuer and JWKS
+  # location from that document rather than assembling them.
+  ProviderUrl:
+    Value: !GetAtt UserPool.ProviderURL
+  ClickHouseClientId:
+    Value: !Ref ClickHouseClient
+  LangfuseClientId:
+    Condition: HasLangfuse
+    Value: !Ref LangfuseClient
