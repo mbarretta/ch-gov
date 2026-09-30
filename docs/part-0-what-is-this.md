@@ -295,7 +295,7 @@ To *operate* the system, you connect to it, look at its state, check its health,
 
 | State | Approx. cost | How to get there |
 |---|---|---|
-| Everything up | ~$2.32/hr | `scripts/up.sh` |
+| Everything up, at the default `minimal` size | ~$2.32/hr (`tutorial` costs more, see Part 2's "What the sizes cost" table) | `scripts/up.sh` |
 | Nodes down, everything else kept | ~$0.15/hr | `scripts/down.sh` |
 | Everything gone except S3 data and ECR images | ~$0 | `scripts/down.sh --all` |
 

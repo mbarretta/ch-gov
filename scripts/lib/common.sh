@@ -49,7 +49,7 @@ ch_resolve() {
   out="$(cd "$CH_PROJECT_ROOT/ansible" && \
          ANSIBLE_STDOUT_CALLBACK=minimal ANSIBLE_CALLBACK_RESULT_FORMAT=json \
          ansible localhost ${extra[@]+"${extra[@]}"} -m ansible.builtin.debug \
-           -a 'msg={{ {"fips": fips, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "langfuse": langfuse, "grafana": grafana} }}' \
+           -a 'msg={{ {"fips": fips, "size": size, "pricing": pricing, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "langfuse": langfuse, "grafana": grafana} }}' \
            </dev/null 2>"$errf")" || rc=$?
   json="${out#*=> }"
   if ((rc == 0)) && CH_VARS_JSON="$(jq -ce '.msg | select(type == "object")' <<<"$json" 2>/dev/null)" && [[ -n "$CH_VARS_JSON" ]]; then
@@ -73,6 +73,24 @@ ch_var() {
 
 # Succeeds when the persistent fips: switch is true.
 ch_fips_enabled() { [[ "$(ch_var fips)" == "true" ]]; }
+
+# The all-in hourly estimate for the configured size and fips: the pricing:
+# table times the keeper, server and operator node counts at their minimums,
+# plus the EKS control plane and the NAT gateway(s). Same formula as the cost
+# line the nodes step prints, so the two agree. Prints two decimals, such as 2.32.
+ch_hourly_cost() {
+  ch_resolve || return 1
+  local total
+  total="$(jq -r '.pricing as $p | .infrastructure as $i
+    | ([[$i.keeper.instance_type, $i.keeper.node_count],
+        [$i.server.instance_type, $i.server.min_nodes],
+        [$i.operator.instance_type, $i.operator.min_nodes]]
+       | map(($p.instance_hourly_usd[.[0]] // 0) * (.[1] | tonumber)) | add) as $compute
+    | $compute + $p.eks_control_plane_hourly_usd
+      + $p.nat_gateway_hourly_usd * (if $i.nat_mode == "single" then 1 else 3 end)
+    ' <<<"$CH_VARS_JSON")" || return 1
+  printf '%.2f' "$total"
+}
 
 # sso | profile. Anything but "profile" is treated as sso, matching the
 # playbook's default.
