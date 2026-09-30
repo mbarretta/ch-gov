@@ -304,7 +304,7 @@ def aws_view():
         o.append(box(nx, 410, nw, 124, 'aws', 'server node · m7gd.2xlarge', [
             'label clickhouseGroup=server-arm64 · tainted'], tsize=10, lsize=7, align='start', title_y=424))
         o.append(box(nx + 8, 440, 132, 84, 'db', 'clickhouse-server', [
-            f'replica {i} · 26.2.1.525', '4 CPU · 16Gi', 'no PVC (stateless)', 'IRSA service acct'],
+            f'replica {i} · 26.2.1.525', '6 CPU · 20G', 'no PVC (stateless)', 'IRSA service acct'],
             logo_name='clickhouse', align='start', tsize=9, lsize=7, line_gap=11))
         o.append(box(nx + 146, 440, nw - 154, 84, 'gen', 'cache', [
             'local NVMe', '/nvme/disk', '300Gi', 'read cache'], tsize=9, lsize=7, line_gap=11, align='start'))
@@ -312,7 +312,7 @@ def aws_view():
         o.append(box(nx, 552, nw, 110, 'aws', 'keeper node · m7g.xlarge', [
             'label clickhouseGroup=keeper-arm64 · tainted'], tsize=10, lsize=7, align='start', title_y=566))
         o.append(box(nx + 8, 582, 132, 70, 'db', 'clickhouse-keeper', [
-            f'keeper-{i} · 26.2.1.258', '2 CPU · 4Gi', 'Raft member'],
+            f'keeper-{i} · 26.2.1.258', '2 CPU · 4G', 'Raft member'],
             logo_name='clickhouse', align='start', tsize=9, lsize=7, line_gap=11))
         o.append(box(nx + 146, 582, nw - 154, 70, 'aws', 'EBS gp3', [
             '10Gi PVC', 'encrypted', 'EBS CSI'], tsize=9, lsize=7, line_gap=11, align='start'))
