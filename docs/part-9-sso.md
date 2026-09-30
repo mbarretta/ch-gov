@@ -229,12 +229,17 @@ The default list is the VPC CIDR plus `127.0.0.1/32`. The port-forward path (`ch
 
 Open `langfuse.url`. With `sso.langfuse.enabled` the sign-in page offers Cognito. Choose it, sign in on the hosted UI, and Langfuse creates or links the user and lands them in the seeded organization and project as `default_org_role` and `default_project_role`. The seeded admin can link to its Cognito identity the first time it signs in through Cognito with the same email address.
 
+### Switching users
+
+The Cognito hosted UI keeps its own session in your browser, on the hosted-UI domain, so after one sign-in the next "Sign in with Cognito" reuses that user without asking for credentials. To sign in as someone else, clear that session first. For Langfuse, open the sign-out URL that `scripts/sso-smoke.sh` prints: it is `https://<hosted-ui-domain>/logout?client_id=<langfuse client id>&logout_uri=<langfuse.url>`, which ends the Cognito session and returns you to Langfuse. Also sign out of Langfuse itself, which keeps its own session. For ClickHouse, run `scripts/ch-client.sh --sso --fresh`, which sends the browser through the same logout endpoint and on to the login form. A private browser window or clearing the cookies for the hosted-UI domain works too.
+
 ### `scripts/ch-client.sh --sso`
 
 ```bash
 scripts/ch-client.sh --sso                      # interactive session as yourself, through the port-forward
 scripts/ch-client.sh --sso -q "SHOW GRANTS"     # one query
 scripts/ch-client.sh --sso --lb                 # through the Step 12 load balancer
+scripts/ch-client.sh --sso --fresh              # clear the browser's Cognito session first, to sign in as a different user
 ```
 
 Run `scripts/ch-client.sh --help` for the accepted flag order.
@@ -333,6 +338,7 @@ state/:     sso-cognito-outputs.json (no secret), sso-cognito-client-secret (060
 - **Step 9 says a pod cannot fetch the JWKS URL.** Fix the route from the server nodes to the Cognito host (NAT or an endpoint) and re-run. Helm has not been touched.
 - **Step 15 stops with `sso.langfuse.enabled opens Langfuse sign-up`.** Neither `sso.langfuse.disable_password_login` nor `sso.langfuse.allow_password_signup` is `true`. Pick one as described in section 5, then run `scripts/play.sh --tags lf-app`.
 - **A server pod crash-loops after enabling SSO.** Read section 6, last row of the table. Disable `sso.clickhouse_jwt` and run `--tags cluster`, then fix the JWKS route.
+- **`ch-client.sh --sso` signs in as the previous user without asking for credentials.** The browser still holds the Cognito hosted-UI session from the last sign-in. Run `scripts/ch-client.sh --sso --fresh`, which signs the browser out of Cognito first and then shows the login form. See "Switching users" in section 7.
 - **`ch-client.sh --sso` hangs at the browser step.** Check that nothing else holds port 8765 and that the browser can reach the hosted UI.
 - **A token is refused.** The usual causes are an expired token (60 minutes), a token for the other app client (wrong `aud`), a user whose `networks` address is not listed, or a `cognito:groups` claim that is not an array.
 - **A login works and `SHOW GRANTS` shows nothing.** The user is in no group, or the group has no role or no `role_grants` entry. Add the statements and run `scripts/play.sh --tags ch-jwt`.

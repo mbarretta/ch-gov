@@ -6,6 +6,7 @@
 #   scripts/ch-client.sh -q "SELECT version()" # one query, any client flags
 #   scripts/ch-client.sh --lb [-q ...]         # via the Step 12 load balancer
 #   scripts/ch-client.sh --sso [--lb] [-q ...] # sign in as yourself with Cognito
+#   scripts/ch-client.sh --sso --fresh         # ... asking for credentials again
 #
 # Default: does what the tutorial's Step 11 does by hand -- port-forward the
 # first server pod's native port to localhost, connect with the admin user,
@@ -24,7 +25,9 @@
 # follows your Cognito groups. The token is held in memory and never written to
 # disk; it does appear on the client's command line for the life of the session.
 # CH_JWT=<id token> reuses a token you already have instead of signing in again.
-# CH_SSO_NO_BROWSER=1 prints the sign-in URL without opening a browser.
+# CH_SSO_NO_BROWSER=1 prints the sign-in URL without opening a browser. --fresh
+# (with --sso) signs the browser out of Cognito's hosted-UI session first, so
+# the sign-in page asks for credentials instead of reusing the last user.
 #
 # fips: true moves both paths to the native TLS port (9440) with --secure
 # and a CA-verified connection against the CA clickhouse_cluster generated
@@ -48,13 +51,14 @@ USER_="$(ch_var clickhouse.admin_username)"
 PW_FILE="$CH_ROOT/state/clickhouse-admin-password"
 LOCAL_PORT="${CH_LOCAL_PORT:-19000}"
 
-# Leading flags, in any order: --lb and --sso. Everything after them goes to
-# the client unchanged.
-LB=0; SSO=0
+# Leading flags, in any order: --lb, --sso and --fresh. Everything after them
+# goes to the client unchanged.
+LB=0; SSO=0; FRESH=0
 while (($#)); do
   case "$1" in
     --lb)  LB=1 ;;
     --sso) SSO=1 ;;
+    --fresh) FRESH=1 ;;
     *) break ;;
   esac; shift
 done
@@ -65,6 +69,7 @@ else die "clickhouse-client not installed: brew install clickhouse"; fi
 
 # Who we connect as. --sso signs in first, before any port-forward is opened,
 # so the forward does not sit idle while the browser tab is open.
+((FRESH)) && { ((SSO)) || die "--fresh only applies with --sso"; export CH_SSO_FRESH=1; }
 TOKEN=""
 if ((SSO)); then
   sso_jwt_enabled || die "--sso needs sso.enabled and sso.clickhouse_jwt.enabled in state/deploy-vars.yml, then: scripts/play.sh --tags sso-idp,cluster,ch-jwt"

@@ -422,6 +422,17 @@ sso_out() {
   jq -r --arg k "$1" '.[$k] // empty' "$SSO_OUTPUTS"
 }
 
+# Prints the URL that signs the browser out of the Cognito hosted-UI session
+# for the Langfuse sign-in, then returns it to the Langfuse address. Open it
+# before "Sign in with Cognito" to sign in as a different user. Nothing for a
+# stack without a Langfuse app client.
+sso_langfuse_signout_url() {
+  [[ -r "$SSO_OUTPUTS" ]] || return 1
+  jq -r 'select(.hosted_ui_url and .langfuse_client_id and .langfuse_callback_url)
+         | (.langfuse_callback_url | sub("/api/auth/callback/cognito$"; "")) as $base
+         | "\(.hosted_ui_url)/logout?client_id=\(.langfuse_client_id)&logout_uri=\($base | @uri)"' "$SSO_OUTPUTS"
+}
+
 # Dies unless the outputs file exists, naming the step that writes it.
 sso_require_outputs() {
   [[ -r "$SSO_OUTPUTS" ]] || die "no SSO outputs at $SSO_OUTPUTS -- run: scripts/play.sh --tags sso-idp"
@@ -437,7 +448,11 @@ sso_require_outputs() {
 #
 # The token lives in the caller's variable only: nothing is written to disk.
 # Set CH_SSO_NO_BROWSER=1 to print the sign-in URL without opening a browser,
-# and CH_SSO_TIMEOUT=<seconds> to change the 180-second wait.
+# and CH_SSO_TIMEOUT=<seconds> to change the 180-second wait. Set CH_SSO_FRESH=1
+# to clear the browser's Cognito hosted-UI session first, so the sign-in page
+# asks for credentials instead of reusing the last user: the URL goes through
+# Cognito's logout endpoint, which signs the session out and then continues to
+# the login form with the same authorization parameters.
 #
 # Call as TOKEN="$(sso_login_id_token)" || exit 1.
 sso_login_id_token() {
@@ -519,6 +534,11 @@ query = urllib.parse.urlencode({
     "code_challenge_method": "S256",
 })
 sign_in = authz + ("&" if "?" in authz else "?") + query
+if os.environ.get("CH_SSO_FRESH"):
+    suffix = "/oauth2/authorize"
+    if not authz.endswith(suffix):
+        die("cannot derive the Cognito sign-out endpoint from " + authz)
+    sign_in = authz[: -len(suffix)] + "/logout?" + query
 print("  Sign in to Cognito in your browser:\n    " + sign_in, file=sys.stderr)
 if not os.environ.get("CH_SSO_NO_BROWSER"):
     webbrowser.open(sign_in)

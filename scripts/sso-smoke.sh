@@ -169,6 +169,8 @@ else
   else
     fail "Langfuse does not list cognito at /api/auth/providers (found: $(jq -r 'keys | join(", ")' "$TMP/providers.json" 2>/dev/null || head -c 200 "$TMP/providers.json")) -- run: scripts/play.sh --tags lf-app"; note_problem
   fi
+  signout="$(sso_langfuse_signout_url || true)"
+  [[ -z "$signout" ]] || info "to sign in as a different Cognito user, open this first (it clears the browser's Cognito session): $signout"
 fi
 
 # ---- 3. a Cognito token signs in to ClickHouse -----------------------------------
