@@ -639,6 +639,12 @@ sso_state_files:
   outputs_file:       "{{ state_dir }}/sso-cognito-outputs.json"
   client_secret_file: "{{ state_dir }}/sso-cognito-client-secret"
 
+# The ClickHouse role that caps what any token-authenticated user can do. It
+# is named in the cluster's JWT user directory (clickhouse_cluster) and created
+# by clickhouse_jwt, so both read the one name from here. An empty
+# sso.clickhouse_jwt.permission_limit_role selects the default.
+sso_jwt_ceiling_role: "{{ sso.clickhouse_jwt.permission_limit_role | default('', true) | trim or 'jwt_ceiling' }}"
+
 # Grafana's generated secrets (Steps 16-18), kept under state/ exactly like
 # Langfuse's above.
 grafana_state_files:

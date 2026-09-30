@@ -317,6 +317,155 @@
                 ca.crt: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) }}"
           no_log: "{{ not (show_secrets | default(false) | bool) }}"
 
+    # --- optional: the JWT user directory (Step 11b's server side) -------------
+    # Off unless sso.enabled and sso.clickhouse_jwt.enabled. When off, none of
+    # this runs and the release below is given exactly the values it had before
+    # this block existed (values_files stays empty).
+    #
+    # What the server does with a token, in JWKS mode (the only mode used):
+    #   - The signature must verify against a key in the pool's JWKS (RS256).
+    #   - aud is mandatory in the config and on the token. A token with no aud
+    #     claim is rejected, and so is one whose aud differs from the configured
+    #     value, so only ID tokens from the ClickHouse app client pass; Cognito
+    #     access tokens carry no aud claim and are rejected.
+    #   - iss is NOT validated. Trust rests on the JWKS signature plus aud alone,
+    #     so iss below only shapes the ClickHouse user name, and neither it nor
+    #     networks nor permission_limit repairs claim validation: networks limits
+    #     where logins may come from, permission_limit caps what a login may do.
+    #   - Roles come from the cognito:groups claim, which must be a top-level
+    #     array of group names. A name with no matching ClickHouse role is
+    #     dropped without an error. A login's rights are granted to it directly
+    #     (currentRoles() stays empty; read them with SHOW GRANTS) and are the
+    #     intersection of its groups' roles and the permission_limit role.
+    #   - The directory sits beside the chart's existing Keeper-backed access
+    #     storage, so admin, prometheus and the service users keep working.
+    #
+    # The server crashes (a null dereference) if a token carrying a kid arrives
+    # while the JWKS has never loaded. So the JWKS URL must be reachable from a
+    # pod BEFORE the directory is enabled; the probe below is that gate.
+    #
+    # JWKS mode is exercised on the -fips image (amd64) and on the standard image
+    # (arm64), so the block is not restricted to fips: true.
+    - name: Wire the JWT user directory into the cluster values
+      when:
+        - sso.enabled | bool
+        - sso.clickhouse_jwt.enabled | bool
+      block:
+        - name: Read the Cognito outputs state file
+          ansible.builtin.stat:
+            path: "{{ sso_state_files.outputs_file }}"
+          register: _cl_jwt_out_stat
+          check_mode: false
+
+        - name: Fail clearly if Step 6b has not written it
+          ansible.builtin.assert:
+            that: _cl_jwt_out_stat.stat.exists
+            fail_msg: >-
+              {{ sso_state_files.outputs_file }} is missing. The JWT user directory needs the
+              Cognito issuer, JWKS URL and ClickHouse app client ID that Step 6b records.
+              Run: ansible-playbook deploy.yml --tags sso-idp
+
+        - name: Load the Cognito outputs
+          ansible.builtin.set_fact:
+            _cl_jwt_out: "{{ lookup('ansible.builtin.file', sso_state_files.outputs_file) | from_json }}"
+
+        - name: Fail clearly if an output the directory needs is absent
+          ansible.builtin.assert:
+            that:
+              - _cl_jwt_out.issuer | default('') | length > 0
+              - _cl_jwt_out.clickhouse_client_id | default('') | length > 0
+              - _cl_jwt_out.jwks_uri | default('') is match('^https://[A-Za-z0-9._~:/?&=%+@,-]+$')
+            fail_msg: >-
+              {{ sso_state_files.outputs_file }} needs issuer, clickhouse_client_id and an
+              https jwks_uri made of URL characters only. Re-run: ansible-playbook
+              deploy.yml --tags sso-idp
+
+        - name: Probe the JWKS URL from a pod on a server node
+          # A throwaway pod from the server image, on the server node group, so
+          # the network path is the one the server pods will use. clickhouse-local
+          # fetches the URL with the server's own TLS stack, which needs no FIPS
+          # OpenSSL workaround (the image's wget does), and the query only passes
+          # when the body is a JWKS document. The pod goes in `default`,
+          # which exists on a first install; the ClickHouse namespace may not.
+          # The marker is checked instead of the exit status because kubectl run
+          # does not reliably relay the container's exit code.
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - run
+              - ch-jwks-probe
+              - --namespace=default
+              - --image={{ target_registry }}/clickhouse-server:{{ versions.server }}{{ fips_suffix }}
+              - --restart=Never
+              - --rm
+              - -i
+              - --quiet
+              - --pod-running-timeout=5m
+              - --overrides={{ _cl_jwt_probe_overrides | to_json }}
+              - --command
+              - --
+              - sh
+              - -c
+              - >-
+                q="SELECT count() FROM url('$0', 'JSONAsString') WHERE json LIKE '%\"keys\"%'";
+                out=$(clickhouse-local --http_max_tries=1 --http_connection_timeout=15
+                --http_receive_timeout=15 --query "$q" 2>&1);
+                if [ "$out" = 1 ]; then echo JWKS_REACHABLE; else echo "JWKS_UNREACHABLE: $out"; fi
+              - "{{ _cl_jwt_out.jwks_uri }}"
+          vars:
+            _cl_jwt_probe_overrides:
+              spec:
+                nodeSelector:
+                  clickhouseGroup: "server{{ node_label_suffix }}"
+                tolerations:
+                  - {key: clickhouse.com/do-not-schedule, operator: Exists, effect: NoSchedule}
+          environment:
+            KUBECONFIG: "{{ kubeconfig_path }}"
+          register: _cl_jwt_probe
+          failed_when: false
+          changed_when: false
+          check_mode: false
+
+        - name: Fail before Helm touches the cluster if the JWKS is not reachable
+          ansible.builtin.assert:
+            that: "'JWKS_REACHABLE' in _cl_jwt_probe.stdout"
+            fail_msg: >-
+              A pod on the server nodes cannot fetch {{ _cl_jwt_out.jwks_uri }}
+              ({{ (_cl_jwt_probe.stdout ~ _cl_jwt_probe.stderr) | trim | truncate(400) }}).
+              The JWT user directory is not enabled, because a ClickHouse server whose
+              JWKS never loaded crashes on the first token that carries a key ID. Fix
+              the route from the server nodes to Cognito (NAT or a VPC endpoint), then re-run.
+
+        - name: Write the JWT user directory values
+          # No secret in here: the issuer, the app client ID (public) and the
+          # JWKS URL. Kept under state/ so helm reads it as a values file.
+          ansible.builtin.copy:
+            dest: "{{ state_dir }}/clickhouse-jwt-values.yaml"
+            mode: "0600"
+            content: "{{ _cl_jwt_values | to_nice_yaml(indent=2) }}"
+          vars:
+            _cl_jwt_values:
+              server:
+                config:
+                  user_directories:
+                    jwt:
+                      aud: "{{ _cl_jwt_out.clickhouse_client_id }}"
+                      iss: "{{ _cl_jwt_out.issuer }}"
+                      jwks:
+                        url: "{{ _cl_jwt_out.jwks_uri }}"
+                        update_interval_ms: 300000
+                      permission_limit:
+                        role: "{{ sso_jwt_ceiling_role }}"
+                      remap_claims:
+                        roles: "cognito:groups"
+                      networks:
+                        ip: "{{ (sso.clickhouse_jwt.networks | default([], true)) or [infrastructure.vpc_cidr] }}"
+          check_mode: false
+
+        - name: Remember the values file for the release
+          ansible.builtin.set_fact:
+            _cl_jwt_values_file: "{{ state_dir }}/clickhouse-jwt-values.yaml"
+
 
 # --- the release -------------------------------------------------------------
 
@@ -425,6 +574,9 @@
     # kubernetes.core >= 6.5 exposes the flag; older versions have no way to
     # pass it, which is one reason Part 1 pins the collection floor.
     force_conflicts: true
+    # Empty unless the JWT user directory is on (see the block above); the
+    # module passes a values file ahead of `values`, and the two merge key by key.
+    values_files: "{{ [_cl_jwt_values_file] if _cl_jwt_values_file is defined else [] }}"
     values:
       account:
         username: "{{ clickhouse.admin_username }}"
