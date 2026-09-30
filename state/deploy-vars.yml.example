@@ -62,3 +62,37 @@ dhi:
 #   load_balancer:
 #     type: "internal"   # none | internal | public
 #     tls: false
+#
+# Single sign-on (optional Steps 6b and 11b): an Amazon Cognito user pool for
+# Langfuse sign-in and ClickHouse token (JWT) sign-in. Ansible merges nested
+# mappings key by key here (hash_behaviour in ansible.cfg) but replaces a list
+# (groups, enforce_domains, networks) as a whole; a run that does not use that
+# ansible.cfg replaces the entire sso mapping instead. So copy the complete
+# block below rather than a fragment, and set every value you use. Service
+# connections keep password authentication. The Cognito client secret is
+# generated into state/ and never belongs in this file. See
+# ansible/group_vars/all.yml.
+# sso:
+#   enabled: false
+#   provider: "cognito"
+#   cognito:
+#     domain_prefix: "<YOUR_COGNITO_DOMAIN_PREFIX>"   # unique in the region; no "aws", "amazon" or "cognito"
+#     saml_metadata_url: ""   # optional: "<YOUR_IDP_SAML_METADATA_URL>" federates to your identity provider
+#     groups:
+#       - "clickhouse-readonly"
+#       - "clickhouse-admin"
+#   langfuse:
+#     enabled: false
+#     disable_password_login: false
+#     enforce_domains: []   # for example ["<YOUR_EMAIL_DOMAIN>"]
+#     default_org_role: "VIEWER"
+#     default_project_role: "VIEWER"
+#   clickhouse_jwt:
+#     enabled: false
+#     permission_limit_role: ""
+#     group_prefix: "clickhouse-"
+#     role_grants: {}   # group -> GRANT statements, written without a TO clause, for example:
+#     #  role_grants:
+#     #    clickhouse-readonly:
+#     #      - "GRANT SELECT ON *.*"
+#     networks: []   # empty means the VPC CIDR

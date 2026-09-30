@@ -472,6 +472,10 @@ tls_rsa_bits: "{{ 3072 if fips else 2048 }}"
 #   - Langfuse's own in-pod S3 client (its own separate IRSA role, used by
 #     langfuse_storage / langfuse for its object storage) -- untouched by
 #     this task; still targets the standard S3 endpoint under fips: true.
+#   - Cognito (optional single sign-on, sso: below): the browser and the
+#     Langfuse pods reach Cognito's hosted UI and token endpoints, and
+#     ClickHouse fetches Cognito's JWKS document, over the standard Cognito
+#     endpoints -- none of it is routed by this repo's use_fips_endpoint.
 #   - Any other pod-side AWS SDK call this deployment makes outside the
 #     controller's own .aws/config and ClickHouse's S3 disk config above.
 # The controller's .aws/config is evidence only for the controller's own
@@ -623,6 +627,18 @@ langfuse_state_files:
   tls_cert_file:            "{{ state_dir }}/langfuse-tls-cert.pem"
   tls_key_file:             "{{ state_dir }}/langfuse-tls-key.pem"
 
+# Single sign-on's state (sso_cognito, Step 6b). sso_cognito writes both files
+# after it creates the Cognito user pool and app clients; the later roles and
+# scripts read them from disk, never from facts set by an earlier role, so a
+# single --tags run (for example --tags ch-jwt) works on its own. Both are
+# gitignored under state/. outputs_file is JSON holding the pool id, issuer,
+# jwks_uri, hosted-UI domain and both app client IDs; it carries no secret.
+# client_secret_file holds the Cognito app client secret, mode 0600, and is
+# read only by tasks that set no_log. Kept on teardown like the rest.
+sso_state_files:
+  outputs_file:       "{{ state_dir }}/sso-cognito-outputs.json"
+  client_secret_file: "{{ state_dir }}/sso-cognito-client-secret"
+
 # Grafana's generated secrets (Steps 16-18), kept under state/ exactly like
 # Langfuse's above.
 grafana_state_files:
@@ -632,6 +648,76 @@ grafana_state_files:
   # grafana.load_balancer.tls is true, same convention as langfuse's pair.
   tls_cert_file:             "{{ state_dir }}/grafana-tls-cert.pem"
   tls_key_file:              "{{ state_dir }}/grafana-tls-key.pem"
+
+# ---------------------------------------------------------------------------
+# Single sign-on (optional Steps 6b and 11b) -- an Amazon Cognito user pool that
+# signs people in to Langfuse (OIDC) and to ClickHouse Private (JWT). Off by
+# default; with enabled: false nothing else in this file changes what any step
+# renders and no AWS resource is created. Cognito can federate to an external
+# SAML identity provider, or hold the users itself.
+#
+# Service connections keep password authentication: the Langfuse and Grafana
+# ClickHouse users, admin and prometheus are never converted to JWT. The
+# Cognito client secret lives only in state/ (see sso_state_files) and in
+# Kubernetes Secrets, never in this file.
+#
+# Keep the whole block in step with state/deploy-vars.yml.example. Nested
+# dictionaries merge key by key across sources (ansible.cfg), lists replace.
+# This block sits before langfuse:, which must stay near the end of the file
+# (see the warning above it).
+# ---------------------------------------------------------------------------
+sso:
+  # The master switch. false = Steps 6b and 11b do nothing.
+  enabled: false
+  provider: "cognito"
+
+  cognito:
+    # The hosted-UI domain: https://<domain_prefix>.auth.<region>.amazoncognito.com
+    # Must be unique within the region, lowercase letters, digits and hyphens,
+    # and must not contain "aws", "amazon" or "cognito". Required when
+    # sso.enabled is true.
+    domain_prefix: ""
+    # Optional federation. A SAML metadata URL from your identity provider;
+    # empty means users are held in the Cognito pool itself.
+    saml_metadata_url: ""
+    # Cognito groups created in the pool. A user's group memberships travel in
+    # the token, and clickhouse_jwt maps groups to ClickHouse roles.
+    groups:
+      - "clickhouse-readonly"
+      - "clickhouse-admin"
+
+  # --- Langfuse sign-in through Cognito (OIDC) ---
+  langfuse:
+    enabled: false
+    # true hides the email/password form so Cognito is the only way in. Leave
+    # false until you have confirmed a Cognito sign-in works.
+    disable_password_login: false
+    # Restrict Langfuse sign-in to these email domains. [] = no restriction.
+    enforce_domains: []
+    # Roles Langfuse gives a user the first time they sign in.
+    default_org_role: "VIEWER"
+    default_project_role: "VIEWER"
+
+  # --- ClickHouse sign-in with a Cognito token (JWT) ---
+  clickhouse_jwt:
+    enabled: false
+    # The ClickHouse role that bounds what a token-authenticated user can be
+    # granted. Empty lets the clickhouse_jwt role use its own default name.
+    permission_limit_role: ""
+    # Only Cognito groups whose name starts with this prefix map to ClickHouse
+    # roles.
+    group_prefix: "clickhouse-"
+    # Group name -> GRANT statements for that group's ClickHouse role. Write
+    # each statement without a TO clause; the group's role is the grantee.
+    # Empty by default: dictionaries merge across sources, so an operator
+    # could not remove a default entry. Example (read-only):
+    #   role_grants:
+    #     clickhouse-readonly:
+    #       - "GRANT SELECT ON *.*"
+    role_grants: {}
+    # Source networks ClickHouse accepts token logins from. Empty means the
+    # VPC CIDR (infrastructure.vpc_cidr).
+    networks: []
 
 # ---------------------------------------------------------------------------
 # Langfuse (optional Steps 13-15) -- an LLM tracing server that stores its

@@ -4,10 +4,12 @@
 # Run from the ansible/ directory:
 #   ansible-playbook deploy.yml                    # everything, Steps 1-12
 #                                                  #   (+13-15 when langfuse.enabled,
-#                                                  #    +16-18 when grafana.enabled)
+#                                                  #    +16-18 when grafana.enabled,
+#                                                  #    +6b/11b when sso.enabled)
 #   ansible-playbook deploy.yml --tags images      # just the pull-role check, ECR setup + image sync
 #   ansible-playbook deploy.yml --tags langfuse    # just the optional Steps 13-15
 #   ansible-playbook deploy.yml --tags grafana     # just the optional Steps 16-18
+#   ansible-playbook deploy.yml --tags sso         # just the optional Steps 6b and 11b
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
 #
@@ -18,6 +20,9 @@
 # Steps 16-18 are optional and off by default (grafana.enabled in group_vars):
 # a Grafana server on the same cluster, with ClickHouse Private (and, when
 # enabled, Langfuse's data) as its datasource.
+# Steps 6b and 11b are optional and off by default (sso.enabled in group_vars):
+# an Amazon Cognito user pool for Langfuse sign-in (OIDC) and ClickHouse JWT
+# sign-in. The numbering of Steps 1-18 is unchanged.
 
 - name: ClickHouse Private -- AWS EKS
   hosts: localhost
@@ -147,6 +152,14 @@
     - role: storage_iam
       tags: [infra, storage]
 
+    # --- Step 6b (optional): Cognito user pool and app clients for SSO -------
+    # Role-level `when`, same shape and same reason as Langfuse's roles below:
+    # nothing may change while sso.enabled is false, and the `== 'absent'` half
+    # keeps the teardown reachable after the switch goes back to false.
+    - role: sso_cognito
+      tags: [sso, sso-idp]
+      when: (sso.enabled | bool) or (sso_idp_state | default('present')) == 'absent'
+
     # --- Step 7: Kubernetes prerequisites ----------------------------------
     - role: k8s_prereqs
       tags: [k8s, prereqs]
@@ -166,6 +179,15 @@
     # --- Step 11: verification -- a query, and a cross-replica round trip ---
     - role: clickhouse_verify
       tags: [k8s, verify]
+
+    # --- Step 11b (optional): ClickHouse JWT sign-in from Cognito tokens ------
+    # Needs Step 6b's state files on disk and the running cluster from Step 9;
+    # ordered after Step 11's verification so a broken cluster is caught first.
+    - role: clickhouse_jwt
+      tags: [sso, ch-jwt]
+      when: >-
+        ((sso.enabled | bool) and (sso.clickhouse_jwt.enabled | bool))
+        or (ch_jwt_state | default('present')) == 'absent'
 
     # --- Step 12: load balancer (none | internal | public) -------------------
     - role: clickhouse_loadbalancer
