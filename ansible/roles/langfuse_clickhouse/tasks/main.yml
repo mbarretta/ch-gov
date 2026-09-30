@@ -9,7 +9,10 @@
 # migrations and health checks read.
 #
 # Every statement runs through `kubectl exec -i` in one server pod, the way
-# Step 11 does: the admin password travels on stdin, never on argv. The user
+# Step 11 does: the admin password travels on stdin, never on argv -- neither
+# kubectl's nor clickhouse-client's inside the pod, where the shell exports it
+# as CLICKHOUSE_PASSWORD. (The HTTP checks in _lfdb_http_sh are the exception;
+# see its comment.) The user
 # is created `IDENTIFIED WITH sha256_hash`, so the SQL carries the sha256 of
 # the Langfuse password and the password itself only ever exists in state/
 # (where Step 15 reads it into a Kubernetes Secret) and in Langfuse's pods.
@@ -46,8 +49,9 @@
     # (which only reaches the local kubectl) or argv (visible to `ps`). The
     # container is c-<cluster>-server; the pod label says clickhouse-server.
     _lfdb_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
-    # $0 = user, $1 = query; the password is the first line of stdin. The
-    # client gets /dev/null as stdin afterwards -- an open stdin on an INSERT
+    # $0 = user, $1 = query; the password is the first line of stdin, exported
+    # as CLICKHOUSE_PASSWORD (which clickhouse-client reads itself) so it never
+    # rides on the client's argv. The client gets /dev/null as stdin afterwards -- an open stdin on an INSERT
     # is treated as external data (see clickhouse_verify for the error).
     #
     # fips: true adds --secure --port 9440, same reasoning (and same "not a
@@ -56,8 +60,8 @@
     # itself, and server.openSSL.required zeroes localhost's plaintext 9000
     # too.
     _lfdb_sh: >-
-      IFS= read -r pw;
-      exec clickhouse-client --user "$0" --password "$pw"
+      IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+      exec clickhouse-client --user "$0"
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
     # $0 = user, $1 = host, $2 = attempts; the user's password is the first
@@ -75,10 +79,11 @@
     # role execs into the *existing* server pod rather than creating one of
     # its own, so it cannot add a volume mount, and the operator's own
     # in-pod mount path for server.openSSL's Secret is not documented by the
-    # chart. The password rides in a header on wget's argv inside the
-    # container, the same exposure as
-    # clickhouse-client's --password in _lfdb_sh; the kubectl argv on this
-    # machine carries nothing. Retries are here rather than in `until:` so
+    # chart. Unlike _lfdb_sh, the password does ride in a header on wget's
+    # argv inside the container, so `ps` in that container shows it while
+    # the check runs: BusyBox wget has no way to read a header or credentials
+    # from a file or the environment. The kubectl argv on this machine
+    # carries nothing. Retries are here rather than in `until:` so
     # the task can be `failed_when: false` and the assert after it can
     # explain the failure (an exhausted `until:` fails regardless).
     #
@@ -353,8 +358,9 @@
   vars:
     _lfdb_ensure_sh: |
       set -eu
-      IFS= read -r pw
-      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      IFS= read -r CLICKHOUSE_PASSWORD
+      export CLICKHOUSE_PASSWORD
+      ch() { clickhouse-client --user "$0" --query "$1" </dev/null; }
       if [ "$(ch "SELECT count() FROM system.databases WHERE name = '$1'")" = 1 ]; then
         echo "database: exists"
       else
@@ -403,8 +409,9 @@
     # $0 = admin user, $1 = user, $2 = the GRANT statements.
     _lfdb_grant_sh: |
       set -eu
-      IFS= read -r pw
-      ch() { clickhouse-client --user "$0" --password "$pw" --multiquery --query "$1" </dev/null; }
+      IFS= read -r CLICKHOUSE_PASSWORD
+      export CLICKHOUSE_PASSWORD
+      ch() { clickhouse-client --user "$0" --multiquery --query "$1" </dev/null; }
       before=$(ch "SHOW GRANTS FOR $1")
       ch "$2"
       after=$(ch "SHOW GRANTS FOR $1")
@@ -431,8 +438,9 @@
     # not abort.
     _lfdb_cluster_sh: |
       set -u
-      IFS= read -r pw
-      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      IFS= read -r CLICKHOUSE_PASSWORD
+      export CLICKHOUSE_PASSWORD
+      ch() { clickhouse-client --user "$0" --query "$1" </dev/null; }
       before=$(ch "SHOW GRANTS FOR $1")
       if err=$(ch "GRANT CLUSTER ON *.* TO $1" 2>&1); then
         after=$(ch "SHOW GRANTS FOR $1")

@@ -51,10 +51,14 @@
     # c-<cluster>-server; the pod label says clickhouse-server, the container
     # does not.
     _vf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
-    # $0 = user, $1 = query; the password is the first line of stdin. The
-    # client then gets /dev/null as stdin: `kubectl exec -i` leaves the stream
-    # attached after the read, and clickhouse-client treats an open stdin on
-    # an INSERT as external data -- which async inserts refuse:
+    # $0 = user, $1 = query; the password is the first line of stdin, which
+    # the shell exports as CLICKHOUSE_PASSWORD for clickhouse-client to pick
+    # up. It never becomes a client argument, so it is not in the in-pod
+    # process list either (a process environment is readable only by the same
+    # user and root, unlike argv). The client then gets /dev/null as stdin:
+    # `kubectl exec -i` leaves the stream attached after the read, and
+    # clickhouse-client treats an open stdin on an INSERT as external data --
+    # which async inserts refuse:
     #   Code: 48. Processing async inserts with both inlined and external data
     #   (from stdin or infile) is not supported. (NOT_IMPLEMENTED)
     #
@@ -66,8 +70,8 @@
     # verification at all on the removed plaintext port either, so accepting
     # whatever cert the server presents is not a downgrade from before.
     _vf_sh: >-
-      IFS= read -r pw;
-      exec clickhouse-client --user "$0" --password "$pw"
+      IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+      exec clickhouse-client --user "$0"
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
 
