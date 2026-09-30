@@ -36,3 +36,25 @@ aws:
 dhi:
   username: ""   # your Docker Hub username
   token: ""      # your Docker Hub DHI access token
+
+# Optional switches. Uncomment only the ones you want; every other key keeps
+# its all.yml value. Defaults shown match ansible/group_vars/all.yml.
+#
+# FIPS build (x86_64, FIPS image tags and endpoints). See
+# docs/part-7-fips-hardening.md.
+# fips: false
+#
+# Langfuse (optional Steps 13-15). See docs/part-6-langfuse.md.
+# langfuse:
+#   enabled: false
+#   load_balancer:
+#     type: "internal"   # none | internal | public
+#     tls: false
+#
+# Grafana (optional Steps 16-18). Needs the dhi: credentials above. See
+# docs/part-8-grafana.md.
+# grafana:
+#   enabled: false
+#   load_balancer:
+#     type: "internal"   # none | internal | public
+#     tls: false

@@ -105,9 +105,9 @@
     that: clear_failed_stack | default(false) | bool
     fail_msg: >-
       Stack {{ infrastructure.environment_name }}-nodegroups is in
-      ROLLBACK_COMPLETE and cannot be updated. This is a SHARED account, so it
-      is not deleted automatically. Confirm it is yours, then re-run with
-      -e clear_failed_stack=true
+      ROLLBACK_COMPLETE and cannot be updated. The kit does not delete the
+      failed stack automatically. Confirm it is safe to delete, then re-run
+      with -e clear_failed_stack=true to delete it and create it again.
   when: _ng_stack_status.stdout | trim == 'ROLLBACK_COMPLETE'
 
 - name: Delete the rolled-back stack (explicitly requested)

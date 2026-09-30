@@ -466,11 +466,10 @@
             # WITH the -arm64 suffix on ARM builds, matching the node labels
             # from Step 5 exactly. The chart's comment says to leave the
             # suffix off because a mutating webhook appends it -- but Step 8
-            # disables webhooks (per the tutorial), and the first run proved
-            # the operator does not do it either: every Keeper pod sat Pending
-            # with "8 node(s) didn't match Pod's node affinity/selector" and a
-            # selector of plain `keeper`. The selector has to say what the
-            # nodes say.
+            # disables webhooks (per the tutorial), and the operator does not
+            # append it either: with a selector of plain `keeper`, every Keeper
+            # pod stays Pending with "8 node(s) didn't match Pod's node
+            # affinity/selector". The selector has to say what the nodes say.
             clickhouseGroup: "server{{ node_label_suffix }}"
           resources:
             limits:   {cpu: "{{ clickhouse.server.cpu }}", memory: "{{ clickhouse.server.memory }}"}

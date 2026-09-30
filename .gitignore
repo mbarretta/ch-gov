@@ -29,5 +29,5 @@ preflightbundle-*.tar.gz
 # local planning notes -- not part of the public tutorial
 .claude/plans/
 
-# engineering validation notes -- not part of the public evaluation kit
+# local-only notes -- not tracked
 internal/

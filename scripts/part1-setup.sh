@@ -5,7 +5,7 @@
 #
 # What this does, in order:
 #   1. Installs the seven required CLI tools (idempotent -- skips what's present)
-#   2. Reports the helm version (we run v4; guide was written for v3)
+#   2. Reports the helm version (v3 and v4 are both accepted)
 #   3. Installs the helm-diff plugin and the four Ansible collections
 #   4. Verifies every tool reports a usable version
 #   5. Verifies both AWS profiles authenticate
@@ -93,14 +93,14 @@ fi
 # ===========================================================================
 step "2/6  Helm version"
 # ===========================================================================
-# We run helm v4 by choice. Note the original guide specifies v3.x, and
-# Ansible's kubernetes.core helm modules were written against v3 -- so if a
-# helm task misbehaves later, version skew is the first thing to check.
+# Both helm v3 and v4 are accepted. Ansible's kubernetes.core helm modules
+# were written against v3, so if a helm task misbehaves, version skew is the
+# first thing to check.
 # helm@3 is kept installed (keg-only) so you can flip back:
 #   brew unlink helm && brew link --overwrite --force helm@3
 HELM_V="$(helm version --short 2>/dev/null || echo none)"
 case "$HELM_V" in
-  v4.*) ok "helm is $HELM_V (guide targets v3; v4 in use by choice)" ;;
+  v4.*) ok "helm is $HELM_V (v3 and v4 are both accepted)" ;;
   v3.*) ok "helm is $HELM_V" ;;
   none)
     if ((CHECK_ONLY)); then fail "helm not installed"; note_problem
@@ -175,14 +175,14 @@ fi
 # ===========================================================================
 step "4/6  Version report"
 # ===========================================================================
-# Minimum versions per the guide. We warn rather than hard-fail on drift,
+# Minimum supported versions. We warn rather than hard-fail on drift,
 # because "newer than required" is usually fine -- except for helm, handled above.
 printf '  %-10s %-28s %s\n' TOOL VERSION REQUIRED
 printf '  %-10s %-28s %s\n' ---- ------- --------
 vrow() { printf '  %-10s %-28s %s\n' "$1" "${2:-NOT FOUND}" "$3"; }
 vrow aws     "$(aws --version 2>&1 | awk '{print $1}')"                      "v2.x"
 vrow kubectl "$(kubectl version --client 2>/dev/null | awk '/Client/{print $3}')" "v1.28+"
-vrow helm    "$(helm version --short 2>/dev/null)"                           "v3+ (v4 in use)"
+vrow helm    "$(helm version --short 2>/dev/null)"                           "v3 or v4"
 vrow skopeo  "$(skopeo --version 2>/dev/null | awk '{print $3}')"            "v1.x"
 vrow jq      "$(jq --version 2>/dev/null)"                                   "any"
 vrow python3 "$(py_version)"                                                 "${PY_MIN}+"
@@ -242,9 +242,9 @@ fi
 # ===========================================================================
 step "6/6  Source ECR reachability and real image versions"
 # ===========================================================================
-# This is the check the original guide lacks, and the one most likely to bite:
-# deploy-config.yaml pins exact image tags, and old tags get purged from the
-# source registry over time. A pinned tag that no longer exists fails the
+# This is the check most likely to bite: the kit pins exact image tags (the
+# versions: block in ansible/group_vars/all.yml), and old tags get purged from
+# the source registry over time. A pinned tag that no longer exists fails the
 # deployment at the image-sync phase, ~30 minutes in.
 if ((CONFIG_OK)); then
   if aws ecr get-login-password --profile "$SOURCE_ECR_PROFILE" --region "$SOURCE_ECR_REGION" >/dev/null 2>&1; then
@@ -287,7 +287,7 @@ info "langfuse chart from langfuse.github.io and pushes it to ECR as oci://.../h
 if ((PROBLEMS == 0)); then
   step "Part 1 complete"
   ok "tools installed, both profiles authenticate, source ECR reachable"
-  info "next: obtain the deployment repo, then configure deploy-config.yaml"
+  info "next: source scripts/env.sh, then scripts/up.sh"
   exit 0
 else
   step "Part 1 finished with $PROBLEMS problem(s)"
