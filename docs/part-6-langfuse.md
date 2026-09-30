@@ -7,7 +7,7 @@
 > - How TLS at the load balancer works, what a self-signed certificate does and does not give you, and how to trust it from a client.
 > - How to operate and tear down Langfuse with the scripts the kit provides, and what to check when something goes wrong.
 >
-> **Run it:** set `langfuse.enabled: true` in `state/deploy-vars.yml`, run `scripts/up.sh`, then run `scripts/langfuse-smoke.sh` to post a trace and read it back from ClickHouse. Langfuse is optional and off by default. The kit is sized for learning and evaluation, not production.
+> **Run it:** set `langfuse.enabled: true` in `state/deploy-vars.yml`, run `scripts/up.sh`, then run `scripts/langfuse-smoke.sh` to post a trace and read it back from ClickHouse. Langfuse is optional and off by default. The kit is sized for learning and workshops, not production.
 
 Parts 1–5 end with a ClickHouse cluster behind a load balancer. Steps 13–15 put a Langfuse server next to it, on the same nodes, and point it at that cluster for its analytics tables. The result is one working example of the idea "ClickHouse Government holds Langfuse's traces." With the switch off, nothing else changes.
 
@@ -272,7 +272,7 @@ events_core                  SharedReplacingMergeTree   scores             Share
 
 Both subcharts assume the upstream Docker images. Chainguard's images differ in two places, and the role handles each.
 
-**PostgreSQL: the init script never runs.** The bundled subchart ships a first-boot script that creates the `langfuse` PostgreSQL role and hands it the database. The subchart mounts the script at `/docker-entrypoint-initdb.d`, where the Docker image's entrypoint looks. Chainguard's entrypoint reads `/var/lib/postgres/initdb/` instead, so the script is silently ignored and the role never exists. Without a fix, web and worker would crash-loop on `password authentication failed`. So once the PostgreSQL pod is Ready, the role does what the script would have done. It runs `kubectl exec -i` into the pod and pipes `psql -h localhost -U postgres` a heredoc that creates the role if missing, grants it the database and makes it the owner. Neither password touches a command line: the superuser's rides `PGPASSWORD` from the pod's `POSTGRES_PASSWORD`, and the role's is read by `\getenv` from `USERDB_PASSWORD`. The subchart wires both from `langfuse-postgresql-auth`. The step prints `role: created` the first time and `role: exists` after that.
+**PostgreSQL: the init script is ignored.** The bundled subchart ships a first-boot script that creates the `langfuse` PostgreSQL role and hands it the database. The subchart mounts the script at `/docker-entrypoint-initdb.d`, where the Docker image's entrypoint looks. Chainguard's entrypoint reads `/var/lib/postgres/initdb/` instead, so the script is silently ignored and the role never exists. Without a fix, web and worker would crash-loop on `password authentication failed`. So once the PostgreSQL pod is Ready, the role does what the script would have done. It runs `kubectl exec -i` into the pod and pipes `psql -h localhost -U postgres` a heredoc that creates the role if missing, grants it the database and makes it the owner. Neither password touches a command line: the superuser's rides `PGPASSWORD` from the pod's `POSTGRES_PASSWORD`, and the role's is read by `\getenv` from `USERDB_PASSWORD`. The subchart wires both from `langfuse-postgresql-auth`. The step prints `role: created` the first time and `role: exists` after that.
 
 ```
 TASK [langfuse : Create the langfuse PostgreSQL role (what the skipped init script would have done)] ***
@@ -327,7 +327,7 @@ The default exposure is an **internal** NLB, so the same three options as Part 5
 
 1. A VPN or peering into the VPC. The URL in the report works as printed.
 2. `type: none` in `langfuse.load_balancer`, then `kubectl port-forward -n langfuse svc/langfuse-web 3000:3000` and open `http://localhost:3000`. The port must be exactly 3000, because that is the `NEXTAUTH_URL` the role sets for this mode.
-3. `type: public` with `allowed_cidrs: ["<your egress IP>/32"]`. This uses plain HTTP by default, which is fine for a lab and for nothing else. Turn on `langfuse.load_balancer.tls` (section 9) before you expose it this way, and read there what a self-signed certificate does and does not give you. `0.0.0.0/0` is refused unless you also pass `-e allow_open_internet=true`, as in Step 12. The `public` type is not one of the paths the kit exercises; [Learning setup vs. production](limitations.md) lists what is and is not covered.
+3. `type: public` with `allowed_cidrs: ["<your egress IP>/32"]`. This uses plain HTTP by default, which is fine for a lab and for nothing else. Turn on `langfuse.load_balancer.tls` (section 9) before you expose it this way, and read there what a self-signed certificate does and does not give you. `0.0.0.0/0` is refused unless you also pass `-e allow_open_internet=true`, as in Step 12. The kit is built around the `internal` type; [Scope and boundaries](limitations.md) lists what the kit covers and what it leaves out.
 
 If people reach Langfuse by a name the role cannot discover (a VPN alias, or a DNS record you put in front of the NLB), set `langfuse.url` and re-run `scripts/up.sh`. Log in as `admin@example.com` with the password in `state/langfuse-admin-password`. Sign-up is disabled and telemetry is off.
 
@@ -450,7 +450,7 @@ The certificate is its own CA, and the CA file is the certificate: `state/langfu
 
 **The smoke test knows the rule too.** `scripts/langfuse-smoke.sh` passes `--cacert state/langfuse-tls-cert.pem` only when the address it is using came from the `langfuse-lb` hostname with TLS on (`lf_cacert()` in `scripts/lib/common.sh`), because that hostname is the only name the certificate carries. A `LANGFUSE_URL` or `langfuse.url` alias is verified against the system trust store instead, unless you supply `LANGFUSE_CACERT=<pem>`, which then wins everywhere. The port-forward fallback is plain `http://localhost:3000` and drops the CA. Nothing in the script passes `-k`.
 
-One consequence to know before you run it: an `internal` NLB does not answer a laptop outside the VPC. From there the script prints its `TLS: trusting the role's self-signed certificate` line, warns that the NLB does not answer, and falls back to the tunnel. Its https path is exercised only where the NLB answers, which means from inside the VPC or over a VPN with `LANGFUSE_URL` and `LANGFUSE_CACERT` set to whatever reaches it from where you are. [Learning setup vs. production](limitations.md) lists this among the paths that are not exercised.
+One consequence to know before you run it: an `internal` NLB does not answer a laptop outside the VPC. From there the script prints its `TLS: trusting the role's self-signed certificate` line, warns that the NLB does not answer, and falls back to the tunnel. Its https path runs only where the NLB answers, which means from inside the VPC or over a VPN with `LANGFUSE_URL` and `LANGFUSE_CACERT` set to whatever reaches it from where you are. [Scope and boundaries](limitations.md) lists this among the paths outside what the kit is built around.
 
 ### Teardown, with TLS
 
@@ -528,7 +528,7 @@ A passing run looks like this (the trace and span IDs differ every time):
   [ ok ] trace <trace-id> went in through the API and came back out of ClickHouse Private
 ```
 
-**What the smoke test covers.** It proves the write path (an OTLP request accepted by the API), the read path (the API lists both spans) and storage (the same trace is a pair of rows in `langfuse.events_core` in your ClickHouse cluster). It does not cover the Langfuse UI, SDK ingestion from your own application, prompts or evaluations, or load. [Learning setup vs. production](limitations.md) collects these boundaries in one place.
+**What the smoke test covers.** It proves the write path (an OTLP request accepted by the API), the read path (the API lists both spans) and storage (the same trace is a pair of rows in `langfuse.events_core` in your ClickHouse cluster). It does not cover the Langfuse UI, SDK ingestion from your own application, prompts or evaluations, or load. [Scope and boundaries](limitations.md) collects these boundaries in one place.
 
 ### Why `events_core`, and not `traces`
 
@@ -632,7 +632,7 @@ Each entry gives a symptom, its cause and the fix.
 
 **Web and worker pods crash-loop with `password authentication failed`**
 
-- *Cause:* the `langfuse` PostgreSQL role does not exist. Chainguard's PostgreSQL image ignores the subchart's first-boot script (section 7), and the role step did not run, usually because the install stopped before it.
+- *Cause:* the `langfuse` PostgreSQL role does not exist. Chainguard's PostgreSQL image ignores the subchart's first-boot script (section 7), and the role step was skipped, usually because the install stopped before it.
 - *Fix:* run `scripts/up.sh` again. The role step creates the role (`role: created`) and the pods recover on the kubelet's next restart.
 
 **The web pod restarts with `Dirty database version N. Fix and force version.`**
@@ -657,7 +657,7 @@ Each entry gives a symptom, its cause and the fix.
 
 **With TLS on, the Service events show `SyncLoadBalancerFailed ... DuplicateListener`, or `Wait for the listener to terminate TLS` times out with `TCP`**
 
-- *Cause:* the cloud controller cannot change a listener's protocol (section 9). The role does that itself with `aws elbv2 modify-listener`, right after it patches the Service. If the switch has not run yet, or its task failed, the listener stays `TCP` and the controller keeps retrying the impossible `CreateListener`.
+- *Cause:* the cloud controller cannot change a listener's protocol (section 9). The role does that itself with `aws elbv2 modify-listener`, right after it patches the Service. If the switch is still pending, or its task failed, the listener stays `TCP` and the controller keeps retrying the impossible `CreateListener`.
 - *Fix:* re-run `scripts/up.sh`. The listener switch task runs when the listener is not yet TLS with the current certificate. If the task fails again, its error message (usually a missing AWS permission for `elasticloadbalancing:ModifyListener`) is the next thing to read. The `SyncLoadBalancerFailed` events from before the switch stay in the namespace for about an hour. They are history, not a current problem.
 
 **`curl` exits 60 with `SSL certificate problem: self-signed certificate`**
@@ -730,11 +730,3 @@ Run these in order after Langfuse is up, from a shell where you ran `source scri
 11. **You can explain the teardown order.** Say why `down.sh` removes Langfuse before the load balancer, the cluster and the nodes (section 13), and which command removes only Langfuse's data.
 
 12. **If TLS is on:** run the checks in "Check TLS yourself" (section 9). The `curl --cacert` request should return `HTTP 200`, and the same request without `--cacert` should exit 60.
-
-## What this Part does not exercise
-
-Everything above describes the path the kit exercises: Langfuse on an `internal` NLB, with or without TLS. Some paths are not exercised, and [Learning setup vs. production](limitations.md) lists them with the reasons:
-
-- The `public` load balancer type. It differs from `internal` by an annotation, the subnets the NLB uses, and the required `allowed_cidrs`.
-- The smoke test over https from outside the VPC, which an `internal` NLB rules out. The script falls back to the tunnel.
-- A full `fips: true` deployment run start to finish against a real cluster.
