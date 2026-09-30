@@ -6,7 +6,7 @@
 > - What the kit installs so the cluster can store data: an S3 bucket, an EBS CSI driver, a `gp3-encrypted` StorageClass, and the ClickHouse operator.
 > - Why an airgapped install has to account for every image a Helm chart references, and how the kit checks that for you.
 >
-> **Run it:** `scripts/up.sh` runs every step in order and asks before it starts. This Part covers the storage, prerequisites and operator steps, which use the tags `storage`, `prereqs` and `operator`. These steps are cheap: an empty bucket, two IAM roles, a CSI driver and two small operator pods. The nodes from Step 5 are already running, so your hourly rate does not change.
+> **Run it:** `scripts/up.sh` runs every step in order and asks before it starts. This Part covers the storage, prerequisites and operator steps, which use the tags `storage`, `prereqs` and `operator`. These steps are cheap: an empty bucket, two IAM roles, a CSI driver and one small operator Deployment (one pod with two containers). The nodes from Step 5 are already running, so your hourly rate does not change.
 
 By the end of Part 2 you have a Kubernetes cluster with eight nodes and nothing running on it. These three steps give it somewhere to put data and something to manage ClickHouse for it.
 
@@ -329,7 +329,7 @@ If any container in the operator namespace pulls from anywhere but your registry
 
 ## Cost check
 
-Steps 6–8 add essentially nothing. An empty S3 bucket, two IAM roles, a CSI driver DaemonSet and one operator pod all fit inside the compute that is already running. With the default sizing, the rate stays at about **$2.32/hr** while the nodes are up, unchanged from the end of Step 5. The kit sizes the nodes for learning and workshops, not production. To stop the meter when you finish, run `scripts/down.sh`.
+Steps 6–8 add essentially nothing. An empty S3 bucket, two IAM roles, a CSI driver DaemonSet and one operator Deployment (one pod with two containers) all fit inside the compute that is already running. With the default sizing, the rate stays at about **$2.32/hr** while the nodes are up, unchanged from the end of Step 5. The kit sizes the nodes for learning and workshops, not production. To stop the meter when you finish, run `scripts/down.sh`.
 
 ## Self-checks
 
