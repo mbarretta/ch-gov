@@ -11,7 +11,7 @@ This is the page to read first if you have never touched ClickHouse and someone 
 Two words come up constantly, so here is what they mean in this repository:
 
 - **Deploy** means building everything the software needs and then installing it. You create a private network, a Kubernetes cluster, storage and permissions in AWS, then install ClickHouse (and, if you choose, Langfuse and Grafana) on top and check that it works. `scripts/up.sh` does all of it.
-- **Operate** means what you do after that to keep the system healthy and affordable. You connect to it, look at its state, run its health checks, stop the machines when you are not using them, start them again, and tear everything down when you are finished. Section 8 lists exactly what the kit gives you for that. The kit is sized for learning and evaluation, not production, so it is a place to learn these tasks, not a production runbook.
+- **Operate** means what you do after that to keep the system healthy and affordable. You connect to it, look at its state, run its health checks, stop the machines when you are not using them, start them again, and tear everything down when you are finished. Section 8 lists exactly what the kit gives you for that. The kit is sized for learning and workshops, not production, so it is a place to learn these tasks, not a production runbook.
 
 ---
 
@@ -39,7 +39,7 @@ ClickHouse Inc. offers the same engine in several ways:
 - **ClickHouse Private.** ClickHouse Inc. gives you the core Cloud software, and **you run it in your own cloud account**, on your own Kubernetes cluster, with no connection back to ClickHouse Inc. once it is installed.
 - **ClickHouse Government.** The Private product, built for US government workloads. It uses FIPS 140 validated cryptographic libraries (a claim ClickHouse makes about the product, not one this kit certifies), which changes the CPU architecture (x86_64 instead of ARM64) and the image tags, and nothing else you would notice. In this kit, `fips: true` selects it, and `fips: false` selects the standard Private build.
 
-The word that matters is **airgapped**. The product is designed so the cluster that holds your data never needs a route to the internet. In practice, every container image is copied once from ClickHouse's registry into yours, and the cluster only ever pulls from yours:
+The word that matters is **airgapped**. ClickHouse Government is built for airgapped networks: the cluster that holds your data is designed to never need the internet. In practice, every container image is copied once from ClickHouse's registry into yours, and the cluster only ever pulls from yours:
 
 ```
   ClickHouse's AWS account                 YOUR AWS account
@@ -56,7 +56,9 @@ The word that matters is **airgapped**. The product is designed so the cluster t
                                            └──────────────────────────────┘
 ```
 
-This is why the setup needs a way to read ClickHouse's registry (a role in your account that can pull from theirs) as well as credentials for your own account, and why the first deployment step is copying images rather than creating servers.
+This is why the setup needs a way to read ClickHouse's registry as well as credentials for your own account. The way in is a role, `ClickHouseAirgapECRPullRole`, that ClickHouse sets up in your account and that can pull from theirs. The first deployment step is copying images rather than creating servers.
+
+The learning environment this kit builds adds one thing the production design does not have: a NAT gateway. It exists only so you can reach and test the cluster from your own machine, and it is not part of the production deployment.
 
 ### Langfuse
 
@@ -120,7 +122,7 @@ Before any ClickHouse software runs, this has to exist:
 | Storage | An S3 bucket | Where the data is |
 | Storage | An encrypted EBS StorageClass | Keeper's small persistent disks |
 | Identity | An IAM role the server pods can assume (IRSA) | So pods reach the bucket with no static keys anywhere |
-| Registry | Your own ECR with the images copied in | The airgap: the cluster pulls only from your account |
+| Registry | Your own ECR with the images copied in | The airgapped design: the cluster pulls only from your account |
 | Laptop | aws, kubectl, helm, skopeo, jq, python, ansible, plus the `kubectl preflight` plugin | The tools the automation drives. Part 1 installs them on macOS and Linux |
 
 Nothing here is exotic. It is a normal EKS build with two deliberate oddities: the server nodes carry a local SSD that is mounted and formatted at boot, and the node groups are **tainted** (marked so that only pods that ask for them can land there) so that only ClickHouse pods use the expensive machines.
@@ -133,7 +135,7 @@ ClickHouse publishes a tutorial for this deployment, and this project follows it
 |---|---|---|
 | 1 | Check the IAM role for reading ClickHouse's registry | Confirms you can copy ClickHouse's images |
 | 2 | Copy images into your ECR | The one hop across the airgap |
-| 3 | VPC, subnets, NAT, S3 endpoint | The private network everything runs in |
+| 3 | VPC, subnets, NAT, S3 endpoint | The private network everything runs in. The NAT gateway belongs to the learning environment |
 | 4 | EKS control plane | Kubernetes itself |
 | 5 | Node groups | The machines, in three groups by job |
 | 6 | S3 bucket and IAM role | Storage for the data, and permission for server pods to reach it |
@@ -146,7 +148,7 @@ ClickHouse publishes a tutorial for this deployment, and this project follows it
 | 13 (optional) | S3 bucket and IAM role for Langfuse | Storage for Langfuse's raw events, with its own permission |
 | 14 (optional) | A database and user for Langfuse inside ClickHouse | Access to one database, not the whole cluster |
 | 15 (optional) | Install Langfuse | Langfuse running next to ClickHouse and storing its traces there |
-| 16 (optional) | S3 bucket and IAM role for Grafana's plugin mirror | A bucket holding one plugin file, since the cluster cannot fetch it from the internet |
+| 16 (optional) | S3 bucket and IAM role for Grafana's plugin mirror | A bucket holding one plugin file, since the airgapped design does not let the cluster fetch it from the internet |
 | 17 (optional) | A read-only user for Grafana inside ClickHouse | Read access to your data, and no ability to change it |
 | 18 (optional) | Install Grafana, pointed at that user | A dashboard UI over your ClickHouse data |
 
@@ -158,7 +160,7 @@ Steps 13–15 are off by default and change nothing when they are off. Switched 
 
 ### Optional: Grafana on top
 
-Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the cluster has no route out to fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1 §3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
+Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1 §3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
 
 ## 6. How to deploy it with this project
 
@@ -174,10 +176,12 @@ This installs and version-checks the tools, creates a project-local Python virtu
 
 ### 6.2 Give the kit AWS access
 
-The kit needs two AWS profiles: `target_profile` (your account, default name `ch-gov-target`) and `source_ecr_profile` (a role that can read ClickHouse's registry, default name `ch-gov-ecr-pull`). The setting `aws.auth_mode` decides who creates them:
+The kit needs two AWS profiles: `target_profile` (your account, default name `ch-gov-target`) and `source_ecr_profile` (the role chain that reads ClickHouse's registry, default name `ch-gov-ecr-pull`). The setting `aws.auth_mode` decides who creates those two profiles:
 
 - `sso` (the default): the kit renders a project-local `.aws/config` from your IAM Identity Center details, and you log in once.
 - `profile`: you already have a working AWS profile, and the kit uses it.
+
+The role behind `ch-gov-ecr-pull` is `ClickHouseAirgapECRPullRole`. ClickHouse sets it up in your account. You share your AWS account ID with your ClickHouse contact, and you do not create the role.
 
 For SSO, fill in your account IDs and portal URL in `state/deploy-vars.yml`, then log in:
 
@@ -198,7 +202,7 @@ Tokens last hours, not days. Every script checks your credentials first and prin
 | `fips` | `false` | Standard ARM64 build, or the Government (FIPS) x86_64 build. Changes images, instance types, registry |
 | `infrastructure.eks_version` | `"1.36"` | Kubernetes version |
 | `infrastructure.nat_mode` | `single` | One NAT gateway (cheap) or one per zone (resilient) |
-| `infrastructure.*.instance_type` | learning sizes | Machine shapes per node group. Sized for learning and evaluation, not production, and smaller than the tutorial's |
+| `infrastructure.*.instance_type` | learning sizes | Machine shapes per node group. Sized for learning and workshops, not production, and smaller than the tutorial's |
 | `clickhouse.cluster_name` | `default-us-01` | Names everything else. Must match `^[a-z]+-[a-z]{2}-[0-9]{2}$` |
 | `clickhouse.server` / `.keeper` | 3 × 4cpu/16Gi, 3 × 2cpu/4Gi | Pod sizes. Must fit the instance types |
 | `clickhouse.load_balancer.type` | `internal` | `none`, `internal` (private address) or `public` |
@@ -470,7 +474,7 @@ anyone noticing.
 
 | Term | Meaning here |
 |---|---|
-| **Airgapped** | The cluster has no need to reach the internet. Images come from your own registry |
+| **Airgapped** | ClickHouse Government is built for airgapped networks: the cluster has no need to reach the internet, and images come from your own registry. The NAT gateway in this kit's learning environment is there only so you can reach and test it |
 | **Operator** | A Kubernetes controller that turns a one-page spec into running pods and keeps them that way |
 | **CR / ClickHouseCluster** | The spec. A Kubernetes custom resource the operator watches |
 | **Keeper** | ClickHouse's coordination service. Three pods, small disks, holds metadata |
