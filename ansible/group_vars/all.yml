@@ -3,8 +3,8 @@
 #
 # Versions here track the official tutorial:
 #   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
-# scripts/part1-setup.sh lists the tags that exist in the source ECR. The
-# optional Langfuse versions (see the langfuse: block at the end) come from
+# scripts/part1-setup.sh prints the three most recently pushed tags for each
+# source ECR repository. The optional Langfuse versions (see the langfuse: block at the end) come from
 # their own public sources.
 # ===========================================================================
 

@@ -453,6 +453,7 @@ Each entry gives the symptom, the cause and the fix.
 - *Cause (SSO mode):* the AWS CLI is not reading the repo's `.aws/config`, because your shell never sourced `scripts/env.sh`.
 - *Cause (profile mode):* the profile is missing from the config file the CLI reads.
 - *Fix:* in SSO mode, run `source scripts/env.sh` or go through the scripts. In profile mode, add the profile to your AWS config, and check that the names match `target_profile` and `source_ecr_profile`.
+- *On a first run:* if you have not yet edited `state/deploy-vars.yml` or logged in, see the entry "The first `scripts/part1-setup.sh` run reports ..." below.
 
 **`These settings still hold a <...> placeholder`**
 
