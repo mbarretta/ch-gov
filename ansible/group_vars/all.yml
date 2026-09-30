@@ -702,9 +702,19 @@ sso:
     # langfuse.signup_disabled says (Langfuse creates a first-time Cognito user
     # through the sign-up path). So with this at false, anyone who can reach
     # Langfuse can also register with an email and password and receives the
-    # default org and project role below. To limit that: set this to true,
-    # set enforce_domains, and set langfuse.load_balancer.allowed_cidrs.
+    # default org and project role below. Because that overrides
+    # langfuse.signup_disabled, the langfuse role refuses to run with
+    # sso.langfuse.enabled until you choose: set this to true (Cognito is the
+    # only way in), or set allow_password_signup to true. To limit the open
+    # case, also set enforce_domains and langfuse.load_balancer.allowed_cidrs.
     disable_password_login: false
+    # The explicit opt-in to open password self-registration while
+    # disable_password_login is false: true accepts that anyone who can reach
+    # Langfuse can register with an email and password and join the seeded org
+    # and project at the default roles below. Ignored when disable_password_login
+    # is true. With both false and sso.langfuse.enabled true, the langfuse role
+    # stops with a message instead of opening sign-up silently.
+    allow_password_signup: false
     # Restrict Langfuse sign-in to these email domains. [] = no restriction.
     enforce_domains: []
     # Roles Langfuse gives a user the first time they sign in.
