@@ -68,6 +68,18 @@
       webhooks:
         enabled: false
 
+      # Resources for the operator manager container, requests equal to limits.
+      # This top-level key is the only resources value the chart exposes: the
+      # Deployment template applies it to the manager alone. The replica count
+      # is hardcoded to 1 in the template, so there is nothing to set for it.
+      # The kube-rbac-proxy sidecar has no resources key at all, so it is left
+      # alone: the chart gives it no requests and no limits, so it runs
+      # unbounded and is not counted in the pod's requested memory. Sizes
+      # come from the active profile.
+      resources:
+        requests: {cpu: "{{ clickhouse.operator.cpu }}", memory: "{{ clickhouse.operator.memory }}"}
+        limits:   {cpu: "{{ clickhouse.operator.cpu }}", memory: "{{ clickhouse.operator.memory }}"}
+
       operator:
         # The operator pins replicas and spreads them across zones, so it has
         # to be told which zones exist. Without this it cannot place anything.
