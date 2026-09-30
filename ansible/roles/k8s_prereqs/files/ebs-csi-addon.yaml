@@ -19,9 +19,11 @@ Resources:
   #
   #  * The Helm route needs a public Helm repository at deploy time. An
   #    airgapped cluster has no route to it, which defeats the purpose.
-  #  * The add-on's images come from an AWS-owned ECR registry, reachable over
-  #    PrivateLink with no internet route at all. That is *more* airgap-
-  #    friendly, not less.
+  #  * The add-on's images come from an AWS-owned ECR registry, so no public
+  #    Helm repository or third-party registry is involved. In an airgapped
+  #    network that registry is reachable through ECR VPC endpoints; this
+  #    learning environment creates none and pulls through its NAT gateway.
+  #    That is *more* airgap-friendly, not less.
   #  * EKS picks the driver version that matches the cluster's Kubernetes
   #    version and keeps it patched.
   #
