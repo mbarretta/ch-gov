@@ -225,7 +225,7 @@
     _sso_outputs: >-
       {{ {
         'region': aws.target_region,
-        'user_pool_id': _sso_out.UserPoolId,
+        'pool_id': _sso_out.UserPoolId,
         'issuer': _sso_disc.json.issuer,
         'jwks_uri': _sso_disc.json.jwks_uri,
         'hosted_ui_domain': _sso_ui_domain | trim,
