@@ -8,6 +8,7 @@
 #   scripts/sso-smoke.sh --sso             # also sign in through the browser and test ClickHouse
 #   CH_JWT=<id token> scripts/sso-smoke.sh # also test ClickHouse with a token you already have
 #   scripts/sso-smoke.sh --sso --lb        # ClickHouse queries via the Step 12 NLB
+#   scripts/sso-smoke.sh --negative        # also run the opt-in forged-token check (read the warning below)
 #
 # What it does, in order:
 #   1. Needs sso.enabled (lib/common.sh's sso_enabled, which reads the merged
@@ -29,6 +30,22 @@
 #      always empty for it. An empty SHOW GRANTS means no role was granted
 #      anything for this user's groups (sso.clickhouse_jwt.role_grants) or the
 #      user is in no group.
+#   4. Only with --negative, and only when ClickHouse token login is enabled:
+#      sends one locally built token to the server and expects a clean
+#      authentication failure. The token has a key ID (kid) in its header,
+#      the ClickHouse app client's ID as aud, and a random signature; it is
+#      built with python3's standard library and is not signed by anything.
+#      It passes when the client reports AUTHENTICATION_FAILED and the server
+#      pods' restart counts are the same before and after.
+#
+# WARNING about --negative: this check is opt-in and is never part of a
+# default run, because a token that carries a kid, sent to a server whose JWKS
+# has never loaded, crashes that server process before authentication. The
+# check is therefore itself the crash trigger on a server that is in that
+# state. The JWKS gate in Step 9 is point-in-time (see docs/part-9-sso.md,
+# section 6). Run --negative only when you accept a possible server restart,
+# for example right after a rollout you have watched load the JWKS. It sends
+# nothing else, and the token is discarded with the process.
 #
 # Secrets: the token stays in this process's memory and environment; nothing
 # is written to disk. It reaches clickhouse-client on its command line, as
@@ -39,8 +56,8 @@
 # langfuse.url alias uses the system trust store, or set LANGFUSE_CACERT=<pem>.
 # Verification is never switched off (no -k / --insecure).
 #
-# Needs curl and jq; kubectl for the port-forward fallback; python3 for --sso;
-# and whatever scripts/ch-client.sh needs.
+# Needs curl and jq; kubectl for the port-forward fallback and for --negative;
+# python3 for --sso and --negative; and whatever scripts/ch-client.sh needs.
 #
 set -euo pipefail
 
@@ -48,11 +65,12 @@ CH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$CH_ROOT/scripts/lib/common.sh"
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0; }
 
-SSO_LOGIN=0; CH_CLIENT_ARGS=()
+SSO_LOGIN=0; NEGATIVE=0; CH_CLIENT_ARGS=()
 while (($#)); do
   case "$1" in
     --sso) SSO_LOGIN=1 ;;
     --lb)  CH_CLIENT_ARGS=(--lb) ;;
+    --negative) NEGATIVE=1 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac; shift
 done
@@ -183,6 +201,55 @@ else
       fi
     else
       fail "ClickHouse refused the token or the session failed: $(tail -n 5 "$TMP/ch.err")"; note_problem
+    fi
+  fi
+fi
+
+# ---- 4. a forged token gets a clean refusal (opt-in) ---------------------------
+step "Checking that a forged token is refused cleanly"
+if ((NEGATIVE == 0)); then
+  info "skipped: opt-in only -- pass --negative to run it. A token with a kid sent to a server whose JWKS is not loaded crashes that server, so this check is never part of a default run (see --help)"
+elif ! sso_jwt_enabled; then
+  info "skipped: ClickHouse token login is off (needs sso.clickhouse_jwt.enabled)"
+else
+  have python3 || die "python3 not installed (--negative builds its token with the standard library)"
+  have kubectl || die "kubectl not installed (--negative compares the server pods' restart counts)"
+  CH_NS="$(ch_var clickhouse.namespace)"
+  CH_AUD="$(sso_out clickhouse_client_id)"
+  [[ -n "$CH_AUD" ]] || die "$SSO_OUTPUTS lacks clickhouse_client_id -- re-run: scripts/play.sh --tags sso-idp"
+  warn "sending a forged token that carries a kid; if this server's JWKS is not loaded, the server process crashes"
+  server_restarts() {
+    kubectl get pods -n "$CH_NS" -l app.kubernetes.io/name=clickhouse-server \
+      -o jsonpath='{range .items[*]}{.metadata.name}={.status.containerStatuses[*].restartCount} {end}' 2>/dev/null
+  }
+  FORGED="$(python3 - "$ISSUER" "$CH_AUD" <<'PY'
+import base64, json, os, sys, time
+def seg(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+iss, aud = sys.argv[1:3]
+header = {"alg": "RS256", "typ": "JWT", "kid": "sso-smoke-negative-check"}
+payload = {"iss": iss, "aud": aud, "sub": "sso-smoke-negative-check",
+           "token_use": "id", "iat": int(time.time()), "exp": int(time.time()) + 300}
+print(seg(json.dumps(header).encode()) + "." + seg(json.dumps(payload).encode()) + "." + seg(os.urandom(256)))
+PY
+)"
+  BEFORE="$(server_restarts || true)"
+  if [[ -z "$BEFORE" ]]; then
+    fail "cannot read the server pods in $CH_NS, so the restart counts cannot be compared -- is the cluster reachable (state/kubeconfig)?"; note_problem
+  else
+    if CH_JWT="$FORGED" "$CH_ROOT/scripts/ch-client.sh" --sso ${CH_CLIENT_ARGS[@]+"${CH_CLIENT_ARGS[@]}"} \
+         -q 'SELECT 1' >/dev/null 2>"$TMP/forged.err"; then
+      fail "ClickHouse accepted a token with a random signature -- that must never happen"; note_problem
+    elif grep -Eq 'AUTHENTICATION_FAILED|Code: 516' "$TMP/forged.err"; then
+      ok "the forged token was refused with AUTHENTICATION_FAILED"
+    else
+      fail "the forged token was not refused cleanly (a dropped connection here points at the crash): $(tail -n 3 "$TMP/forged.err" | head -c 400)"; note_problem
+    fi
+    sleep 3
+    AFTER="$(server_restarts || true)"
+    if [[ "$AFTER" == "$BEFORE" ]]; then
+      ok "server pod restart counts unchanged ($BEFORE)"
+    else
+      fail "server pod restart counts changed: before '$BEFORE', after '$AFTER' -- see docs/part-9-sso.md, section 6"; note_problem
     fi
   fi
 fi

@@ -86,9 +86,11 @@ dhi:
 #     # While this is on, Langfuse sign-up is open whatever langfuse.signup_disabled says
 #     # (Langfuse creates a first-time Cognito user through the sign-up path), so with
 #     # disable_password_login false anyone who can reach Langfuse can also register with
-#     # an email and password. To limit that: true here, enforce_domains, and
-#     # langfuse.load_balancer.allowed_cidrs.
+#     # an email and password. The langfuse role stops until you choose: true here (Cognito
+#     # is the only way in), or allow_password_signup true below. To limit the open case,
+#     # also set enforce_domains and langfuse.load_balancer.allowed_cidrs.
 #     disable_password_login: false
+#     allow_password_signup: false   # true = accept open password sign-up; ignored when disable_password_login is true
 #     enforce_domains: []   # for example ["<YOUR_EMAIL_DOMAIN>"]
 #     default_org_role: "VIEWER"
 #     default_project_role: "VIEWER"

@@ -155,6 +155,36 @@
       ansible.builtin.set_fact:
         _lf_sso: "{{ (sso.enabled | bool) and (sso.langfuse.enabled | bool) }}"
 
+    - name: Require an explicit choice about password sign-up
+      # Cognito sign-in opens Langfuse sign-up (see signUpDisabled in the
+      # release below), so while the email and password form is shown anyone
+      # who can reach Langfuse can register an account that joins the seeded
+      # org and project. Stop until the operator has chosen: hide the form
+      # (disable_password_login) or accept the open sign-up
+      # (allow_password_signup).
+      ansible.builtin.assert:
+        that: (sso.langfuse.disable_password_login | bool) or (sso.langfuse.allow_password_signup | bool)
+        fail_msg: >-
+          sso.langfuse.enabled opens Langfuse sign-up (Cognito users are created through the sign-up path),
+          so with the email and password form shown anyone who can reach Langfuse can register an account
+          that joins org {{ langfuse.init.org_id }} as {{ sso.langfuse.default_org_role }}.
+          Choose one in state/deploy-vars.yml: sso.langfuse.disable_password_login: true (Cognito is the
+          only way in), or sso.langfuse.allow_password_signup: true (accept open password sign-up, limited
+          by sso.langfuse.enforce_domains and langfuse.load_balancer.allowed_cidrs). Then run:
+          ansible-playbook deploy.yml --tags lf-app
+      when: _lf_sso
+
+    - name: Say that Cognito sign-in overrides langfuse.signup_disabled
+      ansible.builtin.debug:
+        msg: >-
+          Cognito sign-in is on, so Langfuse sign-up is rendered open (AUTH_DISABLE_SIGNUP false)
+          {{ 'overriding langfuse.signup_disabled: true' if (langfuse.signup_disabled | bool) else '(langfuse.signup_disabled is already false)' }}.
+          Password sign-up is {{ 'closed: the email and password form is hidden (sso.langfuse.disable_password_login)'
+          if (sso.langfuse.disable_password_login | bool)
+          else 'open by choice (sso.langfuse.allow_password_signup): anyone who can reach Langfuse can register and join org '
+          ~ langfuse.init.org_id ~ ' as ' ~ sso.langfuse.default_org_role }}.
+      when: _lf_sso
+
     - name: Validate the Langfuse roles given to new SSO users
       ansible.builtin.assert:
         that:
@@ -1006,11 +1036,14 @@
           # OAuthCreateAccount. The consequence is that, while password login is
           # enabled, anyone who can reach Langfuse can also register with an email
           # and password and receives the default org and project role
-          # (sso.langfuse.default_*_role). The levers are
+          # (sso.langfuse.default_*_role). The role therefore refuses to render
+          # this until the operator has chosen between
           # sso.langfuse.disable_password_login (true leaves Cognito as the only
-          # way in), sso.langfuse.enforce_domains (limits the email domains that may
-          # sign in) and langfuse.load_balancer.allowed_cidrs (limits who can reach
-          # the page). With SSO off this renders exactly langfuse.signup_disabled.
+          # way in) and sso.langfuse.allow_password_signup (accepts the open
+          # sign-up); sso.langfuse.enforce_domains (limits the email domains that
+          # may sign in) and langfuse.load_balancer.allowed_cidrs (limits who can
+          # reach the page) narrow it. With SSO off this renders exactly
+          # langfuse.signup_disabled.
           signUpDisabled: "{{ (langfuse.signup_disabled | bool) and not (_lf_sso | bool) }}"
         serviceAccount:
           create: true
@@ -1666,6 +1699,6 @@
       - "login:      {{ langfuse.init.user_email }} -- password in {{ langfuse_state_files.init_user_password_file | realpath }}"
       - "api keys:   {{ langfuse_state_files.public_key_file | realpath }} (public), {{ langfuse_state_files.secret_key_file | realpath }} (secret) -- project {{ langfuse.init.project_id }}"
       - "clickhouse: database {{ langfuse.clickhouse_database }} at c-{{ clickhouse.cluster_name }}-server-any.{{ clickhouse.namespace }}.svc.cluster.local:{{ 8443 if fips else 8123 }} ({{ 'TLS, CA-verified' if fips else 'plaintext' }}) as {{ langfuse.clickhouse_user }}, {{ _lf_ch_tables.stdout_lines | length }} tables, cluster mode {{ 'on' if _lf_cluster_enabled | bool else 'off' }}"
-      - "sign-in:    {{ ('Cognito (issuer ' ~ _lf_sso_out.issuer ~ '); new users join org ' ~ langfuse.init.org_id ~ ' as ' ~ sso.langfuse.default_org_role ~ ', project ' ~ langfuse.init.project_id ~ ' as ' ~ sso.langfuse.default_project_role ~ '; password login ' ~ ('disabled' if sso.langfuse.disable_password_login | bool else 'still on')) if _lf_sso else 'email and password only (sso.langfuse.enabled is false)' }}"
+      - "sign-in:    {{ ('Cognito (issuer ' ~ _lf_sso_out.issuer ~ '); new users join org ' ~ langfuse.init.org_id ~ ' as ' ~ sso.langfuse.default_org_role ~ ', project ' ~ langfuse.init.project_id ~ ' as ' ~ sso.langfuse.default_project_role ~ '; password login ' ~ ('disabled' if sso.langfuse.disable_password_login | bool else 'still on, with sign-up open (sso.langfuse.allow_password_signup)')) if _lf_sso else 'email and password only (sso.langfuse.enabled is false)' }}"
       - "smoke test: scripts/langfuse-smoke.sh  (posts a trace and reads it back from ClickHouse)"
       - "teardown:   ansible-playbook deploy.yml --tags lf-app -e langfuse_state=absent   (keeps the ClickHouse data; --tags lf-db -e langfuse_db_state=absent purges it)"

@@ -76,7 +76,8 @@ Put overrides in `state/deploy-vars.yml`. `ansible/group_vars/all.yml` holds the
 | `sso.cognito.saml_metadata_url` | `""` | A SAML metadata URL from your identity provider. Empty means users are held in the Cognito pool itself |
 | `sso.cognito.groups` | `clickhouse-readonly`, `clickhouse-admin` | Cognito groups created in the pool. Names must be distinct and contain no spaces |
 | `sso.langfuse.enabled` | `false` | Creates the Langfuse app client and wires Langfuse's Cognito sign-in. Needs `langfuse.enabled: true` |
-| `sso.langfuse.disable_password_login` | `false` | `true` hides the email and password form so Cognito is the only way in. While it is `false`, password self-registration is open too (see section 5) |
+| `sso.langfuse.disable_password_login` | `false` | `true` hides the email and password form so Cognito is the only way in. One of the two explicit choices described in section 5 |
+| `sso.langfuse.allow_password_signup` | `false` | `true` accepts that, with the email and password form still shown, anyone who can reach Langfuse can register and join the seeded organization and project. The other explicit choice in section 5. Ignored when `disable_password_login` is `true` |
 | `sso.langfuse.enforce_domains` | `[]` | Email domains Langfuse limits sign-in to. Empty means no restriction |
 | `sso.langfuse.default_org_role` | `"VIEWER"` | Organization role a user gets at first sign-in. One of `OWNER`, `ADMIN`, `MEMBER`, `VIEWER`, `NONE` |
 | `sso.langfuse.default_project_role` | `"VIEWER"` | Project role at first sign-in, same choices |
@@ -101,6 +102,7 @@ sso:
   langfuse:
     enabled: true
     disable_password_login: false
+    allow_password_signup: true   # Step 15 stops unless one of these two is true
     enforce_domains: []
     default_org_role: "VIEWER"
     default_project_role: "VIEWER"
@@ -139,11 +141,18 @@ Cognito creates no users for you. Add them in the console or with `aws cognito-i
 
 Step 15 assembles the `langfuse-sso` Secret from the outputs file and the client secret: `AUTH_COGNITO_CLIENT_ID`, `AUTH_COGNITO_CLIENT_SECRET`, `AUTH_COGNITO_ISSUER` and `AUTH_COGNITO_ALLOW_ACCOUNT_LINKING`, plus the `LANGFUSE_DEFAULT_ORG_ID`, `LANGFUSE_DEFAULT_ORG_ROLE`, `LANGFUSE_DEFAULT_PROJECT_ID` and `LANGFUSE_DEFAULT_PROJECT_ROLE` values that place a new user in the seeded organization and project. Langfuse documents the [`AUTH_*` variables](https://langfuse.com/self-hosting/security/authentication-and-sso) and the [`LANGFUSE_DEFAULT_*` variables](https://langfuse.com/self-hosting/configuration) on its own pages. Two more are added only when you set them: `AUTH_DISABLE_USERNAME_PASSWORD` (from `disable_password_login`) and `AUTH_DOMAINS_WITH_SSO_ENFORCEMENT` (from `enforce_domains`).
 
-- **Sign-up is open while Cognito sign-in is on.** Langfuse creates a first-time Cognito user through its sign-up path, and with `AUTH_DISABLE_SIGNUP=true` that user fails with `OAuthCreateAccount`. So when `sso.enabled` and `sso.langfuse.enabled` are both `true`, Step 15 renders sign-up open whatever `langfuse.signup_disabled` says; with SSO off it still renders that value. The consequence is that, while password login is enabled, anyone who can reach Langfuse can also register with an email and password, and the new account receives the default organization and project role. Three settings limit it: `sso.langfuse.disable_password_login: true` makes Cognito the only way in, `sso.langfuse.enforce_domains` limits sign-in to your email domains, and `langfuse.load_balancer.allowed_cidrs` limits who can reach the page at all.
+- **Sign-up is open while Cognito sign-in is on, so you choose how to handle password sign-up.** Langfuse creates a first-time Cognito user through its sign-up path, and with `AUTH_DISABLE_SIGNUP=true` that user fails with `OAuthCreateAccount`. So when `sso.enabled` and `sso.langfuse.enabled` are both `true`, Step 15 renders sign-up open whatever `langfuse.signup_disabled` says, and prints a task message that names the override; with SSO off it still renders that value. Because the override reverses a deliberate `signup_disabled: true`, Step 15 stops with a message unless you have made one of two explicit choices:
+
+  | Choice | Setting | Consequence |
+  |---|---|---|
+  | Cognito is the only way in | `sso.langfuse.disable_password_login: true` | The email and password form is hidden and password sign-in is disabled, so nobody can register with a password. The seeded admin can no longer sign in with its password either, so its address must first have signed in through Cognito (account linking then keeps its data) |
+  | Password sign-up stays open | `sso.langfuse.allow_password_signup: true` | The form stays. Anyone who can reach Langfuse can register with an email and password, and the new account joins the seeded organization and project with the default roles |
+
+  With the second choice, `sso.langfuse.enforce_domains` limits sign-in to your email domains and `langfuse.load_balancer.allowed_cidrs` limits who can reach the page at all.
 - **Account linking is on.** A person who already has an email and password user, the seeded admin included, can sign in through Cognito with the same address and keep their data.
 - **New users land as VIEWER** in the seeded organization and project unless you change the two default roles.
 - **Changing the Secret rolls the pods.** The release carries a fingerprint of the Secret in the pods' own environment, so the same `helm upgrade` that changes the Secret restarts web and worker.
-- **Leave `disable_password_login` at `false`** until you have signed in through Cognito once. Turning it on first can lock you out of the seeded admin.
+- **Turn `disable_password_login` on only after a first Cognito sign-in.** Turning it on first can lock you out of the seeded admin. A common path is `allow_password_signup: true` for the first run, one Cognito sign-in, then `disable_password_login: true` and `lf-app` again.
 
 ## 6. ClickHouse sign-in
 
@@ -184,9 +193,13 @@ These are properties of the server's JWT user directory, taken from ClickHouse's
 | `currentRoles()` is always empty for a JWT user, because the granted rights are flattened onto the user | A check on `currentRoles()` tells you nothing | Read effective access with `SHOW GRANTS`. The smoke test does |
 | Effective access is the intersection of the mapped group roles and the permission-limit role | The permission-limit role is a ceiling. A user in two groups gets the union of those two roles, then the intersection with the ceiling | The ceiling role is granted every group role, so its rights are the union of theirs, and a token login cannot exceed what you wrote under `role_grants` |
 | The permission-limit role must exist before the first login | A login before it exists has nothing to intersect with | Step 11b creates it, and `up.sh` runs `ch-jwt` right after `verify` |
-| The configured JWKS URL must be reachable from the server pods before the JWT directory is enabled. While the JWKS has never loaded, a token that carries a key ID (`kid`) in its header can crash the server process | Enabling the directory against an unreachable URL turns any client that can reach the native port into a way to crash a server | Step 9 starts a throwaway pod on the server node group and fetches the JWKS URL with `clickhouse-local` first. If the fetch fails, Helm is not touched and the step stops with the route to fix. Treat a crash-looping server after enabling SSO as this behaviour |
+| The configured JWKS URL must be reachable from the server pods before the JWT directory is enabled. While the JWKS has never loaded, a token that carries a key ID (`kid`) in its header can crash the server process | Enabling the directory against an unreachable URL turns any client that can reach the native port into a way to crash a server | Step 9 starts a throwaway pod on the server node group and fetches the JWKS URL with `clickhouse-local` first. If the fetch fails, Helm is not touched and the step stops with the route to fix. Treat a crash-looping server after enabling SSO as this behaviour. The gate is point-in-time, see below |
 
 Two more consequences follow from the table. Because the server never calls Cognito at login, revoking a user in Cognito does not end a token the user already holds: it stays valid until it expires, which for the ClickHouse client is at most 60 minutes. And the server fetches the JWKS on a timer (`update_interval_ms`, 300000 ms here), so a key rotation in the pool reaches the server on the next refresh.
+
+**The JWKS gate is point-in-time.** Step 9 checks that a pod can fetch the JWKS URL when you run it, and nothing re-checks it afterwards. A server that restarts while the JWKS is unreachable, for example after a pod restart, a node replacement, or an outage of the NAT gateway or VPC endpoint that carries the route to Cognito, starts with the directory configured and the JWKS unloaded. In that state a token that carries a `kid` header, even one with a forged signature, can crash the server process before it is authenticated, and every client that can reach the native or HTTP port can send one.
+
+**Limit who can reach the ClickHouse ports while the directory is enabled.** The crash needs only a reachable port and a forged token, so the control that matters is who can reach the ports at all. Set `clickhouse.load_balancer.allowed_cidrs` to the known client ranges (empty means the whole VPC for an `internal` load balancer, see [Part 5](part-5-load-balancer.md)) and add a Kubernetes `NetworkPolicy` in the ClickHouse namespace that admits the native (9000, or 9440 with `fips: true`) and HTTP (8123, or 8443) ports only from the client namespaces and the Langfuse and Grafana pods. The kit does not create that policy. `scripts/sso-smoke.sh --negative` (section 7) sends a forged `kid` token and confirms the server answers with `AUTHENTICATION_FAILED` and does not restart; it is opt-in because on a server in the state above it is itself the trigger.
 
 If you turn SSO off while the cluster keeps running, run `scripts/play.sh --tags cluster` with `sso.clickhouse_jwt.enabled: false` to remove the directory before you delete the pool. A server restarted with the directory configured and a JWKS URL that no longer resolves is in the state the last table row warns about.
 
@@ -234,6 +247,7 @@ The script gets an ID token for the ClickHouse app client through the hosted UI'
 scripts/sso-smoke.sh                            # checks the parts that are switched on
 CH_JWT=<id token> scripts/sso-smoke.sh          # also log in to ClickHouse with a token you already have
 scripts/sso-smoke.sh --sso                      # run the browser flow and use the token it returns
+scripts/sso-smoke.sh --negative                 # opt in to the forged-token check (read the warning below)
 ```
 
 In order, it:
@@ -241,6 +255,7 @@ In order, it:
 1. **Fetches the issuer's discovery document** and confirms it is reachable and that its `issuer` matches the one in `state/sso-cognito-outputs.json`.
 2. **Reads Langfuse's `/api/auth/providers`** and confirms `cognito` is listed, when `sso.langfuse.enabled` is on.
 3. **Logs in to ClickHouse with the token**, when `sso.clickhouse_jwt.enabled` is on and a token is supplied through `CH_JWT` or `--sso`. It checks that `SELECT currentUser()` starts with `JWT::` and that `SHOW GRANTS` for that user is not empty. It reads `SHOW GRANTS` and not `currentRoles()` for the reason in section 6.
+4. **Sends a forged token, only with `--negative`,** when `sso.clickhouse_jwt.enabled` is on. The script builds a token locally with Python's standard library: a header with a `kid`, a payload with the ClickHouse client ID as `aud`, and a random signature. It passes when `clickhouse-client` reports `AUTHENTICATION_FAILED` and the server pods' restart counts are the same before and after. **This check is opt-in because it is the crash trigger described in section 6:** a token with a `kid` sent to a server whose JWKS has never loaded crashes that server. No default path, including `scripts/up.sh` and a plain `scripts/sso-smoke.sh`, sends such a token. Without `--negative` the step is skipped with a message that says so.
 
 Parts that are switched off are skipped with a message that says so. The script reads the same merged configuration the playbook does, so a `state/deploy-vars.yml` override of `sso:` counts. **What it does not cover:** the Langfuse browser login itself, group membership of a particular person, and anything behind a SAML provider.
 
@@ -316,6 +331,7 @@ state/:     sso-cognito-outputs.json (no secret), sso-cognito-client-secret (060
 - **`domain_prefix must be set`.** Set `sso.cognito.domain_prefix` in `state/deploy-vars.yml`. It is unique within the region and must not contain `aws`, `amazon` or `cognito`.
 - **Step 6b asks for `langfuse.url`.** Cognito accepts only `https` callbacks. Set `langfuse.url` to the address people use and run `scripts/play.sh --tags sso-idp,lf-app`.
 - **Step 9 says a pod cannot fetch the JWKS URL.** Fix the route from the server nodes to the Cognito host (NAT or an endpoint) and re-run. Helm has not been touched.
+- **Step 15 stops with `sso.langfuse.enabled opens Langfuse sign-up`.** Neither `sso.langfuse.disable_password_login` nor `sso.langfuse.allow_password_signup` is `true`. Pick one as described in section 5, then run `scripts/play.sh --tags lf-app`.
 - **A server pod crash-loops after enabling SSO.** Read section 6, last row of the table. Disable `sso.clickhouse_jwt` and run `--tags cluster`, then fix the JWKS route.
 - **`ch-client.sh --sso` hangs at the browser step.** Check that nothing else holds port 8765 and that the browser can reach the hosted UI.
 - **A token is refused.** The usual causes are an expired token (60 minutes), a token for the other app client (wrong `aud`), a user whose `networks` address is not listed, or a `cognito:groups` claim that is not an array.
@@ -335,7 +351,7 @@ These points depend on your pool, your region or AWS's documentation, so they ar
 1. Why does `ch-client.sh --sso` present the ID token and not the access token? [section 6]
 2. Why is `iss` not an access control in JWKS mode, and what limits who can log in? [section 6]
 3. Why do you read `SHOW GRANTS` and not `currentRoles()` for a token user? [sections 6 and 7]
-4. What does Step 9 check before it enables the JWT directory, and what goes wrong if the check is skipped? [section 6]
+4. What does Step 9 check before it enables the JWT directory, what goes wrong if the check is skipped, and why is the check not enough on its own? [section 6]
 5. Why do the Langfuse and Grafana ClickHouse users stay on passwords? [section 8]
 6. Where do the issuer and JWKS URL come from, and why not from the region? [sections 4 and 10]
 7. Why does IAM outbound identity federation not replace Cognito here? [section 11]
