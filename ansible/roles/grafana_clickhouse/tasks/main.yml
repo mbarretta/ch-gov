@@ -16,12 +16,10 @@
 # Every statement runs through `kubectl exec -i` in one server pod, mirroring
 # _lfdb_sh in langfuse_clickhouse/tasks/main.yml exactly: the admin password
 # travels on stdin, never on argv, into a shell that reads it as the first
-# line and passes it to clickhouse-client. (That inner shell still hands the
-# password to clickhouse-client's own --password argument inside the pod --
-# a real gap langfuse_clickhouse's own header comment already flags. The fix
-# spans both roles, so it belongs in a dedicated hardening pass rather than
-# diverging one-sided here. This role deliberately mirrors the existing
-# pattern as-is.) The user
+# line and exports it as CLICKHOUSE_PASSWORD, which clickhouse-client reads
+# itself, so the client's own argv carries no password inside the pod either.
+# (The HTTP checks are the exception: see _lfdb_http_sh in
+# langfuse_clickhouse/tasks/main.yml.) The user
 # is created `IDENTIFIED WITH sha256_hash`, so the SQL carries the sha256 of
 # the Grafana ClickHouse password and the password itself only ever exists
 # in state/ (where Step 18 reads it into the datasource's secureJsonData)
@@ -57,8 +55,8 @@
     # $0 = user, $1 = query; the password is the first line of stdin, exactly
     # as _lfdb_sh in langfuse_clickhouse/tasks/main.yml.
     _gfdb_sh: >-
-      IFS= read -r pw;
-      exec clickhouse-client --user "$0" --password "$pw"
+      IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+      exec clickhouse-client --user "$0"
       {{ '--secure --port 9440' if fips else '' }}
       --multiquery --query "$1" </dev/null
     # $0 = user, $1 = host, $2 = attempts; mirrors
@@ -66,7 +64,10 @@
     # fips-aware CA-trust and OpenSSL-provider workarounds (see that role's
     # header comment for the two wget/FIPS defects this works around) --
     # this role's HTTP idempotency check and final proof run through
-    # the same ClickHouse HTTP listener that fips: true relocates.
+    # the same ClickHouse HTTP listener that fips: true relocates. As there,
+    # the password rides in a header on wget's argv inside the container
+    # (BusyBox wget cannot read it from a file or the environment), so `ps`
+    # in that container shows it while the check runs.
     _gfdb_http_sh: |
       IFS= read -r pw
       {% if fips %}
@@ -319,8 +320,9 @@
   vars:
     _gfdb_ensure_sh: |
       set -eu
-      IFS= read -r pw
-      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      IFS= read -r CLICKHOUSE_PASSWORD
+      export CLICKHOUSE_PASSWORD
+      ch() { clickhouse-client --user "$0" --query "$1" </dev/null; }
       if [ "$(ch "SELECT count() FROM system.users WHERE name = '$1'")" = 1 ]; then
         if [ "$3" = rotate ]; then
           ch "ALTER USER $1 IDENTIFIED WITH sha256_hash BY '$2'"
@@ -379,8 +381,9 @@
     # simpler and needs no tool beyond the POSIX shell itself.
     _gfdb_grant_sh: |
       set -eu
-      IFS= read -r pw
-      ch() { clickhouse-client --user "$0" --password "$pw" --query "$1" </dev/null; }
+      IFS= read -r CLICKHOUSE_PASSWORD
+      export CLICKHOUSE_PASSWORD
+      ch() { clickhouse-client --user "$0" --query "$1" </dev/null; }
       before=$(ch "SHOW GRANTS FOR $1")
       dbs=$(ch "SELECT name FROM system.databases WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') FORMAT TSV")
       printf '%s\n' "$dbs" | while IFS= read -r db; do

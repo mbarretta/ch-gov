@@ -222,8 +222,10 @@
 
     - name: Prepare the exec
       # `kubectl exec -i`: the admin password travels on stdin, which kubectl
-      # forwards into the container -- never on argv (see clickhouse_verify
-      # for the full reasoning, including why the client gets /dev/null).
+      # forwards into the container -- never on argv, neither kubectl's nor
+      # clickhouse-client's inside the pod (the shell exports it as
+      # CLICKHOUSE_PASSWORD). See clickhouse_verify for the full reasoning,
+      # including why the client gets /dev/null.
       ansible.builtin.set_fact:
         _lf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server", "{{ _lf_server_pods.stdout_lines[0] }}", "--", "sh", "-c"]
         # fips: true adds --secure --port 9440: this exec runs inside the
@@ -235,8 +237,8 @@
         # port either, so accepting whatever cert the server presents is not
         # a downgrade from before (see clickhouse_verify's identical _vf_sh).
         _lf_sh: >-
-          IFS= read -r pw;
-          exec clickhouse-client --user "$0" --password "$pw"
+          IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+          exec clickhouse-client --user "$0"
           {{ '--secure --port 9440' if fips else '' }}
           --multiquery --query "$1" </dev/null
         # A server setting (access_control_improvements). Which system table
