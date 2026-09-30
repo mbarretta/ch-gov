@@ -485,8 +485,9 @@ clickhouse_tls_key_file:     "{{ state_dir }}/clickhouse-tls-key.pem"
 # for BOTH server.openSSL.secret and keeper.openSSL.secret below -- one CA,
 # one leaf cert, one Secret -- since the chart's TLS surface is CA-chain
 # verification only (no per-listener SAN/hostname field exists to force two
-# separate certs), and keeper's own default secret-name convention was not
-# independently confirmed against the (un-pulled) operator chart.
+# separate certs), and this file does not read keeper's own default
+# secret-name convention from the operator chart, so it sets the name
+# explicitly for both.
 clickhouse_tls_secret_name: "{{ clickhouse.cluster_name }}-server-cert-secret"
 
 # Langfuse's generated secrets (Steps 14-15), kept under state/ exactly like the

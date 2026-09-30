@@ -183,10 +183,9 @@
 # driver would otherwise pick. type/fsType match the class's existing name
 # and posture (gp3, ext4, matching gp3-encrypted's own naming and the
 # already-established EBS setup); only `encrypted`/`kmsKeyId` actually
-# change relative to what's presumed to be there today. These exact
-# defaults are unverified against the chart's own values.schema.json --
-# this role never pulls the chart -- so treat type/fsType here as a
-# best-evidence assumption, not a confirmed chart contract.
+# change relative to what's presumed to be there today. This role never
+# pulls or renders the chart, so type/fsType mirror the existing class
+# rather than being read from the chart's own values.schema.json.
 #
 # StorageClass.parameters is immutable in Kubernetes once the object exists
 # -- Helm cannot patch it in place, and forcing the change risks either the
