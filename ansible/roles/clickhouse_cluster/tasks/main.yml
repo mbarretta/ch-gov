@@ -459,7 +459,14 @@
                       remap_claims:
                         roles: "cognito:groups"
                       networks:
-                        ip: "{{ (sso.clickhouse_jwt.networks | default([], true)) or [infrastructure.vpc_cidr] }}"
+                        # An operator list is used exactly as given. The empty
+                        # default is the VPC CIDR plus 127.0.0.1/32: a kubectl
+                        # port-forward (scripts/ch-client.sh --sso) reaches the
+                        # server as ::ffff:127.0.0.1, which the VPC CIDR does not
+                        # contain. 127.0.0.1 is reachable only inside the pod's
+                        # network namespace and through kubectl port-forward, so
+                        # it adds no access for anyone without cluster access.
+                        ip: "{{ (sso.clickhouse_jwt.networks | default([], true)) or [infrastructure.vpc_cidr, '127.0.0.1/32'] }}"
           check_mode: false
 
         - name: Remember the values file for the release

@@ -697,6 +697,13 @@ sso:
     enabled: false
     # true hides the email/password form so Cognito is the only way in. Leave
     # false until you have confirmed a Cognito sign-in works.
+    #
+    # While Langfuse sign-in through Cognito is on, sign-up is open whatever
+    # langfuse.signup_disabled says (Langfuse creates a first-time Cognito user
+    # through the sign-up path). So with this at false, anyone who can reach
+    # Langfuse can also register with an email and password and receives the
+    # default org and project role below. To limit that: set this to true,
+    # set enforce_domains, and set langfuse.load_balancer.allowed_cidrs.
     disable_password_login: false
     # Restrict Langfuse sign-in to these email domains. [] = no restriction.
     enforce_domains: []
@@ -722,7 +729,13 @@ sso:
     #       - "GRANT SELECT ON *.*"
     role_grants: {}
     # Source networks ClickHouse accepts token logins from. Empty means the
-    # VPC CIDR (infrastructure.vpc_cidr).
+    # VPC CIDR (infrastructure.vpc_cidr) and 127.0.0.1/32. The second entry is
+    # the address the server sees for a kubectl port-forward connection, which
+    # is what scripts/ch-client.sh --sso uses by default; 127.0.0.1 is reachable
+    # only from inside the pod's network namespace and through kubectl
+    # port-forward, so it adds no access for anyone without cluster access. A
+    # non-empty list is used exactly as given and replaces that default, so
+    # include 127.0.0.1/32 in it if you want the port-forward path.
     networks: []
 
 # ---------------------------------------------------------------------------
@@ -838,7 +851,11 @@ langfuse:
     user_name: "Admin"
 
   # Airgap posture: no phone-home, and no self-service sign-up on a server
-  # that may sit on a public address.
+  # that may sit on a public address. Exception: with sso.enabled and
+  # sso.langfuse.enabled both true, Step 15 renders sign-up open regardless of
+  # this value, because Langfuse creates a first-time Cognito user through the
+  # sign-up path. See the sso.langfuse block for what that opens and how to
+  # limit it.
   telemetry_enabled: false
   signup_disabled: true
 

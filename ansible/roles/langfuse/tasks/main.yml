@@ -1000,7 +1000,18 @@
           secretKeyRef: {name: langfuse-app-auth, key: encryption-key}
         features:
           telemetryEnabled: "{{ langfuse.telemetry_enabled | bool }}"
-          signUpDisabled: "{{ langfuse.signup_disabled | bool }}"
+          # With Cognito sign-in on, sign-up is open whatever langfuse.signup_disabled
+          # says: Langfuse creates a first-time SSO user through the same path as a
+          # password sign-up, and with AUTH_DISABLE_SIGNUP=true that user fails with
+          # OAuthCreateAccount. The consequence is that, while password login is
+          # enabled, anyone who can reach Langfuse can also register with an email
+          # and password and receives the default org and project role
+          # (sso.langfuse.default_*_role). The levers are
+          # sso.langfuse.disable_password_login (true leaves Cognito as the only
+          # way in), sso.langfuse.enforce_domains (limits the email domains that may
+          # sign in) and langfuse.load_balancer.allowed_cidrs (limits who can reach
+          # the page). With SSO off this renders exactly langfuse.signup_disabled.
+          signUpDisabled: "{{ (langfuse.signup_disabled | bool) and not (_lf_sso | bool) }}"
         serviceAccount:
           create: true
           annotations:
