@@ -108,7 +108,7 @@ One behavior worth knowing: a `scripts/down.sh` followed by `scripts/up.sh --fro
 
 Everything is sized so the pods fit and the cost stays low, not for load or for surviving failures.
 
-- **Small nodes.** The node types are the smallest that fit the chart's pod requests, well below what ClickHouse's own tutorial specifies for production. Expect modest query throughput.
+- **Small nodes.** The node types are the smallest that fit the chart's pod requests, well below what ClickHouse's own tutorial specifies for production. Expect modest query throughput. The default `size: minimal` also keeps the ClickHouse pods under a 74 GB memory budget, and `size: tutorial` selects the tutorial's larger nodes and pods.
 - **One NAT gateway.** `infrastructure.nat_mode: single` puts one NAT gateway in one availability zone. If that zone fails, outbound traffic from the private subnets fails with it. `per_az` gives one per zone at about three times the cost.
 - **No autoscaler.** The node groups have minimum and maximum sizes, but nothing installed grows or shrinks them in response to load. You change the size yourself.
 - **No backups.** The kit configures no backups of ClickHouse data, Keeper's volumes, or the Langfuse PostgreSQL and Valkey volumes. Table data lives in S3, and `scripts/down.sh` never deletes it. A default teardown deletes Keeper's volumes with the cluster, and a rebuild starts with an empty cluster pointed at the same bucket. Old tables are not adopted again.

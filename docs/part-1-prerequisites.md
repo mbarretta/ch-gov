@@ -296,7 +296,7 @@ Open the file once, as step 2 of "Do this in order" at the top of this Part says
 
 If a placeholder is still there, the playbook stops before it touches AWS. It names the offending key and never prints your values.
 
-The generated file and `state/deploy-vars.yml.example` also end with commented-out `fips:`, `langfuse:` and `grafana:` switches that stay off until you uncomment them, as [Part 6](part-6-langfuse.md), [Part 7](part-7-fips-hardening.md) and [Part 8](part-8-grafana.md) explain.
+The generated file and `state/deploy-vars.yml.example` also end with commented-out `fips:`, `langfuse:` and `grafana:` switches that stay off until you uncomment them, as [Part 6](part-6-langfuse.md), [Part 7](part-7-fips-hardening.md) and [Part 8](part-8-grafana.md) explain. The same file can set `size: tutorial` to swap the default `minimal` node and pod sizes for the upstream tutorial's larger ones, and [Part 4](part-4-cluster-preflight-verify.md) explains the difference.
 
 ### DHI credentials (Grafana only)
 
