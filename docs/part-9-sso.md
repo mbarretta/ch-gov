@@ -287,7 +287,7 @@ The option fits automation that already runs as an IAM role and needs a ClickHou
 
 ## 12. Tear it down
 
-`scripts/down.sh` removes the Cognito stack when one exists, after Langfuse is removed. To remove one layer:
+`scripts/down.sh` removes the Cognito stack when one exists, after the cluster is removed, so nothing that trusts the pool outlives it. To remove one layer:
 
 ```bash
 scripts/play.sh --tags sso-idp -e sso_idp_state=absent    # deletes the stack: the pool, its users and groups, both app clients

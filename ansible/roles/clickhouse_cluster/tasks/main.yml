@@ -326,8 +326,8 @@
     #   - The signature must verify against a key in the pool's JWKS (RS256).
     #   - aud is mandatory in the config and on the token. A token with no aud
     #     claim is rejected, and so is one whose aud differs from the configured
-    #     value, so only ID tokens from the ClickHouse app client pass; Cognito
-    #     access tokens carry no aud claim and are rejected.
+    #     value. A Cognito ID token carries aud equal to the app client ID, so
+    #     the kit presents the ID token.
     #   - iss is NOT validated. Trust rests on the JWKS signature plus aud alone,
     #     so iss below only shapes the ClickHouse user name, and neither it nor
     #     networks nor permission_limit repairs claim validation: networks limits
