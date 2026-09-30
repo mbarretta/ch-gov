@@ -164,7 +164,7 @@ aws:
   # profile -- use a named profile you already have (target_profile, plus
   #            source_ecr_profile for the ECR pull); nothing is rendered.
   auth_mode: "sso"
-  # Fill in your two real account IDs.
+  # Fill in your account ID and the source registry account ID ClickHouse gave you.
   target_account_id: "<YOUR_ACCOUNT_ID>"
   target_region: "us-east-1"
   target_profile: "ch-gov-target"

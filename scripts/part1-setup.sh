@@ -197,7 +197,9 @@ step "5/6  AWS profiles"
 # only just have been installed. --check installs nothing, so if Ansible or jq
 # is still missing it reports that and skips the checks that need the config.
 #
-# Two profiles, because the airgap model spans two accounts:
+# Two profiles, because the kit works in one account of yours and also reads
+# ClickHouse's source registry through a role chain (ClickHouse sets up the
+# role in your account; you do not create it):
 #   aws.target_profile      -> your account. Builds VPC/EKS/S3/ECR. Holds your data.
 #   aws.source_ecr_profile  -> an assumed role that can READ ClickHouse's source ECR.
 # With aws.auth_mode: sso the kit renders a project-local .aws/config (chained
