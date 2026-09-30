@@ -9,7 +9,7 @@
 >
 > **Run it:** `scripts/up.sh` runs every step in order and asks before it starts. To run one step at a time while you read, see "Advanced: run individual steps" below. Steps 1 and 2 need no cluster and no compute. Step 3 is where AWS charges start, and Step 5 is where they become significant.
 
-ClickHouse publishes a tutorial for this deployment: [deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). The playbook implements its Steps 1 to 5 in the roles named in each section below, and this Part explains the reasoning behind them.
+The upstream tutorial for this deployment is [deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). The playbook implements its Steps 1 to 5 in the roles named in each section below, and this Part explains the reasoning behind them.
 
 Three placeholders appear in this Part, and each is a value you set in `state/deploy-vars.yml` (Part 1, section 3b). `<YOUR_ACCOUNT_ID>` is your AWS account (`aws.target_account_id`). `<SOURCE_ECR_ACCOUNT_ID>` is the account that hosts ClickHouse's source registry (`aws.source_ecr_account_id`), which ClickHouse gives you. `<region>` is your AWS Region (`aws.target_region`, default `us-east-1`).
 
@@ -39,7 +39,7 @@ Each step is idempotent, so running one again changes nothing that already match
 
 **Run it:** `scripts/play.sh --tags pull-role`
 
-Step 1 of ClickHouse's tutorial is about permission. ClickHouse Government is built for airgapped networks, so your cluster pulls images only from your own registry. *You* first copy those images out of ClickHouse's registry, and that needs an identity that is allowed to read it. Two accounts are involved:
+Step 1 of the upstream tutorial is about permission. ClickHouse Government is built for airgapped networks, so your cluster pulls images only from your own registry. *You* first copy those images out of ClickHouse's registry, and that needs an identity that is allowed to read it. Two accounts are involved:
 
 | Account | Role in the story |
 |---|---|
@@ -52,7 +52,7 @@ The pull role lives in *your* account and points *outward*. ClickHouse sets it u
 
 1. **The grant.** Share your AWS account ID with your ClickHouse contact. They arrange read access to the source registry for your account.
 2. **The role.** ClickHouse sets up `ClickHouseAirgapECRPullRole` (the name is `aws.ecr_pull_role_name`) in your account. Its trust relationship lets your deploying identity assume it, and it carries the read access to the three source repositories the kit uses. You do not create it. Part 1 lists the exact actions under [What the pull role needs](part-1-prerequisites.md#what-the-pull-role-needs).
-3. **The profile.** `aws.source_ecr_profile` (default `ch-gov-ecr-pull`) assumes that role, chaining off your target profile. In SSO mode the kit renders it for you. In profile mode you add it to your own AWS config, as Part 1 shows under [Path B: an existing profile](part-1-prerequisites.md#path-b-an-existing-profile-auth_mode-profile).
+3. **The profile.** `aws.source_ecr_profile` (default `ch-gov-ecr-pull`) assumes that role, chaining off your target profile. In SSO mode the kit renders it for you. In profile mode you add it to your own AWS config, as Part 1 shows under Path B in [AWS access: one setting, two paths](part-1-prerequisites.md#3-aws-access-one-setting-two-paths).
 
 The kit never creates or changes the role, and the playbook only proves that you can assume it.
 
