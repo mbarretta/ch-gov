@@ -296,6 +296,8 @@ Open the file once, as step 2 of "Do this in order" at the top of this Part says
 
 If a placeholder is still there, the playbook stops before it touches AWS. It names the offending key and never prints your values.
 
+The generated file and `state/deploy-vars.yml.example` also end with commented-out `fips:`, `langfuse:` and `grafana:` switches that stay off until you uncomment them, as [Part 6](part-6-langfuse.md), [Part 7](part-7-fips-hardening.md) and [Part 8](part-8-grafana.md) explain.
+
 ### DHI credentials (Grafana only)
 
 Docker Hardened Images (DHI) is a paid, entitled catalog of images on `dhi.io`. You need DHI credentials in exactly one situation: **when `grafana.enabled` is `true`.** In that case Step 2 mirrors the Grafana and `awscli` images from `dhi.io`, and `image_sync` logs in to that registry first. With Grafana off, the playbook never asks for the credentials. The ClickHouse, Langfuse and Chainguard images are pulled without them.
