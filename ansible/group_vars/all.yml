@@ -3,8 +3,9 @@
 #
 # Versions here track the official tutorial:
 #   https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws
-# All were verified present in the source ECR. The optional Langfuse versions
-# (see the langfuse: block at the end) come from their own public sources.
+# scripts/part1-setup.sh lists the tags that exist in the source ECR. The
+# optional Langfuse versions (see the langfuse: block at the end) come from
+# their own public sources.
 # ===========================================================================
 
 # Ansible modules from amazon.aws / community.aws need boto3, which brew's
@@ -261,17 +262,16 @@ versions:
   # --- Grafana (optional Steps 16-18; see the grafana: block at the end) ---
   # grafana_app/awscli_app are DHI catalog tags (dhi.io/grafana, dhi.io/awscli).
   # DHI requires an entitled Docker Hub login (dhi_username/dhi_token below)
-  # to even resolve tags, so these pins mirror the current public
-  # grafana/grafana and amazon/aws-cli tags as the best available proxy --
-  # confirm against the real DHI catalog at the first `--tags sync` run
-  # (image_sync's dhi.io login step). Deliberately no fips_suffix on either
+  # to even resolve tags, so these pins follow the public grafana/grafana and
+  # amazon/aws-cli tags. The DHI catalog resolves them at the `--tags sync`
+  # run (image_sync's dhi.io login step). Deliberately no fips_suffix on either
   # (documented gap; see the endpoint-coverage matrix above and
   # docs/part-8-grafana.md).
   grafana_chart: "10.5.15"    # helm chart from grafana.github.io/helm-charts;
-                              # upstream deprecated (frozen) this chart on
-                              # 2026-01-30 in favor of grafana-community/
-                              # helm-charts, but the approved plan pins this
-                              # exact source and it still installs cleanly.
+                              # upstream froze this chart in favor of
+                              # grafana-community/helm-charts; the kit
+                              # keeps this source, which still installs
+                              # cleanly.
   grafana_app: "13.2.2"       # DHI grafana image tag (the main container)
   grafana_app_dev: "13.2.2-dev" # same version, DHI's "-dev" variant -- used only by the
                               # plugin-install initContainer below, which needs a real shell
@@ -310,10 +310,10 @@ node_ami_type: "{{ 'AL2023_x86_64_STANDARD' if fips else 'AL2023_ARM_64_STANDARD
 # The tutorial labels ARM64 node groups `clickhouseGroup: keeper-arm64` /
 # `server-arm64` and leaves the chart's nodeSelector at plain `keeper` /
 # `server`, relying on a mutating webhook to append the suffix. Step 8
-# disables webhooks (also per the tutorial), and the first Step 9 run proved
-# nothing else appends it: Keeper pods sat Pending with a bare selector. So
-# the clickhouse_cluster role puts the suffix in the selector itself, from
-# this same variable. Part 4 has the story.
+# disables webhooks (also per the tutorial), so nothing else appends it: with
+# a bare selector the Keeper pods stay Pending. So the clickhouse_cluster role
+# puts the suffix in the selector itself, from this same variable. Part 4
+# explains it.
 node_label_suffix: "{{ '' if fips else '-arm64' }}"
 
 # FIPS deployments must pull over FIPS-validated endpoints, which use a
@@ -593,7 +593,7 @@ langfuse:
 
   # --- pod sizing ---
   # Requests AND limits. Everything runs on the operator node group, which has
-  # the headroom for these defaults (verified against the live nodes).
+  # the headroom for these defaults.
   web:
     replicas: 1
     cpu: "2"

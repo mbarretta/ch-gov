@@ -46,7 +46,7 @@
     # `kubectl exec -i`: the password travels on stdin, which kubectl forwards
     # into the container. NOT via `environment:` -- that sets the environment
     # of the local kubectl process, and kubectl exec does not carry it across
-    # (the first run failed exactly this way, with an empty password). And not
+    # (that fails with an empty password). And not
     # on argv, where `ps` on the node would show it. The container is named
     # c-<cluster>-server; the pod label says clickhouse-server, the container
     # does not.

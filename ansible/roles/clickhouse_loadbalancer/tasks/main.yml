@@ -329,8 +329,8 @@
     LB_PW: "{{ _lb_pw }}"
   register: _lb_probe
   # A freshly active NLB drops a share of connections for a minute or two
-  # while its zonal nodes learn the target state -- the first run saw 2 of 6
-  # time out against one zonal IP, and 24 of 24 succeed a few minutes later.
+  # while its zonal nodes learn the target state -- a probe can see some
+  # connections to one zonal IP time out, then all succeed a few minutes later.
   # So: retry until a run has no timeouts, rather than failing on the first.
   until: _lb_probe.rc == 0 and 'Timeout' not in _lb_probe.stdout
   retries: 8
