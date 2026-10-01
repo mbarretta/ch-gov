@@ -39,17 +39,30 @@ die()   { fail "$*"; exit 1; }
 # not inside $(...), or the cache is lost with the subshell.
 CH_VARS_JSON=""
 
+# The second override layer, written by scripts/go.sh from its component
+# flags (--langfuse, --grafana, --sso, --fips, --size). It is JSON, which YAML
+# accepts, so go.sh can merge into it with jq instead of editing the
+# commented state/deploy-vars.yml. It loads after deploy-vars.yml, so a key set
+# in both takes this file's value, and it holds only the keys a flag has set.
+# The variable can be pointed elsewhere before the first resolve (go.sh
+# --dry-run does this to preview a plan without writing anything).
+CH_FLAGS_FILE="${CH_FLAGS_FILE:-$CH_PROJECT_ROOT/state/deploy-flags.json}"
+export CH_FLAGS_FILE
+
 ch_resolve() {
   [[ -z "$CH_VARS_JSON" ]] || return 0
   have ansible || { fail "ansible is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
   have jq      || { fail "jq is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
   local extra=() out errf rc=0 json
   [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]] && extra=(-e "@$CH_PROJECT_ROOT/state/deploy-vars.yml")
+  [[ -s "$CH_FLAGS_FILE" ]] && extra+=(-e "@$CH_FLAGS_FILE")
   errf="$(mktemp)"
+  # dhi_configured is a boolean on purpose: the Docker Hub token itself never
+  # enters the cached JSON.
   out="$(cd "$CH_PROJECT_ROOT/ansible" && \
          ANSIBLE_STDOUT_CALLBACK=minimal ANSIBLE_CALLBACK_RESULT_FORMAT=json \
          ansible localhost ${extra[@]+"${extra[@]}"} -m ansible.builtin.debug \
-           -a 'msg={{ {"fips": fips, "size": size, "pricing": pricing, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "sso": sso, "langfuse": langfuse, "grafana": grafana} }}' \
+           -a 'msg={{ {"fips": fips, "size": size, "size_profile_names": (size_profiles.keys() | list | sort), "pricing": pricing, "aws": aws, "infrastructure": infrastructure, "clickhouse": clickhouse, "sso": sso, "langfuse": langfuse, "grafana": grafana, "dhi_configured": ((dhi_username | length > 0) and (dhi_token | length > 0))} }}' \
            </dev/null 2>"$errf")" || rc=$?
   json="${out#*=> }"
   if ((rc == 0)) && CH_VARS_JSON="$(jq -ce '.msg | select(type == "object")' <<<"$json" 2>/dev/null)" && [[ -n "$CH_VARS_JSON" ]]; then
@@ -211,6 +224,10 @@ dhi:
 
 # Optional switches. Uncomment only the ones you want; every other key keeps
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
+#
+# scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
+# command-line flags instead. It records them in state/deploy-flags.json, which is
+# layered on top of this file, so a value set by a flag wins over the same key here.
 #
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's
 # larger node and pod sizes). See ansible/group_vars/all.yml for both profiles.
@@ -633,11 +650,12 @@ ch_init() {
   # creates it, so in practice this is "always" -- the explicit check keeps the
   # intent, "load the override file when there is one", legible at the
   # scripts/play.sh call site).
-  if [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]]; then
-    export CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
-  else
-    export CH_EXTRA_VARS=""
-  fi
+  CH_EXTRA_VARS=""
+  [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]] && CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
+  # The flags layer goes second so it wins on a key both files set, matching
+  # the order ch_resolve passes them in.
+  [[ -s "$CH_FLAGS_FILE" ]] && CH_EXTRA_VARS="${CH_EXTRA_VARS:+$CH_EXTRA_VARS }-e @$CH_FLAGS_FILE"
+  export CH_EXTRA_VARS
   # Where ClickHouse publishes its images. You never deploy into this account;
   # you only read from it, then copy images into your own ECR.
   SOURCE_ECR_ACCOUNT="$(ch_var aws.source_ecr_account_id)"

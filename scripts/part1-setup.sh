@@ -16,6 +16,11 @@
 # Usage:
 #   ./part1-setup.sh              install what's missing, then verify
 #   ./part1-setup.sh --check      verify only; change nothing (safe to re-run)
+#   ./part1-setup.sh --tools-only stop after the tools (steps 1-4): no AWS profile
+#                                 or registry checks, so it works before you have
+#                                 edited state/deploy-vars.yml or logged in. Combine
+#                                 with --check to verify the tools without installing.
+#                                 scripts/go.sh uses this.
 #
 set -euo pipefail
 # Resolve an absolute path to this script BEFORE cd'ing, so --help can still
@@ -28,9 +33,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 CH_DEFER_INIT=1
 source ./lib/common.sh
 
-CHECK_ONLY=0
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
-[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$_SELF"; exit 0; }
+CHECK_ONLY=0; TOOLS_ONLY=0
+while (($#)); do
+  case "$1" in
+    --check)      CHECK_ONLY=1 ;;
+    --tools-only) TOOLS_ONLY=1 ;;
+    --help|-h)    awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$_SELF"; exit 0 ;;
+    *)            die "unknown argument: $1 (see --help)" ;;
+  esac; shift
+done
 
 # ===========================================================================
 step "1/6  Required CLI tools"
@@ -188,6 +199,16 @@ vrow jq      "$(jq --version 2>/dev/null)"                                   "an
 vrow python3 "$(py_version)"                                                 "${PY_MIN}+"
 vrow ansible "$(ansible --version </dev/null 2>/dev/null | head -1 | tr -d '[]' | awk '{print $3}')" "2.21+ (sets py floor)"
 vrow preflight "$(kubectl preflight version 2>/dev/null | head -1 | awk '{print $NF}')"  "any (Step 10)"
+
+if ((TOOLS_ONLY)); then
+  if ((PROBLEMS == 0)); then
+    step "Tools ready"
+    ok "tools installed and versions usable (AWS profiles and the source registry not checked)"
+    exit 0
+  fi
+  step "Tools check finished with $PROBLEMS problem(s)"
+  exit 1
+fi
 
 # ===========================================================================
 step "5/6  AWS profiles"

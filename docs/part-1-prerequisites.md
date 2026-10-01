@@ -19,6 +19,10 @@
 
 The first time you run the setup script, before steps 2 and 3, it reports failures for the two AWS profiles. That is expected: the profiles cannot authenticate until the file is edited and you are logged in. Run the check again after step 3.
 
+**Prefer one command?** `scripts/go.sh` does steps 1, 3 and 4 for you and then runs `scripts/up.sh`. You still do step 2 yourself, because your account IDs are yours to enter: the first run creates `state/deploy-vars.yml`, stops, and names each key that still holds a `<...>` placeholder. Once the file is filled in, the same command installs the tools, signs you in to AWS when you are not signed in, runs the check, and starts the deploy. Its flags switch the optional components on (`--langfuse`, `--grafana`, `--sso`) and choose the build (`--fips`, `--size`). Add `--dry-run` to see the plan and check your inputs first, without installing, signing in, or deploying anything.
+
+`go.sh` records the flags you pass in `state/deploy-flags.json`, a second override file that is layered on top of `state/deploy-vars.yml`. A flag you leave off keeps its last value, and `--no-langfuse` and its siblings switch a component off. Because every script reads both files, `scripts/up.sh`, `scripts/play.sh` and the smoke tests agree with `go.sh` about what is switched on. Switching a component off changes only the configuration, and `scripts/down.sh` removes what is already deployed.
+
 ---
 
 ## What you are building, and why it looks odd

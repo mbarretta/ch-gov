@@ -92,6 +92,16 @@ scripts/ch-client.sh -q "SELECT version()"
 
 To include the optional capabilities, set `enabled: true` in the `langfuse:` block, the `grafana:` block, or both, in `state/deploy-vars.yml`. Then run `scripts/up.sh` again. Every step is idempotent, so running it over an existing stack changes only what differs.
 
+**Or do it all with one command.** `scripts/go.sh` runs the whole sequence above, from installing the tools to `scripts/up.sh`, and takes a flag for each optional component. It signs you in to AWS when you are not, and stops before it spends anything if an input is missing. Your account IDs and portal URL still go in `state/deploy-vars.yml`, which the first run creates.
+
+```bash
+scripts/go.sh --dry-run --langfuse --grafana    # show the plan and check the inputs; deploys nothing
+scripts/go.sh --langfuse --grafana              # ClickHouse, plus Langfuse and Grafana
+scripts/go.sh --fips --size tutorial            # the FIPS build, at the tutorial's larger sizes
+```
+
+The flags are `--langfuse`, `--grafana`, `--sso`, `--fips` and `--size`, and each on/off flag has a `--no-` form. The script remembers them in `state/deploy-flags.json`, which sits on top of `state/deploy-vars.yml`, so `scripts/up.sh` and the other scripts see the same setup. Run `scripts/go.sh --help` for all of them, including the choices that single sign-on asks you to make.
+
 To stop, use the teardown script:
 
 ```bash
@@ -113,8 +123,8 @@ For the FIPS posture on its own, where the validated cryptography is ClickHouse'
 | [`docs/`](docs/part-0-what-is-this.md) | The Parts, in order, and [`docs/limitations.md`](docs/limitations.md) |
 | [`FIPS.md`](FIPS.md) | The FIPS 140-3 posture in one page: what `fips: true` covers and what it does not |
 | `ansible/` | The playbook and roles that build each step, and `ansible/group_vars/all.yml`, the one configuration file with a comment on every value |
-| `scripts/` | The scripts you run: `up.sh`, `down.sh`, `play.sh`, `ch-client.sh`, the two smoke tests, and setup helpers |
-| `state/` | Local files the scripts generate, such as passwords and the kubeconfig. Everything in it except the tracked example is gitignored |
+| `scripts/` | The scripts you run: `go.sh` (everything in one command), `up.sh`, `down.sh`, `play.sh`, `ch-client.sh`, the smoke tests, and setup helpers |
+| `state/` | Local files the scripts generate, such as passwords, the kubeconfig and the flags `go.sh` records. Everything in it except the tracked example is gitignored |
 
 ## Check yourself
 

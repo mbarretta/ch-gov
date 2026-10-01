@@ -40,6 +40,10 @@ dhi:
 # Optional switches. Uncomment only the ones you want; every other key keeps
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
+# scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
+# command-line flags instead. It records them in state/deploy-flags.json, which is
+# layered on top of this file, so a value set by a flag wins over the same key here.
+#
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's
 # larger node and pod sizes). See ansible/group_vars/all.yml for both profiles.
 # size: tutorial
