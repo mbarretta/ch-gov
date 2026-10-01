@@ -21,7 +21,7 @@
 # Plain HTTP by default. With langfuse.load_balancer.tls -- or with fips: true
 # and load_balancer.type not none, which forces the same behaviour on even
 # with tls left false, since a single fips switch is the whole point (see
-# _lf_tls below and docs/part-6-langfuse.md section 9) -- the NLB terminates
+# _lf_tls below and docs/part-6-langfuse.md, "TLS at the load balancer") -- the NLB terminates
 # TLS with a self-signed certificate this role generates once the hostname is
 # known: key and certificate land in state/ (langfuse_state_files.tls_*), the
 # certificate is imported into ACM under the Name tag

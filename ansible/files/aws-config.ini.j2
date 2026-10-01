@@ -5,7 +5,7 @@
 # is re-rendered on EVERY run, so hand-editing it (or this tracked template,
 # ansible/files/aws-config.ini.j2) never survives the next one. Set your real
 # account ID and SSO portal URL in state/deploy-vars.yml instead (see
-# docs/part-1-prerequisites.md section 3b) -- this template must never carry
+# docs/part-1-prerequisites.md, "Persisting your account IDs") -- this template must never carry
 # a real value, since it is committed to git.
 #
 # With aws.auth_mode: profile this file is not rendered at all; the kit uses

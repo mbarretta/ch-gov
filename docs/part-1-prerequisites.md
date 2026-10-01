@@ -8,20 +8,20 @@
 >
 > **Run it:** `scripts/part1-setup.sh` installs and checks everything. Add `--check` to verify without changing anything. Nothing is deployed and nothing costs money in this Part.
 >
-> **Step numbers:** "Step 1" to "Step 18" refer to the table in [Part 0, section 5](part-0-what-is-this.md#5-how-a-deployment-goes-in-general).
+> **Step numbers:** "Step 1" to "Step 18" refer to the table in [Part 0, How a deployment goes](part-0-what-is-this.md#how-a-deployment-goes-in-general).
 
 ### Do this in order
 
-1. **Install the tools.** Run `scripts/part1-setup.sh` (section 2). On macOS it installs what is missing. On Linux, install the tools first.
-2. **Edit `state/deploy-vars.yml`.** The first script you run creates it. Replace the `<...>` placeholders with your account ID, the source registry account ID and, in SSO mode, your portal URL (section 3b).
-3. **Log in.** `source scripts/env.sh`, then `aws sso login --profile "$AWS_PROFILE"` (section 3). In `profile` mode, refresh your credentials the way your organization does.
-4. **Check everything.** Run `scripts/part1-setup.sh --check` (section 6).
+1. **Install the tools.** Run `scripts/part1-setup.sh` ([The seven tools](#the-seven-tools-and-what-each-one-is-for)). On macOS it installs what is missing. On Linux, install the tools first.
+2. **Edit `state/deploy-vars.yml`.** The first script you run creates it. Replace the `<...>` placeholders with your account ID, the source registry account ID and, in SSO mode, your portal URL ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)).
+3. **Log in.** `source scripts/env.sh`, then `aws sso login --profile "$AWS_PROFILE"` ([AWS access](#aws-access-one-setting-two-paths)). In `profile` mode, refresh your credentials the way your organization does.
+4. **Check everything.** Run `scripts/part1-setup.sh --check` ([Check your setup](#check-your-setup)).
 
 The first time you run the setup script, before steps 2 and 3, it reports failures for the two AWS profiles. That is expected: the profiles cannot authenticate until the file is edited and you are logged in. Run the check again after step 3.
 
 ---
 
-## 1. What you are building, and why it looks odd
+## What you are building, and why it looks odd
 
 Before the tool list makes sense, you need the shape of the thing.
 
@@ -54,7 +54,7 @@ The learning environment this kit builds includes a NAT gateway so that you can 
 
 ---
 
-## 2. The seven tools, and what each one is for
+## The seven tools, and what each one is for
 
 Install all seven. The deployment stops at the first missing one.
 
@@ -123,7 +123,7 @@ Two more tools make the kit easier to use, but nothing in the deployment require
 
 ---
 
-## 3. AWS access: one setting, two paths
+## AWS access: one setting, two paths
 
 An AWS *profile* is a named set of credentials. You pick one per command with `--profile`, or for a whole shell with `export AWS_PROFILE=...`.
 
@@ -141,7 +141,7 @@ The setting `aws.auth_mode` decides who creates those profiles:
 | `sso` (default) | You sign in with AWS IAM Identity Center (SSO). | Renders a project-local `.aws/config` with both profiles and points the AWS CLI at it. |
 | `profile` | You already have a working named profile. | Renders nothing. It uses your own AWS config, and both profiles must exist there. |
 
-You set these keys in `state/deploy-vars.yml`. Section 3b explains that file, and the defaults live in `ansible/group_vars/all.yml`.
+You set these keys in `state/deploy-vars.yml`. [Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) explains that file, and the defaults live in `ansible/group_vars/all.yml`.
 
 ### Path A: SSO with IAM Identity Center (`auth_mode: sso`)
 
@@ -261,7 +261,7 @@ One more rule follows from how EKS works. The identity that creates the cluster 
 
 ---
 
-## 3b. Persisting your account IDs and SSO portal: `state/deploy-vars.yml`
+## Persisting your account IDs and SSO portal: `state/deploy-vars.yml`
 
 The `aws:` block in `ansible/group_vars/all.yml` ships with placeholders such as `"<YOUR_ACCOUNT_ID>"` and `"<SOURCE_ECR_ACCOUNT_ID>"`. Real account numbers do not belong in a tracked file, and every script and role reads those values, so you fill them in somewhere else: `state/deploy-vars.yml`.
 
@@ -316,13 +316,13 @@ If Grafana is on and both are missing, `image_sync` stops with `An artifact sour
 
 ---
 
-## 4. How this repo relates to ClickHouse's tutorial
+## How this repo relates to ClickHouse's tutorial
 
 ClickHouse publishes a tutorial for this deployment at [docs/cloud/clickhouse-private/tutorials/deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). It gives the steps as explicit commands. The Ansible in `ansible/` implements those steps, in the same order, so you can read the tutorial for the reasoning and this repo for the automation. Part 2 walks through the first steps.
 
-## 5. Running the playbook: `scripts/play.sh`
+## Running the playbook: `scripts/play.sh`
 
-The deployment is an Ansible playbook, but you rarely start it directly. `scripts/up.sh` (section 5b) calls `scripts/play.sh`, and `play.sh` sets up the environment the playbook needs. You get the same result with less to remember, because three things are easy to get wrong:
+The deployment is an Ansible playbook, but you rarely start it directly. `scripts/up.sh` ([The two scripts you will actually use](#the-two-scripts-you-will-actually-use-upsh-and-downsh)) calls `scripts/play.sh`, and `play.sh` sets up the environment the playbook needs. You get the same result with less to remember, because three things are easy to get wrong:
 
 **1. The environment has to point into the repo.** `AWS_CONFIG_FILE` (in SSO mode) and `KUBECONFIG` must be the project-local ones. If they are not, you get `The config profile (ch-gov-target) could not be found`, or, much worse, a run against whatever cluster your personal `~/.kube/config` names.
 
@@ -355,7 +355,7 @@ Without that check, an expired token shows up partway into a run as an unrelated
 >
 > The tags are `images vpc eks nodes storage prereqs operator cluster preflight verify lb`, plus `lf-storage lf-db lf-app` and `gf-storage gf-db gf-app` for the optional Steps 13–18. Parts 2 onward name the tag for each step.
 
-## 5b. The two scripts you will actually use: `up.sh` and `down.sh`
+## The two scripts you will actually use: `up.sh` and `down.sh`
 
 Day to day you want two verbs, and you want them to know the order so you do not have to:
 
@@ -381,9 +381,9 @@ scripts/down.sh --all          # everything except the S3 bucket and ECR images
 
 Each teardown is a separate playbook run, because every role ends the play after its own teardown task. That is why the script loops instead of passing one long `--tags` list. Neither script deletes your ClickHouse or Langfuse data buckets. The one bucket teardown does remove is Grafana's plugin mirror, which holds a single re-downloadable file.
 
-## 6. Check your setup
+## Check your setup
 
-Run these checks in order. Each one gives a command and the result you should see, and the checks double as exercises for a workshop. If one fails, section 7 lists the common causes.
+Run these checks in order. Each one gives a command and the result you should see, and the checks double as exercises for a workshop. If one fails, [Troubleshooting](#troubleshooting) lists the common causes.
 
 1. **All tools and both profiles pass the setup check.**
 
@@ -441,7 +441,7 @@ Run these checks in order. Each one gives a command and the result you should se
 
    You should see the usage text. Nothing is deployed.
 
-## 7. Troubleshooting
+## Troubleshooting
 
 Each entry gives the symptom, the cause and the fix.
 
@@ -460,12 +460,12 @@ Each entry gives the symptom, the cause and the fix.
 **`These settings still hold a <...> placeholder`**
 
 - *Cause:* `state/deploy-vars.yml` still contains a value such as `<YOUR_ACCOUNT_ID>`. The message lists the keys.
-- *Fix:* edit `state/deploy-vars.yml` (section 3b) and run again.
+- *Fix:* edit `state/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)) and run again.
 
 **The first `scripts/part1-setup.sh` run reports `profile '...' not defined` or `will not authenticate`**
 
 - *Cause:* you have not yet edited `state/deploy-vars.yml` or logged in. The profiles cannot authenticate before that.
-- *Fix:* follow "Do this in order" at the top of this Part: edit the file (section 3b), log in (section 3), then run `scripts/part1-setup.sh --check` again.
+- *Fix:* follow "Do this in order" at the top of this Part: edit the file ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)), log in ([AWS access](#aws-access-one-setting-two-paths)), then run `scripts/part1-setup.sh --check` again.
 
 **`Profile '...' resolves to account X, but group_vars says Y`**
 
@@ -480,7 +480,7 @@ Each entry gives the symptom, the cause and the fix.
 **`scripts/part1-setup.sh` stops with `Homebrew required`**
 
 - *Cause:* a tool is missing and Homebrew is not installed. This is common on Linux.
-- *Fix:* install the missing tools as section 2 describes, or install Homebrew for Linux, then run the script again.
+- *Fix:* install the missing tools as [The seven tools](#the-seven-tools-and-what-each-one-is-for) describes, or install Homebrew for Linux, then run the script again.
 
 **`python3 is X.Y; need 3.12+`**
 
@@ -515,7 +515,7 @@ Each entry gives the symptom, the cause and the fix.
 **`An artifact sources from dhi.io but the DHI username/token are empty`**
 
 - *Cause:* `grafana.enabled` is `true` and no DHI credentials are set.
-- *Fix:* set `dhi.username` and `dhi.token` in `state/deploy-vars.yml` (section 3b).
+- *Fix:* set `dhi.username` and `dhi.token` in `state/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)).
 
 **`kubectl preflight` is not found in your own shell**
 

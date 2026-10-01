@@ -17,11 +17,11 @@ scripts/up.sh                     # Steps 1-18 in order; every step is idempoten
 scripts/grafana-smoke.sh          # check the datasource, run a real query through it
 ```
 
-Grafana needs Docker Hardened Images credentials before it can install. [Part 1, section 3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows where to put them, and section 2 below explains why.
+Grafana needs Docker Hardened Images credentials before it can install. [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows where to put them, and [Two things Grafana needs](#two-things-grafana-needs-that-langfuse-did-not) below explains why.
 
 ---
 
-## 1. How Grafana reads from ClickHouse
+## How Grafana reads from ClickHouse
 
 Grafana is an open-source dashboarding and exploration UI. You point it at a data source, write or build a query, and it renders the result as a graph, a table, or a panel. It is the tool people reach for when they want to look at data visually instead of typing SQL each time.
 
@@ -43,17 +43,17 @@ Three pieces make this work, and each one has its own step:
 - **The datasource plugin**, `grafana-clickhouse-datasource`, which teaches Grafana to speak ClickHouse's HTTP interface. You mirror it into your own S3 bucket (Step 16) and the pod loads it at start (Step 18).
 - **Grafana itself**, installed from a Helm chart with the datasource defined as configuration (Step 18), so it exists from the first start and needs no clicking.
 
-There is no starter dashboard, and nothing is provisioned beyond the datasource. What you build in the UI is yours, and it does not survive a pod restart, because Grafana runs with no persistent storage (section 7 says why). If Langfuse is also on, the same datasource can read Langfuse's tables, because the `grafana` user's read access covers every database, `langfuse` included.
+There is no starter dashboard, and nothing is provisioned beyond the datasource. What you build in the UI is yours, and it does not survive a pod restart, because Grafana runs with no persistent storage ([Step 18](#step-18-grafana-itself-gf-app) says why). If Langfuse is also on, the same datasource can read Langfuse's tables, because the `grafana` user's read access covers every database, `langfuse` included.
 
-## 2. Two things Grafana needs that Langfuse did not
+## Two things Grafana needs that Langfuse did not
 
 Langfuse's images come from `docker.langfuse.com` and Chainguard's anonymous `cgr.dev`, and its one extra artifact is a chart. Grafana's install adds two requirements.
 
-**DHI is a paid, authenticated catalog.** Docker Hardened Images (DHI) publishes hardened, minimal builds of common images, including Grafana's own upstream image and `awscli`. Pulling from `dhi.io` needs a Docker Hub account entitled to the catalog, unlike Chainguard's anonymous pulls. Step 2's `image_sync` logs in to `dhi.io` with `skopeo login`, passing the credential on stdin and never in a command line, the same way it handles ECR. It logs in only when an artifact in the list actually sources from `dhi.io`, so a run with Grafana off never asks for the credential. Where the credential comes from (`dhi.username` and `dhi.token` in `state/deploy-vars.yml`, or `DHI_USERNAME` and `DHI_TOKEN` in the environment) is covered once, for every optional credential the kit needs, in [Part 1, section 3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml).
+**DHI is a paid, authenticated catalog.** Docker Hardened Images (DHI) publishes hardened, minimal builds of common images, including Grafana's own upstream image and `awscli`. Pulling from `dhi.io` needs a Docker Hub account entitled to the catalog, unlike Chainguard's anonymous pulls. Step 2's `image_sync` logs in to `dhi.io` with `skopeo login`, passing the credential on stdin and never in a command line, the same way it handles ECR. It logs in only when an artifact in the list actually sources from `dhi.io`, so a run with Grafana off never asks for the credential. Where the credential comes from (`dhi.username` and `dhi.token` in `state/deploy-vars.yml`, or `DHI_USERNAME` and `DHI_TOKEN` in the environment) is covered once, for every optional credential the kit needs, in [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml).
 
 **The ClickHouse datasource is a plugin, and the cluster is not meant to fetch it.** `grafana-clickhouse-datasource` is not baked into any image. A pod that fetched it from `grafana.com` at startup would need the cluster to reach the internet, which the airgapped design of ClickHouse Government avoids. So Step 16 mirrors one pinned, SHA256-verified copy of the plugin zip into your own S3 bucket from your machine, the same "mirror once, pull only from your own account" shape Step 2 uses for images. Step 18's pod then reaches the bucket through an IRSA-authenticated initContainer, and never reaches `grafana.com`. IRSA (IAM roles for service accounts) is the mechanism that lets a pod assume an AWS role without static keys.
 
-## 3. The switch, and what it changes
+## The switch, and what it changes
 
 Everything hangs off one key, `grafana:`, the last top-level block in `ansible/group_vars/all.yml`, after `langfuse:`. Keep it last, as `langfuse:` is kept after `clickhouse:`, because the scripts read these blocks by position. The comment above the block in that file explains the constraint.
 
@@ -62,7 +62,7 @@ grafana:
   enabled: false            # the switch. false = Steps 16-18 do nothing
   namespace: "grafana"
   release: "grafana"        # the chart's fullnameOverride, so also the ServiceAccount name IRSA trusts
-  clickhouse_user: "grafana" # SELECT on every database and most system tables -- ease of use, not least privilege; see section 6
+  clickhouse_user: "grafana" # SELECT on every database and most system tables -- ease of use, not least privilege; see [Step 17](#step-17-a-read-only-clickhouse-user-gf-db)
   bucket_name: "grafana-{{ aws.target_account_id }}-{{ aws.target_region }}"
   url: ""                   # override; empty derives it from the NLB (or localhost:3000 for type none)
   load_balancer:
@@ -70,7 +70,7 @@ grafana:
     allowed_cidrs: []
     port: 3000               # Grafana's own default UI port
     cross_zone: true
-    tls: false               # true = the NLB terminates TLS with a self-signed certificate (section 9)
+    tls: false               # true = the NLB terminates TLS with a self-signed certificate ([TLS at the load balancer](#tls-at-the-load-balancer))
     tls_cert_days: 825
   pod: {replicas: 1, cpu: "500m", memory: "512Mi"}
   telemetry_enabled: false  # no phone-home
@@ -80,9 +80,9 @@ grafana:
 
 **With `enabled: true`**, three things happen:
 
-1. Step 2 mirrors three DHI images and one chart (section 4).
+1. Step 2 mirrors three DHI images and one chart ([Step 2 again](#step-2-again-three-dhi-images-and-a-chart)).
 2. `up.sh` appends `gf-storage gf-db gf-app` *after* Langfuse's `lf-storage lf-db lf-app`. If both are on, Langfuse's database already exists by the time Step 17 grants read access, so the grant covers `langfuse.*` in the same run.
-3. `down.sh` removes Grafana after Langfuse, and both before the load balancer, the cluster, and the node groups (section 13).
+3. `down.sh` removes Grafana after Langfuse, and both before the load balancer, the cluster, and the node groups ([Operate it: tear it down](#operate-it-tear-it-down)).
 
 Each step has its own tag, so you can run one alone. This is an advanced use; `scripts/up.sh` runs them in order for you.
 
@@ -95,7 +95,7 @@ Each step has its own tag, so you can run one alone. This is an advanced use; `s
 > scripts/play.sh --tags gf-app         # Step 18: the Helm release, NLB, datasource
 > ```
 
-## 4. Step 2 again: three DHI images and a chart
+## Step 2 again: three DHI images and a chart
 
 After you flip the switch, run the image hop again. `scripts/up.sh` does this as its first step; to run only this step:
 
@@ -108,13 +108,13 @@ Three artifacts are new, all from `dhi.io`. The chart comes from Grafana's own p
 | Repository | Tag | What and why |
 |---|---|---|
 | `grafana` | `13.2.2` | The main container. DHI's hardened "runtime" tag has no shell and no coreutils. |
-| `grafana` | `13.2.2-dev` | The same version, DHI's `-dev` variant. Only the plugin-install initContainer (section 7) uses it, because that container needs a real shell. |
-| `awscli` | `1.46.1-dev` | The presign initContainer (section 7). DHI's `awscli` v2 line ships no `-dev` tag with a shell, so this pins v1, whose `s3 presign` takes the same flags. |
+| `grafana` | `13.2.2-dev` | The same version, DHI's `-dev` variant. Only the plugin-install initContainer ([Step 18](#step-18-grafana-itself-gf-app)) uses it, because that container needs a real shell. |
+| `awscli` | `1.46.1-dev` | The presign initContainer ([Step 18](#step-18-grafana-itself-gf-app)). DHI's `awscli` v2 line ships no `-dev` tag with a shell, so this pins v1, whose `s3 presign` takes the same flags. |
 | `helm/grafana` | `10.5.15` | The chart, from `grafana.github.io/helm-charts`. Upstream froze this chart on 2026-01-30 in favor of `grafana-community/helm-charts`, but the pinned version still installs. |
 
 Neither `grafana_app` nor `awscli_app` carries a `fips_suffix`. DHI requires an entitled login to resolve its own tags, so these versions are the closest public equivalents of the upstream `grafana/grafana` and `amazon/aws-cli` tags, not FIPS builds. Whether that matters for your compliance target is a question this kit does not answer for you. [Learning setup vs. production](limitations.md) lists the images that are not FIPS builds, and [Part 7](part-7-fips-hardening.md) covers the rest of FIPS mode.
 
-## 5. Step 16: a bucket and an IRSA role (`gf-storage`)
+## Step 16: a bucket and an IRSA role (`gf-storage`)
 
 ```bash
 scripts/play.sh --tags gf-storage
@@ -141,7 +141,7 @@ ok: [localhost] => {
 
 No S3 access keys exist anywhere. The pod's ServiceAccount annotation supplies `AWS_ROLE_ARN` and a projected web-identity token, as it does for every other IRSA role in the kit.
 
-## 6. Step 17: a read-only ClickHouse user (`gf-db`)
+## Step 17: a read-only ClickHouse user (`gf-db`)
 
 ```bash
 scripts/play.sh --tags gf-db
@@ -177,9 +177,9 @@ ok: [localhost] => {
 }
 ```
 
-The last line of the report shows the underlying playbook call. Section 13 gives the `scripts/play.sh` form to use.
+The last line of the report shows the underlying playbook call. [Operate it: tear it down](#operate-it-tear-it-down) gives the `scripts/play.sh` form to use.
 
-## 7. Step 18: Grafana itself (`gf-app`)
+## Step 18: Grafana itself (`gf-app`)
 
 ```bash
 scripts/play.sh --tags gf-app
@@ -189,7 +189,7 @@ Order matters the same way it does for Langfuse. `GF_SERVER_ROOT_URL` is baked i
 
 ### The plugin initContainers, and the shell they need
 
-The plugin cannot be baked into the image, and an airgapped cluster is not meant to fetch it from `grafana.com` (section 2). Two chained initContainers load it on every pod start:
+The plugin cannot be baked into the image, and an airgapped cluster is not meant to fetch it from `grafana.com` ([Two things Grafana needs](#two-things-grafana-needs-that-langfuse-did-not)). Two chained initContainers load it on every pod start:
 
 1. **`gf-plugin-presign`** (the `awscli` image) computes a short-lived presigned URL for the one S3 key Step 16 mirrored. The URL expires after five minutes. It is a purely local SigV4 signature under IRSA, with no `ListBucket` call, and the container writes it to a small shared `emptyDir`.
 2. **`gf-plugin-install`** (the `grafana` image) runs `grafana cli --pluginUrl "$(cat ...)" plugins install grafana-clickhouse-datasource <version>`. It fetches that URL and unzips it with Grafana's own Go zip handling. `--pluginUrl` uses a plain Go `http.Client`, so it needs a real HTTP(S) URL. That is why the presign-and-relay step exists, instead of a shared volume holding the raw zip.
@@ -230,21 +230,21 @@ smoke test: scripts/grafana-smoke.sh   (checks the datasource health and a live 
 teardown:   ansible-playbook deploy.yml --tags gf-app -e grafana_state=absent   (keeps the ClickHouse user; --tags gf-db -e grafana_db_state=absent purges it)
 ```
 
-The `teardown` line shows the underlying playbook call. Section 13 gives the `scripts/play.sh` form to use.
+The `teardown` line shows the underlying playbook call. [Operate it: tear it down](#operate-it-tear-it-down) gives the `scripts/play.sh` form to use.
 
 Before the step reports, the role also asserts that every container in the pod, both initContainers included, pulled its image from your own ECR registry.
 
-## 8. Reaching it from a browser
+## Reaching it from a browser
 
 The default exposure is an **internal** NLB. You have the same three options that [Part 6](part-6-langfuse.md) gives Langfuse:
 
 1. A VPN or peering into the VPC. The URL in the report works as printed.
 2. `type: none`, then `kubectl port-forward -n grafana svc/grafana 3000:3000` and open `http://localhost:3000`. The local port must be exactly 3000, because `GF_SERVER_ROOT_URL` is set to that address in this mode.
-3. `type: public` with `allowed_cidrs` set to your own egress CIDR. The default is plain HTTP, so turn on `grafana.load_balancer.tls` (section 9) before you expose it this way. `0.0.0.0/0` needs `-e allow_open_internet=true`, as elsewhere in the kit.
+3. `type: public` with `allowed_cidrs` set to your own egress CIDR. The default is plain HTTP, so turn on `grafana.load_balancer.tls` ([TLS at the load balancer](#tls-at-the-load-balancer)) before you expose it this way. `0.0.0.0/0` needs `-e allow_open_internet=true`, as elsewhere in the kit.
 
-Log in as `admin` with the password in `state/grafana-admin-password`. The kit is built around the `internal` type; see section 10.
+Log in as `admin` with the password in `state/grafana-admin-password`. The kit is built around the `internal` type; see [Operate it: check that it works](#operate-it-check-that-it-works).
 
-## 9. TLS at the load balancer
+## TLS at the load balancer
 
 The mechanism is the same as Langfuse's, which [Part 6](part-6-langfuse.md) explains in full. Plain HTTP is the default because the NLB is a TCP pass-through with no domain behind it. To terminate TLS at the NLB, set:
 
@@ -262,7 +262,7 @@ grafana:
 
 Grafana with `grafana.load_balancer.tls: true` uses the same code as the Langfuse TLS path, with an `internal` load balancer. See [Scope and boundaries](limitations.md).
 
-## 10. Operate it: check that it works
+## Operate it: check that it works
 
 ```bash
 scripts/grafana-smoke.sh
@@ -290,7 +290,7 @@ The last query appears only when Langfuse is on, and its count is `0` until Lang
 
 **What the smoke test covers, and what it does not.** It checks that the datasource is healthy and that live queries return data. It does not check dashboards, alerting, or user management. The `type: public` load balancer and `grafana.load_balancer.tls: true` are outside what the smoke test checks. [Scope and boundaries](limitations.md) collects these boundaries for the whole kit.
 
-## 11. Idempotency and check mode
+## Idempotency and check mode
 
 To re-run all three steps over a deployed stack:
 
@@ -300,11 +300,11 @@ scripts/play.sh --tags gf-storage,gf-db,gf-app
 
 A second run reports `changed=0` for the bucket, the IRSA stack, and the per-database grants, because they converge on the state that already exists. The Helm release also reports `changed=0`, because its values are identical.
 
-## 12. Cost
+## Cost
 
 Grafana adds no instances. Like Langfuse, it lands on the operator node group that Step 5 already pays for, and it has no PVC, so there is no volume charge. Its own cost is one more NLB, about $0.02 per hour, matching Langfuse's, plus the plugin bucket, which holds one small zip and costs effectively nothing. The floor with the nodes down stays at about $0.15 per hour. A default `down.sh` keeps the Grafana IRSA stack and the bucket the way it keeps Langfuse's and ClickHouse's, and neither costs anything while idle.
 
-## 13. Operate it: tear it down
+## Operate it: tear it down
 
 Grafana holds no data of its own that depends on the ClickHouse cluster being reachable, because it has no PVC and no database. Its ordering constraint is looser than Langfuse's. Both still have to finish before the load balancer, the cluster, and the node groups go. `down.sh` keeps `lf-app` first in its default plan, which matches the order the steps install in, and removes Grafana second:
 
@@ -322,14 +322,14 @@ To remove one layer and keep the rest:
 ```bash
 scripts/play.sh --tags gf-app -e grafana_state=absent            # NLB Service, (with tls) the ACM certificate, release, namespace. Keeps the ClickHouse user
 scripts/play.sh --tags gf-db -e grafana_db_state=absent          # DROP USER IF EXISTS grafana. No database to drop -- one was never created
-scripts/play.sh --tags gf-storage -e grafana_storage_state=absent  # the IRSA stack AND the plugin-mirror bucket -- both deleted (section 5)
+scripts/play.sh --tags gf-storage -e grafana_storage_state=absent  # the IRSA stack AND the plugin-mirror bucket -- both deleted ([Step 16](#step-16-a-bucket-and-an-irsa-role-gf-storage))
 ```
 
 **Unlike every other bucket in this kit, `gf-storage`'s teardown deletes the bucket.** The plugin zip can be downloaded from `grafana.com` again at any time, so there is nothing to lose. Bringing the step back creates both the bucket and a fresh IRSA stack (a new role-name suffix, the same trust policy). No `state/` file is needed, because the plugin bucket carries no secrets.
 
-The `state/` files (section 14) survive a default teardown. A `scripts/down.sh` followed by `scripts/up.sh --from nodes` reuses them, so the rebuilt Grafana accepts the same admin login and the same ClickHouse credential. The [limitations page](limitations.md) notes this behavior for Langfuse as well.
+The `state/` files ([What exists once it is up](#what-exists-once-it-is-up)) survive a default teardown. A `scripts/down.sh` followed by `scripts/up.sh --from nodes` reuses them, so the rebuilt Grafana accepts the same admin login and the same ClickHouse credential. The [limitations page](limitations.md) notes this behavior for Langfuse as well.
 
-## 14. What exists once it is up
+## What exists once it is up
 
 ```
 namespace grafana
@@ -354,10 +354,10 @@ In `state/`, next to the ClickHouse and Langfuse files:
 
 If you lose `state/`, you lose these files. Protect and back it up as you would any secret store.
 
-## 15. Troubleshooting
+## Troubleshooting
 
 **Step 2 stops with `An artifact sources from dhi.io but the DHI username/token are empty or still a <...> placeholder`.**
-Cause: Grafana is on, and neither `dhi.username` and `dhi.token` in `state/deploy-vars.yml` nor `DHI_USERNAME` and `DHI_TOKEN` in the environment is set. Fix: set them as [Part 1, section 3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows, using an account entitled to the DHI catalog, then re-run `scripts/up.sh`.
+Cause: Grafana is on, and neither `dhi.username` and `dhi.token` in `state/deploy-vars.yml` nor `DHI_USERNAME` and `DHI_TOKEN` in the environment is set. Fix: set them as [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows, using an account entitled to the DHI catalog, then re-run `scripts/up.sh`.
 
 **The Grafana pod stays in `Init` and an initContainer fails before it does any work.**
 Cause: an initContainer image has no shell. The hardened runtime tags of both DHI images ship none, and the initContainers start with `sh -c`. Fix: keep `versions.grafana_app_dev` and `versions.awscli_app` on `-dev` tags, and keep `versions.grafana_app` on the runtime tag for the main container. To read an initContainer's log, run `kubectl logs -n grafana deploy/grafana -c gf-plugin-presign` or `-c gf-plugin-install`. The role prints the same tails when the rollout fails.
@@ -369,15 +369,15 @@ Cause: the container's default `HOME` is unwritable for uid 472, and `grafana cl
 Cause: the load balancer is `internal` and does not answer from your machine, so the script falls back to a port-forward on the fixed local port 3000, and another process holds that port. Fix: stop that process, or set `GRAFANA_URL` to an address you can reach (a VPN alias or an SSH tunnel).
 
 **The smoke test warns `does not answer /api/health from here (VPN? security group?)`.**
-Cause: an `internal` load balancer answers only from inside the VPC or over a VPN. Fix: none is needed for the script, which carries on through a port-forward. To use the UI from your machine, use the port-forward or VPN options in section 8.
+Cause: an `internal` load balancer answers only from inside the VPC or over a VPN. Fix: none is needed for the script, which carries on through a port-forward. To use the UI from your machine, use the port-forward or VPN options in [Reaching it from a browser](#reaching-it-from-a-browser).
 
 **A database you created does not appear in Grafana, or a query returns an access error.**
 Cause: the `grafana` user's read access is granted per database, and a database created after Step 17 ran has no grant yet. Fix: run `scripts/play.sh --tags gf-db`. The step is idempotent and picks up every current database.
 
 **A manual `GRANT SELECT ON *.* TO grafana` fails.**
-Cause: the operator's `default_role` has `SELECT` on `system.zookeeper` revoked, and a wildcard grant needs grant option on every object it matches (section 6). Fix: do not grant by wildcard. Run `scripts/play.sh --tags gf-db` and let the role build the grants from the parts.
+Cause: the operator's `default_role` has `SELECT` on `system.zookeeper` revoked, and a wildcard grant needs grant option on every object it matches ([Step 17](#step-17-a-read-only-clickhouse-user-gf-db)). Fix: do not grant by wildcard. Run `scripts/play.sh --tags gf-db` and let the role build the grants from the parts.
 
-## 16. Check yourself
+## Check yourself
 
 Run these in order after `source scripts/env.sh`. Each shows a command and what you should see, and the checks double as exercises for a workshop. Checks 2 to 7 assume `grafana.enabled: true` and a finished `scripts/up.sh`.
 

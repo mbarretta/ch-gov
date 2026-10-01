@@ -809,7 +809,7 @@ langfuse:
     # of this value -- the single fips switch is meant to be the whole
     # decision. load_balancer.type: none has no NLB at all, so
     # there is nothing for either switch to terminate TLS on. See
-    # docs/part-6-langfuse.md section 9. Going back to false after a TLS deploy: the clean
+    # docs/part-6-langfuse.md, "TLS at the load balancer". Going back to false after a TLS deploy: the clean
     # way is to tear down first (-e langfuse_state=absent) and re-run. The
     # by-hand route is removing the three aws-load-balancer-ssl-* annotations
     # from Service langfuse-lb AND switching the listener back yourself:
@@ -818,7 +818,7 @@ langfuse:
     # when the protocol changes to TCP). Both steps are needed: a plain re-run
     # keeps annotations it did not apply, and the cloud controller cannot
     # change a listener's protocol, so the listener stays TLS until you change
-    # it. docs/part-6-langfuse.md section 9 has the details.
+    # it. The "TLS at the load balancer" section of docs/part-6-langfuse.md has the details.
     tls: false
     # Validity of the self-signed certificate in days. It is regenerated only
     # when missing or when the NLB hostname changes, not on expiry.

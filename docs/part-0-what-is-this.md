@@ -11,11 +11,11 @@ This is the page to read first if you have never touched ClickHouse and someone 
 Two words come up constantly, so here is what they mean in this repository:
 
 - **Deploy** means building everything the software needs and then installing it. You create a private network, a Kubernetes cluster, storage and permissions in AWS, then install ClickHouse (and, if you choose, Langfuse, Grafana and single sign-on) on top and check that it works. `scripts/up.sh` does all of it.
-- **Operate** means what you do after that to keep the system healthy and affordable. You connect to it, look at its state, run its health checks, stop the machines when you are not using them, start them again, and tear everything down when you are finished. Section 8 lists exactly what the kit gives you for that. The kit is sized for learning and workshops, not production, so it is a place to learn these tasks, not a production runbook.
+- **Operate** means what you do after that to keep the system healthy and affordable. You connect to it, look at its state, run its health checks, stop the machines when you are not using them, start them again, and tear everything down when you are finished. [Operating it](#operating-it) lists exactly what the kit gives you for that. The kit is sized for learning and workshops, not production, so it is a place to learn these tasks, not a production runbook.
 
 ---
 
-## 1. What ClickHouse is, in one minute
+## What ClickHouse is, in one minute
 
 ClickHouse is a database built for **analytics**: counting, summing and filtering across billions of rows in well under a second. It is not the database you put behind a shopping cart. It is the one you point at logs, metrics, events, telemetry and audit trails, then ask "how many, by hour, by region, over the last year".
 
@@ -28,7 +28,7 @@ You talk to it in **SQL**, over two doors:
 | Native protocol | 9000 | `clickhouse-client`, the official drivers |
 | HTTP | 8123 | `curl`, JDBC/ODBC, BI tools, anything that can speak HTTP |
 
-## 2. What ClickHouse Government and Langfuse are
+## What ClickHouse Government and Langfuse are
 
 ### ClickHouse Government
 
@@ -78,7 +78,7 @@ Grafana is a dashboarding tool. It is also optional, and Part 8 covers it. In th
 
 Single sign-on is the third optional capability: people sign in to Langfuse and to ClickHouse as themselves, through an Amazon Cognito user pool, instead of sharing the generated passwords. Part 9 covers it. Service connections, such as Langfuse's own connection to ClickHouse, keep their passwords.
 
-## 3. The parts, and what each one is for
+## The parts, and what each one is for
 
 The ClickHouse cluster is a handful of cooperating pieces:
 
@@ -113,7 +113,7 @@ The ClickHouse cluster is a handful of cooperating pieces:
 
 **The load balancer.** An AWS Network Load Balancer in front of the three servers, so applications get one stable address. It is optional. Without it you reach the cluster only from inside Kubernetes or through a port-forward.
 
-## 4. What it needs in order to work
+## What it needs in order to work
 
 Before any ClickHouse software runs, this has to exist:
 
@@ -131,7 +131,7 @@ Before any ClickHouse software runs, this has to exist:
 
 Nothing here is exotic. It is a normal EKS build with two deliberate oddities: the server nodes carry a local SSD that is mounted and formatted at boot, and the node groups are **tainted** (marked so that only pods that ask for them can land there) so that only ClickHouse pods use the expensive machines.
 
-## 5. How a deployment goes, in general
+## How a deployment goes, in general
 
 ClickHouse publishes a tutorial for this deployment, and this project follows its steps in order. The kit numbers them 1 to 12 and adds optional Steps 13 to 18 for Langfuse and Grafana, and optional Steps 6b and 11b for single sign-on. In plain terms:
 
@@ -162,29 +162,29 @@ Steps 1–5 are generic AWS. Steps 6–8 are preparation that only ClickHouse ca
 
 ### Optional: Langfuse on top
 
-Steps 13–15 are off by default and change nothing when they are off. Switched on (`langfuse.enabled: true`), they install Langfuse on the same machines, using the ClickHouse cluster you just built as the place it keeps its traces. One script, `scripts/langfuse-smoke.sh`, posts a trace to Langfuse and reads it back out of ClickHouse, which shows the two working together. The steps, the two places Chainguard's images differ from the ones the Langfuse chart expects, the costs and the teardown rules are in **Part 6**. Langfuse's web address is plain HTTP unless you also set `langfuse.load_balancer.tls: true`, which has its load balancer encrypt the connection with a certificate the deployment makes itself. Part 6 §9 says what that does and does not give you.
+Steps 13–15 are off by default and change nothing when they are off. Switched on (`langfuse.enabled: true`), they install Langfuse on the same machines, using the ClickHouse cluster you just built as the place it keeps its traces. One script, `scripts/langfuse-smoke.sh`, posts a trace to Langfuse and reads it back out of ClickHouse, which shows the two working together. The steps, the two places Chainguard's images differ from the ones the Langfuse chart expects, the costs and the teardown rules are in **Part 6**. Langfuse's web address is plain HTTP unless you also set `langfuse.load_balancer.tls: true`, which has its load balancer encrypt the connection with a certificate the deployment makes itself. [Part 6, TLS at the load balancer](part-6-langfuse.md#tls-at-the-load-balancer) says what that does and does not give you.
 
 ### Optional: Grafana on top
 
-Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1 §3b](part-1-prerequisites.md#3b-persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
+Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
 
 ### Optional: single sign-on
 
 Steps 6b and 11b are also off by default, and independent of Langfuse and Grafana. Switched on (`sso.enabled: true`), Step 6b builds an Amazon Cognito user pool, which can also federate to an external SAML identity provider. Langfuse can then offer Cognito sign-in (`sso.langfuse.enabled`), and ClickHouse can accept a Cognito token as a login (`sso.clickhouse_jwt.enabled`), with Step 11b creating the roles that Cognito group names map to. `scripts/ch-client.sh --sso` logs you in to ClickHouse as yourself, and `scripts/sso-smoke.sh` checks the setup. The architecture, the variables, the server's JWT caveats, the reason service users keep their passwords and the GovCloud notes are in **Part 9**.
 
-## 6. How to deploy it with this project
+## How to deploy it with this project
 
 Everything above is automated as an **Ansible playbook** with one role per step, and shell scripts that run it in the right order. You do not need to know Ansible to use it.
 
-### 6.1 One-time setup on your machine
+### One-time setup on your machine
 
 ```bash
 scripts/part1-setup.sh
 ```
 
-This installs and version-checks the tools, creates a project-local Python virtual environment for Ansible, and installs the Ansible collections and the preflight plugin. It is safe to rerun. On macOS it installs missing tools with Homebrew. On Linux you install the tools first, and Part 1 §2 shows how. The first script you run also creates `state/deploy-vars.yml`, the file where your account details go.
+This installs and version-checks the tools, creates a project-local Python virtual environment for Ansible, and installs the Ansible collections and the preflight plugin. It is safe to rerun. On macOS it installs missing tools with Homebrew. On Linux you install the tools first, and [Part 1, The seven tools](part-1-prerequisites.md#the-seven-tools-and-what-each-one-is-for) shows how. The first script you run also creates `state/deploy-vars.yml`, the file where your account details go.
 
-### 6.2 Give the kit AWS access
+### Give the kit AWS access
 
 The kit needs two AWS profiles: `target_profile` (your account, default name `ch-gov-target`) and `source_ecr_profile` (the role chain that reads ClickHouse's registry, default name `ch-gov-ecr-pull`). The setting `aws.auth_mode` decides who creates those two profiles:
 
@@ -200,9 +200,9 @@ source scripts/env.sh                       # points the AWS CLI at the repo's c
 aws sso login --profile "$AWS_PROFILE"
 ```
 
-Tokens last hours, not days. Every script checks your credentials first and prints the exact command to run when they have expired. Part 1 §3 covers both modes, the exact keys, and the AWS permissions the deploying identity needs.
+Tokens last hours, not days. Every script checks your credentials first and prints the exact command to run when they have expired. [Part 1, AWS access](part-1-prerequisites.md#aws-access-one-setting-two-paths) covers both modes, the exact keys, and the AWS permissions the deploying identity needs.
 
-### 6.3 Look at the one config file
+### Look at the one config file
 
 `ansible/group_vars/all.yml` holds the defaults for everything. Put your own values in `state/deploy-vars.yml`, which overrides only the keys you set. These are the values you are most likely to touch:
 
@@ -221,7 +221,7 @@ Tokens last hours, not days. Every script checks your credentials first and prin
 
 Every value in `all.yml` has a comment explaining why it is what it is. Nothing secret is in that file. Passwords are generated on first run and written to `state/`, which is gitignored.
 
-### 6.4 Bring it up
+### Bring it up
 
 ```bash
 scripts/up.sh
@@ -247,7 +247,7 @@ scripts/up.sh --yes            # no prompt
 >                                      #   (+ lf-storage lf-db lf-app when Langfuse is on, see Part 6)
 > ```
 
-## 7. What exists once it is up
+## What exists once it is up
 
 ### In AWS
 
@@ -291,15 +291,15 @@ it as fixed once deployed.
 | `clickhouse-admin-password` | The `default` user's password. Generated on first run |
 | `clickhouse-prometheus-password` | For the metrics endpoint |
 | `preflight/` | The rendered preflight spec and the last report |
-| `deploy-vars.yml` | Your account IDs and other overrides. See Part 1 §3b |
+| `deploy-vars.yml` | Your account IDs and other overrides. See [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) |
 | `skopeo-auth.json` | Short-lived registry credentials from Step 2 |
 
 Lose `state/` and you lose the admin password. Back it up somewhere
 appropriate if the cluster matters.
 
-## 8. Operating it
+## Operating it
 
-To *operate* the system, you connect to it, look at its state, check its health, control its cost, and tear it down. The kit gives you these tools for that: `scripts/ch-client.sh` (an SQL session, section 9), `kubectl` with the kubeconfig in `state/`, the preflight and verify checks below, `scripts/langfuse-smoke.sh`, `scripts/grafana-smoke.sh` and `scripts/sso-smoke.sh` for the optional layers, and `scripts/up.sh` and `scripts/down.sh` to start and stop. It does not include procedures beyond these.
+To *operate* the system, you connect to it, look at its state, check its health, control its cost, and tear it down. The kit gives you these tools for that: `scripts/ch-client.sh` (an SQL session, [Talking to ClickHouse](#talking-to-clickhouse)), `kubectl` with the kubeconfig in `state/`, the preflight and verify checks below, `scripts/langfuse-smoke.sh`, `scripts/grafana-smoke.sh` and `scripts/sso-smoke.sh` for the optional layers, and `scripts/up.sh` and `scripts/down.sh` to start and stop. It does not include procedures beyond these.
 
 ### The meter
 
@@ -335,16 +335,16 @@ Grafana too), and the script handles them:
   in the ClickHouse cluster and its two disks are EBS volumes, so removing it
   needs the operator and the EBS driver alive, so the cluster and the nodes
   must still be up. `down.sh` runs it first, only when it exists, and even if you
-  have already switched `langfuse.enabled` back to `false`. Part 6 §13 has
+  have already switched `langfuse.enabled` back to `false`. [Part 6, Teardown order](part-6-langfuse.md#teardown-order-langfuse-before-clickhouse) has
   the details, including the separate command that purges its data.
 - Grafana (optional Steps 16–18) goes **after Langfuse, still before
   ClickHouse**. It has no PVC and no data dependency of its own, so its
   ordering constraint is looser than Langfuse's. `down.sh`'s default plan
   still removes both application layers before the load balancer, the
   cluster and the node groups, whether or not `grafana.enabled` is still
-  `true`. Part 8 §13 has the details, including the one bucket this project
+  `true`. [Part 8, Operate it: tear it down](part-8-grafana.md#operate-it-tear-it-down) has the details, including the one bucket this project
   actually deletes on teardown rather than keeping.
-- The Cognito stack (optional Step 6b) is removed by `down.sh` after Langfuse, when one exists. The pool and its users go with it. Part 9 §12 has the details.
+- The Cognito stack (optional Step 6b) is removed by `down.sh` after Langfuse, when one exists. The pool and its users go with it. [Part 9, Tear it down](part-9-sso.md#tear-it-down) has the details.
 
 ### Up again
 
@@ -401,7 +401,7 @@ Two things the scripts deliberately never delete, and you must:
   one cluster's objects by their unique prefix and confirms before it does.
 - **The ECR images.** Cheap to keep, slow to recopy.
 
-## 9. Talking to ClickHouse
+## Talking to ClickHouse
 
 ### From your laptop, the direct way
 
@@ -497,7 +497,7 @@ anyone noticing.
 | **Preflight** | ClickHouse's checklist run against the live cluster before you trust it |
 | **FIPS** | The US federal cryptography standard. ClickHouse states that the Government build uses FIPS-validated libraries (a claim about the product, not one this kit certifies), which forces x86_64 |
 | **Langfuse** | An open-source tool that records what an application asked a language model and what it answered. Optional, and it stores its traces in ClickHouse |
-| **Deploy / operate** | Deploy: build the infrastructure and install the software (`scripts/up.sh`). Operate: connect, check health, stop, restart and tear down (section 8) |
+| **Deploy / operate** | Deploy: build the infrastructure and install the software (`scripts/up.sh`). Operate: connect, check health, stop, restart and tear down ([Operating it](#operating-it)) |
 | **Cognito / JWT** | Amazon Cognito is AWS's user-sign-in service. A JWT is the signed token it issues after a login. With single sign-on on, Langfuse accepts the login and ClickHouse accepts the token, and Cognito group names decide which ClickHouse rights a person gets. Optional, and covered in Part 9 |
 | **DHI** | Docker Hardened Images, a paid catalog that needs a login. Only Grafana's images come from it |
 | **`auth_mode`** | The `aws.auth_mode` setting: `sso` renders a project-local AWS config, `profile` uses a profile you already have |
@@ -505,15 +505,15 @@ anyone noticing.
 
 ## Check your understanding
 
-You can answer each of these from this Part. If you cannot, reread the section named in brackets before you move on.
+You can answer each of these from this Part. If you cannot, reread the section linked after the question before you move on.
 
-1. Why can you delete a ClickHouse server pod without losing data? [section 3]
-2. Which component holds the only persistent disk in the ClickHouse cluster, and what does it store? [section 3]
-3. What does the operator do that you would otherwise do by hand? [section 3]
-4. Which steps of the deployment start the meaningful AWS cost, and what does it cost to keep the cluster ready to come back? [sections 5 and 8]
-5. Why must the load balancer go before the cluster or EKS at teardown? [section 8]
-6. What does `aws.auth_mode` choose between, and which mode fits when you already have a working AWS profile? [section 6.2 and the glossary]
-7. Which two things do the scripts never delete, so you must? [section 8]
+1. Why can you delete a ClickHouse server pod without losing data? See [The parts](#the-parts-and-what-each-one-is-for).
+2. Which component holds the only persistent disk in the ClickHouse cluster, and what does it store? See [The parts](#the-parts-and-what-each-one-is-for).
+3. What does the operator do that you would otherwise do by hand? See [The parts](#the-parts-and-what-each-one-is-for).
+4. Which steps of the deployment start the meaningful AWS cost, and what does it cost to keep the cluster ready to come back? See [How a deployment goes](#how-a-deployment-goes-in-general) and [Operating it](#operating-it).
+5. Why must the load balancer go before the cluster or EKS at teardown? See [Operating it](#operating-it).
+6. What does `aws.auth_mode` choose between, and which mode fits when you already have a working AWS profile? See [Give the kit AWS access](#give-the-kit-aws-access) and the [Glossary](#glossary).
+7. Which two things do the scripts never delete, so you must? See [Operating it](#operating-it).
 
 **Where to go next:** Part 1 for tools and AWS access, Parts 2–3 for the
 infrastructure, Part 4 for the cluster itself, Part 5 for the load balancer.

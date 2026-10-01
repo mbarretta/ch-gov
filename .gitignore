@@ -31,3 +31,6 @@ preflightbundle-*.tar.gz
 
 # local-only notes -- not tracked
 internal/
+
+# macOS
+.DS_Store

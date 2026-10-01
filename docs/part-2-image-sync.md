@@ -11,11 +11,11 @@
 
 The upstream tutorial for this deployment is [deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). The playbook implements its Steps 1 to 5 in the roles named in each section below, and this Part explains the reasoning behind them.
 
-Three placeholders appear in this Part, and each is a value you set in `state/deploy-vars.yml` (Part 1, section 3b). `<YOUR_ACCOUNT_ID>` is your AWS account (`aws.target_account_id`). `<SOURCE_ECR_ACCOUNT_ID>` is the account that hosts ClickHouse's source registry (`aws.source_ecr_account_id`), which ClickHouse gives you. `<region>` is your AWS Region (`aws.target_region`, default `us-east-1`).
+Three placeholders appear in this Part, and each is a value you set in `state/deploy-vars.yml` ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)). `<YOUR_ACCOUNT_ID>` is your AWS account (`aws.target_account_id`). `<SOURCE_ECR_ACCOUNT_ID>` is the account that hosts ClickHouse's source registry (`aws.source_ecr_account_id`), which ClickHouse gives you. `<region>` is your AWS Region (`aws.target_region`, default `us-east-1`).
 
 ## Advanced: run individual steps
 
-`scripts/play.sh` runs the playbook with your environment set up (Part 1, section 5). Pass it one tag to run one step. These are the tags for this Part:
+`scripts/play.sh` runs the playbook with your environment set up ([Part 1, Running the playbook](part-1-prerequisites.md#running-the-playbook-scriptsplaysh)). Pass it one tag to run one step. These are the tags for this Part:
 
 | Step | Tag | What it does | Roles |
 |---|---|---|---|
@@ -65,7 +65,7 @@ The `ecr_pull_role` role runs first, before any image work, and it is read-only.
 
 Failing here is deliberate. A missing or mis-trusted role stops the run with a plain message at the start, instead of surfacing as a `skopeo` error several steps later.
 
-The check proves you can assume the role. It does not prove the role can read the source repositories. The first real read happens in Step 2, and `scripts/part1-setup.sh` also checks it (Part 1, section 6).
+The check proves you can assume the role. It does not prove the role can read the source repositories. The first real read happens in Step 2, and `scripts/part1-setup.sh` also checks it ([Part 1, Check your setup](part-1-prerequisites.md#check-your-setup)).
 
 ### Verify it yourself
 
@@ -170,7 +170,7 @@ Only the three ClickHouse **container images** have `-fips` variants. The Helm c
 The switch changes more than tags:
 
 - **x86_64 nodes only.** ClickHouse validates its FIPS crypto on x86_64 and not on ARM64, so the ARM instance types are out. `node_ami_type` in `ansible/group_vars/all.yml` selects `AL2023_x86_64_STANDARD` under `fips: true`.
-- **TLS-only on port 9440.** [Part 7 §4](part-7-fips-hardening.md#4-in-transit-tls-clickhouse-native-langfuse-to-clickhouse-and-the-langfuse-nlb) wires `server.openSSL` and `keeper.openSSL` so ClickHouse's native protocol moves to port 9440 under `fips: true`, with the certificate chain verified.
+- **TLS-only on port 9440.** [Part 7, In-transit TLS](part-7-fips-hardening.md#in-transit-tls-clickhouse-native-langfuse-to-clickhouse-and-the-langfuse-nlb) wires `server.openSSL` and `keeper.openSSL` so ClickHouse's native protocol moves to port 9440 under `fips: true`, with the certificate chain verified.
 - **RSA-3072 or larger certificates per cluster.** The same section adds `tls_rsa_bits` (3072 under `fips: true`) and generates the CA and leaf certificate at that size.
 
 One related rule does not depend on `fips`: `clickhouse.bucket_name` never contains a period, so virtual-hosted-style S3 requests never break on TLS certificate matching.
@@ -181,7 +181,7 @@ One related rule does not depend on `fips`: `clickhouse.bucket_name` never conta
 
 **Where the AWS config comes from.** In SSO mode the playbook points `AWS_CONFIG_FILE` at the repo's `.aws/config`, so it works whether or not you sourced `scripts/env.sh`. In profile mode it leaves your AWS config alone.
 
-**Why there is a virtual environment.** The `community.aws` modules import `boto3` inside whichever Python runs the module. `.venv/` at the repo root holds it, and `ansible_python_interpreter` in `group_vars/all.yml` points there. `scripts/part1-setup.sh` creates it (Part 1, section 2).
+**Why there is a virtual environment.** The `community.aws` modules import `boto3` inside whichever Python runs the module. `.venv/` at the repo root holds it, and `ansible_python_interpreter` in `group_vars/all.yml` points there. `scripts/part1-setup.sh` creates it ([Part 1, The seven tools](part-1-prerequisites.md#the-seven-tools-and-what-each-one-is-for)).
 
 **Both roles are idempotent and resumable.** `image_sync` checks each target tag before it copies, so an interrupted run resumes instead of recopying gigabytes. Re-running the step reports no changes:
 
@@ -297,7 +297,7 @@ Do not inherit a version from an old document. Ask AWS:
 aws eks describe-cluster-versions --profile "$AWS_PROFILE"
 ```
 
-The kit pins `infrastructure.eks_version` in `ansible/group_vars/all.yml`. The output shows each version's status and the date its standard support ends, so use it to pick a version that will stay supported for as long as you plan to use the cluster. Pick a version that keeps your `kubectl` within one minor version of the cluster, which is the supported skew ([Part 1 troubleshooting](part-1-prerequisites.md#7-troubleshooting) covers the warning).
+The kit pins `infrastructure.eks_version` in `ansible/group_vars/all.yml`. The output shows each version's status and the date its standard support ends, so use it to pick a version that will stay supported for as long as you plan to use the cluster. Pick a version that keeps your `kubectl` within one minor version of the cluster, which is the supported skew ([Part 1 troubleshooting](part-1-prerequisites.md#troubleshooting) covers the warning).
 
 ### Access: EKS access entries, not aws-auth
 
@@ -322,7 +322,7 @@ scripts/play.sh --tags eks -e eks_public_cidrs=203.0.113.4/32
 
 The control plane sends its `api`, `audit` and `authenticator` logs to CloudWatch. The role sets the log group to expire after `infrastructure.eks_log_retention_days` (default 30), because EKS creates the group with no expiry and it outlives the cluster.
 
-With `fips: true`, the cluster also encrypts Kubernetes Secrets in etcd with a customer-managed KMS key. EKS never lets you remove or repoint that key on an existing cluster, so the role refuses to add it to a cluster that already exists unless you pass `-e confirm_encryption_config=true`. [Part 7 §3](part-7-fips-hardening.md#3-eks-secrets-envelope-encryption) explains it.
+With `fips: true`, the cluster also encrypts Kubernetes Secrets in etcd with a customer-managed KMS key. EKS never lets you remove or repoint that key on an existing cluster, so the role refuses to add it to a cluster that already exists unless you pass `-e confirm_encryption_config=true`. [Part 7, EKS Secrets envelope encryption](part-7-fips-hardening.md#eks-secrets-envelope-encryption) explains it.
 
 ### IRSA: why there is a separate OIDC step
 
@@ -735,7 +735,7 @@ source scripts/env.sh
 
 ## Troubleshooting
 
-Each entry gives the symptom, the cause and the fix. Three errors that can appear in Steps 1 and 2 have their canonical entries in [Part 1's Troubleshooting](part-1-prerequisites.md#7-troubleshooting): a pull profile that could not authenticate or is not the ECR pull role, a `resolves to account X, but group_vars says Y` mismatch, and a copy that fails because a tag does not exist. Part 1 also covers the tools and the authentication path.
+Each entry gives the symptom, the cause and the fix. Three errors that can appear in Steps 1 and 2 have their canonical entries in [Part 1's Troubleshooting](part-1-prerequisites.md#troubleshooting): a pull profile that could not authenticate or is not the ECR pull role, a `resolves to account X, but group_vars says Y` mismatch, and a copy that fails because a tag does not exist. Part 1 also covers the tools and the authentication path.
 
 **`RepositoryNotFoundException` during the copy (Step 2)**
 
@@ -765,7 +765,7 @@ Each entry gives the symptom, the cause and the fix. Three errors that can appea
 **`Refuse to change EncryptionConfig on an existing cluster without explicit confirmation` (Step 4)**
 
 - *Cause:* you set `fips: true` on a cluster that already exists. The customer-managed KMS key for Secrets is a one-way change, so the role asks you to confirm it.
-- *Fix:* if you want it, re-run with `-e confirm_encryption_config=true`. If you are unsure, tear the cluster down and start the FIPS build from scratch. [Part 7 §3](part-7-fips-hardening.md#3-eks-secrets-envelope-encryption) explains why.
+- *Fix:* if you want it, re-run with `-e confirm_encryption_config=true`. If you are unsure, tear the cluster down and start the FIPS build from scratch. [Part 7, EKS Secrets envelope encryption](part-7-fips-hardening.md#eks-secrets-envelope-encryption) explains why.
 
 **`kubectl` times out after you set `eks_public_endpoint=false` (Step 4)**
 

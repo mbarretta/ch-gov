@@ -20,7 +20,7 @@ Parts 2 and 3 built a Kubernetes cluster that knows what a ClickHouseCluster *is
 > scripts/play.sh --tags verify       # Step 11
 > ```
 >
-> Section 5 of [Part 1](part-1-prerequisites.md) explains what `play.sh` sets up for you.
+> [Part 1, Running the playbook](part-1-prerequisites.md#running-the-playbook-scriptsplaysh) explains what `play.sh` sets up for you.
 
 ---
 
@@ -198,7 +198,7 @@ It then lists the pods, StatefulSets, Services and PVCs. You should see three Ke
 
 ### Teardown
 
-`scripts/down.sh` removes the cluster for you, in the right order, and Part 1 (section 5b) explains why the order matters. To remove only the cluster, use the `scripts/play.sh` form:
+`scripts/down.sh` removes the cluster for you, in the right order, and Part 1 ([The two scripts you will actually use](part-1-prerequisites.md#the-two-scripts-you-will-actually-use-upsh-and-downsh)) explains why the order matters. To remove only the cluster, use the `scripts/play.sh` form:
 
 ```bash
 scripts/play.sh --tags cluster -e cluster_state=absent

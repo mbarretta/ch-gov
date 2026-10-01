@@ -19,7 +19,7 @@ scripts/langfuse-smoke.sh         # post a trace, read it back from ClickHouse
 
 ---
 
-## 1. What Langfuse is, and how it uses ClickHouse
+## What Langfuse is, and how it uses ClickHouse
 
 Langfuse is an open-source observability server for applications that call language models. An application sends it *traces*, one per request. A trace is made of *spans* and *generations*, which are the individual model calls with their prompt, completion, token counts and latency. The application sends them over an SDK or plain OpenTelemetry. People then browse the traces in a web UI to see what the model was asked, what it said, what it cost and where the time went.
 
@@ -37,20 +37,20 @@ Traces are written once and never edited, and the questions people ask of them a
 Two facts about how Langfuse uses ClickHouse shape the install steps:
 
 - **Langfuse creates its own tables.** When the web pod starts, it runs a series of schema migrations against ClickHouse. It needs a database and a user with enough rights to create tables, which is what Step 14 provides.
-- **Langfuse 4.x stores every event as an OpenTelemetry span.** Each span becomes one row in `langfuse.events_core`. The older tables `traces`, `observations` and `scores` are still created by the migrations, but they stay empty. This is why the smoke test in section 10 reads `events_core`.
+- **Langfuse 4.x stores every event as an OpenTelemetry span.** Each span becomes one row in `langfuse.events_core`. The older tables `traces`, `observations` and `scores` are still created by the migrations, but they stay empty. This is why the smoke test in [The smoke test](#the-smoke-test) reads `events_core`.
 
-Langfuse runs its migrations `ON CLUSTER default`, so each table is created on every replica. On ClickHouse Government, tables declared as `ReplacingMergeTree` are realized as `SharedReplacingMergeTree`, the engine that keeps data in S3 and coordinates through Keeper. You can see this yourself once the install finishes (section 7).
+Langfuse runs its migrations `ON CLUSTER default`, so each table is created on every replica. On ClickHouse Government, tables declared as `ReplacingMergeTree` are realized as `SharedReplacingMergeTree`, the engine that keeps data in S3 and coordinates through Keeper. You can see this yourself once the install finishes ([Step 15](#step-15--langfuse-itself-lf-app)).
 
-## 2. From the Terraform module to this repo
+## From the Terraform module to this repo
 
 Langfuse publishes a reference deployment for AWS, `langfuse/langfuse-terraform-aws`. It installs the same Helm chart this project uses (chart `2.1.0`, app `4.25.0`), builds its own VPC and an EKS-on-Fargate cluster, and buys managed services for the stores. This kit keeps the *shape*: the same chart, the same value keys, `clickhouse.deploy: false` with an external ClickHouse, and S3 reached through an IAM role for the pod's service account (IRSA). It replaces each managed piece with something Parts 1–5 already built.
 
 | Terraform module | This kit | Why |
 |---|---|---|
-| Aurora Serverless v2 (PostgreSQL) | The chart's bundled PostgreSQL subchart, in-cluster, on Chainguard's `postgres` image, one 20Gi EBS volume | No new AWS service, and the image is already in the airgap hop. See the first workaround in section 7 |
-| ElastiCache (Redis) | The chart's bundled Valkey subchart, in-cluster, on Chainguard's `valkey` image, one 8Gi EBS volume | Same reasons. See the second workaround in section 7 |
+| Aurora Serverless v2 (PostgreSQL) | The chart's bundled PostgreSQL subchart, in-cluster, on Chainguard's `postgres` image, one 20Gi EBS volume | No new AWS service, and the image is already in the airgap hop. See the first workaround in [Step 15](#step-15--langfuse-itself-lf-app) |
+| ElastiCache (Redis) | The chart's bundled Valkey subchart, in-cluster, on Chainguard's `valkey` image, one 8Gi EBS volume | Same reasons. See the second workaround in [Step 15](#step-15--langfuse-itself-lf-app) |
 | EKS on Fargate | The **operator** node group from Step 5 | It is untainted and has the headroom (about 4.75 CPU and 9.5Gi requested in total), so there is no new node group |
-| ALB, ACM certificate and Route 53 record | An NLB from the built-in cloud controller. Plain HTTP by default, or TLS terminated at the NLB with a self-signed certificate that the role generates and imports into ACM (`langfuse.load_balancer.tls`, section 9). No domain either way | The same `none \| internal \| public` switch and the same source-range rules as Step 12 |
+| ALB, ACM certificate and Route 53 record | An NLB from the built-in cloud controller. Plain HTTP by default, or TLS terminated at the NLB with a self-signed certificate that the role generates and imports into ACM (`langfuse.load_balancer.tls`, [TLS at the load balancer](#tls-at-the-load-balancer)). No domain either way | The same `none \| internal \| public` switch and the same source-range rules as Step 12 |
 | `external_clickhouse` | Your ClickHouse cluster from Step 9, over its in-cluster `c-<cluster>-server-any` Service | This is the point of the exercise |
 | S3 bucket and IRSA | The same, with its own bucket and its own IRSA role (Step 13) | No access keys anywhere, as in Step 6 |
 | Images from `docker.langfuse.com` and `cgr.dev` | Mirrored into your ECR by Step 2 | The cluster pulls only from your account |
@@ -58,9 +58,9 @@ Langfuse publishes a reference deployment for AWS, `langfuse/langfuse-terraform-
 
 Nothing new is created at the AWS compute or edge layer: no node group, VPC, EKS cluster, ALB or DNS record. You get a certificate only if you turn on TLS, which imports one self-signed certificate into ACM. The one extra AWS resource that bills by the hour is the second NLB.
 
-## 3. The switch, and what it changes
+## The switch, and what it changes
 
-Everything hangs off one block in the configuration. Its defaults live in `ansible/group_vars/all.yml`, and your overrides go in `state/deploy-vars.yml`, which changes only the keys you set (Part 1 section 3b). The defaults are:
+Everything hangs off one block in the configuration. Its defaults live in `ansible/group_vars/all.yml`, and your overrides go in `state/deploy-vars.yml`, which changes only the keys you set ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)). The defaults are:
 
 ```yaml
 langfuse:
@@ -76,7 +76,7 @@ langfuse:
     allowed_cidrs: []
     port: 80                # 443 when tls is true, so the address carries no port
     cross_zone: true
-    tls: false              # true = the NLB terminates TLS with a self-signed certificate (section 9)
+    tls: false              # true = the NLB terminates TLS with a self-signed certificate ([TLS at the load balancer](#tls-at-the-load-balancer))
     tls_cert_days: 825
   web:    {replicas: 1, cpu: "2", memory: "4Gi"}
   worker: {replicas: 1, cpu: "2", memory: "4Gi"}
@@ -99,21 +99,21 @@ langfuse:
 
 **With `enabled: true`**, three things happen:
 
-- Step 2 mirrors four more images and one chart (section 4).
+- Step 2 mirrors four more images and one chart ([Step 2 again](#step-2-again-four-images-and-a-chart)).
 - `up.sh` appends `lf-storage lf-db lf-app` after `lb` and prints the Langfuse URL at the end.
-- `down.sh` removes Langfuse first (section 13).
+- `down.sh` removes Langfuse first ([Teardown order](#teardown-order-langfuse-before-clickhouse)).
 
 The three steps are:
 
 | Step | Tag | What it does |
 |---|---|---|
-| 13 | `lf-storage` | The S3 bucket and the IAM role (section 5) |
-| 14 | `lf-db` | The database and user inside ClickHouse (section 6) |
-| 15 | `lf-app` | The Helm release, the NLB, PostgreSQL and Valkey (section 7) |
+| 13 | `lf-storage` | The S3 bucket and the IAM role ([Step 13](#step-13--a-bucket-and-an-irsa-role-lf-storage)) |
+| 14 | `lf-db` | The database and user inside ClickHouse ([Step 14](#step-14--a-database-and-a-user-inside-clickhouse-lf-db)) |
+| 15 | `lf-app` | The Helm release, the NLB, PostgreSQL and Valkey ([Step 15](#step-15--langfuse-itself-lf-app)) |
 
 > **Advanced: run individual steps.** `scripts/up.sh` is the normal way to run them. To run one step or one group on its own, pass its tag to `scripts/play.sh`, for example `scripts/play.sh --tags lf-db`. The tag `langfuse` runs Steps 13, 14 and 15 together.
 
-## 4. Step 2 again: four images and a chart
+## Step 2 again: four images and a chart
 
 When you switch Langfuse on, `scripts/up.sh` re-runs the image hop and copies what is new. Every step is idempotent, so the ClickHouse images that are already present are skipped:
 
@@ -129,7 +129,7 @@ changed: [localhost] => (item=helm/langfuse:2.1.0)
 
 Two things are new compared with the ClickHouse images.
 
-**Chainguard's free tier publishes only `latest`.** You cannot pin `postgres:18.6` on `cgr.dev`. There is `latest` and, for images with a shell, `latest-dev`. So the artifact list carries a `source_tag` (`latest` or `latest-dev`) that is separate from the tag the image lands under in ECR (`pg18-cg` or `valkey9-cg-dev`, from `versions.chainguard_postgres_tag` and `versions.chainguard_valkey_tag`). ECR tags are immutable and the sync skips tags that already exist. Whatever digest `latest` resolved to on the first copy is therefore what that tag means until someone bumps it in `versions`. The version in the tag is a major number only, because that is all the image promises. Step 15 checks the real version in the running pods (section 7).
+**Chainguard's free tier publishes only `latest`.** You cannot pin `postgres:18.6` on `cgr.dev`. There is `latest` and, for images with a shell, `latest-dev`. So the artifact list carries a `source_tag` (`latest` or `latest-dev`) that is separate from the tag the image lands under in ECR (`pg18-cg` or `valkey9-cg-dev`, from `versions.chainguard_postgres_tag` and `versions.chainguard_valkey_tag`). ECR tags are immutable and the sync skips tags that already exist. Whatever digest `latest` resolved to on the first copy is therefore what that tag means until someone bumps it in `versions`. The version in the tag is a major number only, because that is all the image promises. Step 15 checks the real version in the running pods ([Step 15](#step-15--langfuse-itself-lf-app)).
 
 **The chart comes from a plain Helm HTTP repository**, not an OCI registry, so skopeo cannot copy it. The role runs `helm pull` from `https://langfuse.github.io/langfuse-k8s` into `state/charts/` and `helm push` into `oci://<your ecr>/helm/langfuse`. The packaged chart contains its subcharts, so nothing else needs mirroring. Your machine must reach `cgr.dev`, `docker.langfuse.com` and `langfuse.github.io` during this step, anonymously and with no new credentials. `scripts/part1-setup.sh` names them in its network check for that reason.
 
@@ -143,7 +143,7 @@ aws ecr describe-images --repository-name chainguard/postgres --profile "$AWS_PR
 
 You should see the tag `pg18-cg` and a `sha256:` digest. Because the digest depends on the day `latest` was first copied, two people who deploy on different days can see different digests for the same tag. That is expected, and it is the reason to read the digest from your own registry instead of assuming it.
 
-## 5. Step 13 — a bucket and an IRSA role (`lf-storage`)
+## Step 13 — a bucket and an IRSA role (`lf-storage`)
 
 Step 13 is a smaller Step 6: one bucket, one role, one CloudFormation stack.
 
@@ -172,7 +172,7 @@ kubectl exec -n langfuse deploy/langfuse-web -- env | grep -E 'AWS_ROLE_ARN|AWS_
 
 You should see `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, and no line containing `ACCESS_KEY`.
 
-## 6. Step 14 — a database and a user inside ClickHouse (`lf-db`)
+## Step 14 — a database and a user inside ClickHouse (`lf-db`)
 
 Langfuse could be handed the `default` admin account. It is not. Step 14 creates a database `langfuse` and a user `langfuse` that holds exactly the grants Langfuse documents for an external ClickHouse. The grants are scoped to that database plus the handful of `system` tables its migrations and health checks read.
 
@@ -193,7 +193,7 @@ GRANT SELECT(database, engine, name) ON system.tables TO langfuse
 
 **No `ON CLUSTER` anywhere.** The cluster's user directory is replicated through Keeper, so a user created on one replica exists on all three. That is also why the role can run against any one server pod.
 
-**`GRANT CLUSTER`.** Langfuse lists `CLUSTER ON *.*` among the grants for clustered deployments. Whether the `default` admin is allowed to pass that grant on depends on the server, so the role attempts it with `failed_when: false`, records the result, and hands it to Step 15. The Step 14 report prints `cluster: granted` or `cluster: already granted` when it worked. Section 7 explains what Step 15 does with the answer.
+**`GRANT CLUSTER`.** Langfuse lists `CLUSTER ON *.*` among the grants for clustered deployments. Whether the `default` admin is allowed to pass that grant on depends on the server, so the role attempts it with `failed_when: false`, records the result, and hands it to Step 15. The Step 14 report prints `cluster: granted` or `cluster: already granted` when it worked. [Step 15](#step-15--langfuse-itself-lf-app) explains what it does with the answer.
 
 **Idempotency, done by authenticating.** `system.users.auth_params` does not expose password hashes, so the question "is the stored hash still ours?" is answered by an HTTP `SELECT 1` as the Langfuse user, using the password from `state/`. If that succeeds, there is nothing to do. If it fails, the role runs `ALTER USER ... IDENTIFIED WITH sha256_hash BY '<hex>'`. Every statement prints `created`, `exists` or `updated`, and `changed_when` keys off it, so a second run reports:
 
@@ -204,16 +204,16 @@ GRANT SELECT(database, engine, name) ON system.tables TO langfuse
 "cluster:   cluster: already granted",
 ```
 
-**Teardown is the "purge Langfuse data" switch.** Setting `langfuse_db_state=absent` for the `lf-db` step runs `DROP DATABASE langfuse SYNC; DROP USER langfuse;` and keeps the password file. A later run of the step recreates both with the same hash, so the Secret that Step 15 already wrote stays valid. Step 15's own teardown deliberately leaves the database alone. Section 13 has the whole story and the command.
+**Teardown is the "purge Langfuse data" switch.** Setting `langfuse_db_state=absent` for the `lf-db` step runs `DROP DATABASE langfuse SYNC; DROP USER langfuse;` and keeps the password file. A later run of the step recreates both with the same hash, so the Secret that Step 15 already wrote stays valid. Step 15's own teardown deliberately leaves the database alone. [Teardown order](#teardown-order-langfuse-before-clickhouse) has the whole story and the command.
 
-## 7. Step 15 — Langfuse itself (`lf-app`)
+## Step 15 — Langfuse itself (`lf-app`)
 
 Order matters in this role more than in any other. `NEXTAUTH_URL` is baked into the web pods, and the browser is redirected to it after login, so it must equal the address people type. That means the load balancer has to exist and have a hostname *before* the Helm release. The role therefore runs in this order:
 
 1. Validate `langfuse.load_balancer.type` and decide cluster mode. Neither needs anything created yet.
 2. Create the namespace and the three Secrets.
 3. Create the NLB Service `langfuse-lb`.
-4. With `tls`, create the certificate, import it into ACM and switch the listener (section 9).
+4. With `tls`, create the certificate, import it into ACM and switch the listener ([TLS at the load balancer](#tls-at-the-load-balancer)).
 5. Settle the URL.
 6. Log in to ECR and install the chart.
 7. Repair PostgreSQL.
@@ -321,17 +321,17 @@ clickhouse: database langfuse at c-default-us-01-server-any.ns-default-us-01.svc
 smoke test: scripts/langfuse-smoke.sh   (posts a trace and reads it back from ClickHouse)
 ```
 
-## 8. Reaching it from a browser
+## Reaching it from a browser
 
 The default exposure is an **internal** NLB, so the same three options as Part 5 apply, with one twist. NextAuth redirects the browser to `NEXTAUTH_URL` after login, so the address you type must be the one the role baked in.
 
 1. A VPN or peering into the VPC. The URL in the report works as printed.
 2. `type: none` in `langfuse.load_balancer`, then `kubectl port-forward -n langfuse svc/langfuse-web 3000:3000` and open `http://localhost:3000`. The port must be exactly 3000, because that is the `NEXTAUTH_URL` the role sets for this mode.
-3. `type: public` with `allowed_cidrs: ["<your egress IP>/32"]`. This uses plain HTTP by default, which is fine for a lab and for nothing else. Turn on `langfuse.load_balancer.tls` (section 9) before you expose it this way, and read there what a self-signed certificate does and does not give you. `0.0.0.0/0` is refused unless you also pass `-e allow_open_internet=true`, as in Step 12. The kit is built around the `internal` type; [Scope and boundaries](limitations.md) lists what the kit covers and what it leaves out.
+3. `type: public` with `allowed_cidrs: ["<your egress IP>/32"]`. This uses plain HTTP by default, which is fine for a lab and for nothing else. Turn on `langfuse.load_balancer.tls` ([TLS at the load balancer](#tls-at-the-load-balancer)) before you expose it this way, and read there what a self-signed certificate does and does not give you. `0.0.0.0/0` is refused unless you also pass `-e allow_open_internet=true`, as in Step 12. The kit is built around the `internal` type; [Scope and boundaries](limitations.md) lists what the kit covers and what it leaves out.
 
 If people reach Langfuse by a name the role cannot discover (a VPN alias, or a DNS record you put in front of the NLB), set `langfuse.url` and re-run `scripts/up.sh`. Log in as `admin@example.com` with the password in `state/langfuse-admin-password`. Sign-up is disabled (unless Cognito sign-in is on, which opens it; see [Part 9](part-9-sso.md)) and telemetry is off.
 
-## 9. TLS at the load balancer
+## TLS at the load balancer
 
 Plain HTTP is the default because the NLB the cloud controller builds is a TCP pass-through, and there is no domain to get a certificate for. On that default, every SDK request carries the `pk:sk` API key pair as Basic auth, and every browser session carries its login cookie, in clear text. They cross whatever sits between the client and the NLB: the VPC for `internal`, the internet for `public`. One switch closes that:
 
@@ -446,7 +446,7 @@ The certificate is its own CA, and the CA file is the certificate: `state/langfu
 
 - **curl:** `curl --cacert state/langfuse-tls-cert.pem https://<hostname>/api/public/health`. Without `--cacert`, curl exits 60 with `SSL certificate problem: self-signed certificate`. That failure is the proof the certificate is not publicly trusted, not a bug to route around. Do not reach for `-k` or `--insecure`: it turns verification off and leaves you with an encrypted connection to whoever answered, which is the one thing this section exists to avoid.
 - **A browser:** expect the self-signed warning once, then proceed. Log in as `admin@example.com` with the password in `state/langfuse-admin-password`, as before.
-- **An SDK or OTLP exporter:** give its runtime the same file through whatever that runtime uses to add a CA (Node and Python each read one environment variable naming an extra CA file). Then point it at `https://<hostname>/api/public/otel/v1/traces` with Basic auth `pk:sk`, exactly as in section 10.
+- **An SDK or OTLP exporter:** give its runtime the same file through whatever that runtime uses to add a CA (Node and Python each read one environment variable naming an extra CA file). Then point it at `https://<hostname>/api/public/otel/v1/traces` with Basic auth `pk:sk`, exactly as in [The smoke test](#the-smoke-test).
 
 **The smoke test knows the rule too.** `scripts/langfuse-smoke.sh` passes `--cacert state/langfuse-tls-cert.pem` only when the address it is using came from the `langfuse-lb` hostname with TLS on (`lf_cacert()` in `scripts/lib/common.sh`), because that hostname is the only name the certificate carries. A `LANGFUSE_URL` or `langfuse.url` alias is verified against the system trust store instead, unless you supply `LANGFUSE_CACERT=<pem>`, which then wins everywhere. The port-forward fallback is plain `http://localhost:3000` and drops the CA. Nothing in the script passes `-k`.
 
@@ -477,12 +477,12 @@ The `FAILED - RETRYING` lines are expected, not a problem. They are the role wai
 
 Two rules follow from how the deletion is gated:
 
-- **It runs only when the effective TLS state (`tls`, or `fips`, per above) is still true at teardown time.** Flip `enabled` off if you like, because teardown works with the switch already off (section 13). But leave `tls` and `fips` alone until Langfuse is gone, or the certificate stays in ACM with nothing pointing at it.
+- **It runs only when the effective TLS state (`tls`, or `fips`, per above) is still true at teardown time.** Flip `enabled` off if you like, because teardown works with the switch already off ([Teardown order](#teardown-order-langfuse-before-clickhouse)). But leave `tls` and `fips` alone until Langfuse is gone, or the certificate stays in ACM with nothing pointing at it.
 - **`tls: true` → `false` without a teardown does not undo TLS.** The role applies the three ssl annotations as a patch, and a plain re-run keeps annotations it did not apply. The listener stays TLS while the `NEXTAUTH_URL` the role bakes in goes back to `http://`. The clean way back is a teardown and a re-run with `tls: false`. The by-hand route is removing the three `aws-load-balancer-ssl-*` annotations from Service `langfuse-lb` AND switching the listener back yourself, because the cloud controller cannot change a listener protocol: `aws elbv2 modify-listener --listener-arn <listener-arn> --protocol TCP`, with no `--certificates` or `--ssl-policy`, since AWS removes those TLS properties when the protocol changes to TCP.
 
 The key and certificate under `state/` are kept like every other generated secret. The next `scripts/up.sh` re-imports the same certificate if the new NLB gets the same hostname, and regenerates it (the SAN check) if not, so nothing has to be cleaned up by hand. One thing does not survive a fresh `state/`: `--check` with `tls: true` and no key or certificate there yet fails at the chmod and the ACM import's file lookup, because check mode skips the OpenSSL generation. A `--check` after one real run is fine.
 
-## 10. The smoke test
+## The smoke test
 
 The reason the whole thing exists is to show a trace landing in ClickHouse Government. One script proves it end to end and is safe to run at any time:
 
@@ -493,7 +493,7 @@ scripts/langfuse-smoke.sh --lb       # ClickHouse queries via the Step 12 NLB (w
 
 It needs `curl`, `jq`, `kubectl` and whatever `scripts/ch-client.sh` needs (`brew install clickhouse` on macOS). What it does, in order:
 
-1. **Finds a URL that answers.** It uses `LANGFUSE_URL` if you set it, else `langfuse.url` from the configuration, else the `langfuse-lb` hostname. If that does not answer `/api/public/health`, it opens `kubectl port-forward svc/langfuse-web 3000:3000` itself, waits for the port to accept connections, and tears it down on exit. An internal NLB never answers from a laptop outside the VPC, so this fallback is the normal path there. When the hostname came with TLS on, curl is given `--cacert state/langfuse-tls-cert.pem` for it and for nothing else (section 9). The tunnel is plain http.
+1. **Finds a URL that answers.** It uses `LANGFUSE_URL` if you set it, else `langfuse.url` from the configuration, else the `langfuse-lb` hostname. If that does not answer `/api/public/health`, it opens `kubectl port-forward svc/langfuse-web 3000:3000` itself, waits for the port to accept connections, and tears it down on exit. An internal NLB never answers from a laptop outside the VPC, so this fallback is the normal path there. When the hostname came with TLS on, curl is given `--cacert state/langfuse-tls-cert.pem` for it and for nothing else ([TLS at the load balancer](#tls-at-the-load-balancer)). The tunnel is plain http.
 2. **Posts a trace.** It sends one OTLP/JSON request to `/api/public/otel/v1/traces`: a root span named after the run plus a `generation` child carrying `gen_ai.*` attributes, authenticated with the API key pair from `state/langfuse-public-key` and `state/langfuse-secret-key`. Then it polls `GET /api/public/v2/observations?traceId=<id>` until both spans are listed.
 3. **Reads it back from ClickHouse** through `scripts/ch-client.sh -q`, as the `default` admin: `SELECT trace_id, span_id, name, type FROM langfuse.events_core WHERE trace_id = '<id>'` and `SELECT hostName(), count() FROM langfuse.events_core GROUP BY 1`.
 
@@ -542,15 +542,15 @@ Langfuse 3.x accepted batch events (`trace-create`, `generation-create`) at `/ap
 
 The error message mentions `LANGFUSE_MIGRATION_V4_WRITE_MODE=dual`, which is a bridge for migrating from v3. The kit does not use it, because it targets a fresh v4 deployment. So the `traces` table in ClickHouse is real and empty, by design. If you are looking for the data in the UI's terms, it is in `events_core`. Any OpenTelemetry-speaking application can do what the script does: point an OTLP/HTTP exporter at `<url>/api/public/otel/v1/traces` with Basic auth `pk:sk`.
 
-## 11. Idempotency and check mode
+## Idempotency and check mode
 
 With everything deployed, running the three steps again changes nothing. The bucket and stack converge. The ClickHouse user authenticates with the stored hash, so no `ALTER USER` runs. The `GRANT`s compare equal. The Secrets are written as `data:` and converge. Helm sees identical values, and the PostgreSQL role step prints `role: exists`. `scripts/up.sh` is safe to run again for the same reason.
 
 > **Advanced: run individual steps.** To confirm it for the Langfuse steps alone, run `scripts/play.sh --tags langfuse`. The final `PLAY RECAP` should show `changed=0` and `failed=0`.
 
-`scripts/play.sh --check --tags lf-app` renders the chart without a `validations.yaml` failure and runs every read, wait and probe for real. When `tls` is true, run it after at least one real run, for the reason at the end of section 9. Secrets are hidden from all of this output. Re-run with `-e show_secrets=true` when something in that area fails and you need to see the objects.
+`scripts/play.sh --check --tags lf-app` renders the chart without a `validations.yaml` failure and runs every read, wait and probe for real. When `tls` is true, run it after at least one real run, for the reason at the end of [TLS at the load balancer](#tls-at-the-load-balancer). Secrets are hidden from all of this output. Re-run with `-e show_secrets=true` when something in that area fails and you need to see the objects.
 
-## 12. Cost
+## Cost
 
 Langfuse adds no instances. Everything lands on the operator node group that Step 5 already pays for. Its own line items are:
 
@@ -558,9 +558,9 @@ Langfuse adds no instances. Everything lands on the operator node group that Ste
 - Two small gp3 volumes (20Gi and 8Gi), about $2/mo.
 - S3, by the GB.
 
-With `tls`, the imported ACM certificate has no charge of its own. `scripts/up.sh` prints the same NLB estimate when Langfuse is enabled. The base hourly figures are in the meter table in Part 0 section 8, and they are estimates from us-east-1 list prices, so check current AWS pricing for your Region. A default `down.sh` keeps the Langfuse IRSA stack and bucket the way it keeps ClickHouse's, and both cost nothing while idle.
+With `tls`, the imported ACM certificate has no charge of its own. `scripts/up.sh` prints the same NLB estimate when Langfuse is enabled. The base hourly figures are in the meter table in [Part 0, Operating it](part-0-what-is-this.md#operating-it), and they are estimates from us-east-1 list prices, so check current AWS pricing for your Region. A default `down.sh` keeps the Langfuse IRSA stack and bucket the way it keeps ClickHouse's, and both cost nothing while idle.
 
-## 13. Teardown order: Langfuse before ClickHouse
+## Teardown order: Langfuse before ClickHouse
 
 Langfuse's tables live in the ClickHouse cluster, and its PostgreSQL and Valkey volumes are EBS PVCs. Removing it therefore needs the operator and the EBS CSI driver alive, which means the cluster and the nodes are still up. That puts Langfuse **first**, before the Step 12 load balancer, the cluster and the node groups. `scripts/down.sh` knows this:
 
@@ -574,7 +574,7 @@ Four details worth knowing:
 - **Only what exists is torn down.** `down.sh` keeps `lf-app` only if `helm status`, the `langfuse-lb` Service or the `langfuse` namespace says there is something to remove. It keeps `lf-db` only if the namespace exists, and `lf-storage` only if the `clickhouse-private-langfuse-irsa` stack does. A ClickHouse-only stack runs exactly the pre-Langfuse steps.
 - **It works with the switch already off.** `deploy.yml` gates each Langfuse role with `when: (langfuse.enabled | bool) or (<state var>) == 'absent'`. Flipping `enabled` back to `false` with Langfuse still deployed therefore does not orphan it, and `down.sh` still runs `lf-app` first. Afterwards no Langfuse NLB, namespace, PVC or EBS volume remains.
 - **The zero-nodes guard covers Langfuse too.** `down.sh` refuses to start if it finds the `langfuse` namespace with no nodes, for the same reason it refuses for the ClickHouse namespace.
-- **With `tls`, the ACM certificate goes between the Service and the release**, and only when `tls` is still `true` at teardown time. Section 9 has both rules.
+- **With `tls`, the ACM certificate goes between the Service and the release**, and only when `tls` is still `true` at teardown time. [TLS at the load balancer](#tls-at-the-load-balancer) has both rules.
 
 `lf-db` is the data-purge switch, and it is *not* in the default `down.sh` plan. A default teardown removes the whole ClickHouse cluster anyway, and "keep the cluster, drop only Langfuse's tables" should be an explicit command, not a side effect. `lf-app` alone leaves the database, so you can remove the application and keep the traces, or the reverse. As with ClickHouse's bucket, nothing in either script deletes the Langfuse bucket. `down.sh --all` ends by naming it and reminding you to empty it and run `aws s3 rb` on it yourself, if you mean it.
 
@@ -586,7 +586,7 @@ Four details worth knowing:
 > scripts/play.sh --tags lf-storage -e langfuse_storage_state=absent  # the IRSA stack. The bucket stays; it holds data
 > ```
 
-## 14. What exists once it is up
+## What exists once it is up
 
 ```
 namespace langfuse
@@ -604,7 +604,7 @@ ClickHouse, database langfuse           13 tables, Shared*MergeTree, owned by us
 AWS                                     bucket langfuse-<account>-<region>; stack clickhouse-private-langfuse-irsa; one NLB; with tls, one ACM certificate tagged Name=clickhouse-private-langfuse-lb
 ```
 
-And in `state/`, alongside the ClickHouse files from Part 0 section 7:
+And in `state/`, alongside the ClickHouse files from [Part 0, What exists once it is up](part-0-what-is-this.md#what-exists-once-it-is-up):
 
 | File | What |
 |---|---|
@@ -612,58 +612,58 @@ And in `state/`, alongside the ClickHouse files from Part 0 section 7:
 | `langfuse-nextauth-secret`, `langfuse-salt`, `langfuse-encryption-key` | Langfuse's own secrets. Lose the encryption key and stored API credentials become unreadable |
 | `langfuse-admin-password` | The `admin@example.com` login |
 | `langfuse-public-key`, `langfuse-secret-key` | The seeded project's API key pair, which the smoke test and any SDK use |
-| `langfuse-tls-key.pem`, `langfuse-tls-cert.pem` | With TLS: the NLB's private key (mode 0600) and its self-signed certificate, which is also the CA file clients trust (section 9). Regenerated only when the NLB hostname changes |
+| `langfuse-tls-key.pem`, `langfuse-tls-cert.pem` | With TLS: the NLB's private key (mode 0600) and its self-signed certificate, which is also the CA file clients trust ([TLS at the load balancer](#tls-at-the-load-balancer)). Regenerated only when the NLB hostname changes |
 
 The same rule as Part 0 applies: lose `state/` and you lose these. A `down.sh` and `up.sh --from nodes` round trip reuses them, so the rebuilt Langfuse accepts the same login and API keys.
 
-## 15. Operate it
+## Operate it
 
 The kit gives you a small set of tools for running Langfuse. It does not include procedures beyond these.
 
-- **Check that it works:** `scripts/langfuse-smoke.sh` (section 10). Run it whenever you want proof that a trace goes in through the API and comes back out of ClickHouse.
+- **Check that it works:** `scripts/langfuse-smoke.sh` ([The smoke test](#the-smoke-test)). Run it whenever you want proof that a trace goes in through the API and comes back out of ClickHouse.
 - **Look at the data:** `scripts/ch-client.sh` opens a ClickHouse session as the `default` admin. For example, `scripts/ch-client.sh -q "SELECT name, type, start_time FROM langfuse.events_core ORDER BY start_time DESC LIMIT 10"` shows the newest spans. Add `--lb` to connect through the Step 12 load balancer.
 - **Look at the pods:** run `source scripts/env.sh`, then `kubectl get pods -n langfuse` and `kubectl logs -n langfuse deploy/langfuse-web`.
-- **Stop paying for it:** `scripts/down.sh` removes Langfuse first, then the load balancer, the cluster and the nodes (section 13). `scripts/up.sh --from nodes` brings the stack back with the same logins and API keys, because it reuses `state/`.
-- **Remove only Langfuse's data:** the `lf-db` teardown in the "Advanced" note in section 13.
+- **Stop paying for it:** `scripts/down.sh` removes Langfuse first, then the load balancer, the cluster and the nodes ([Teardown order](#teardown-order-langfuse-before-clickhouse)). `scripts/up.sh --from nodes` brings the stack back with the same logins and API keys, because it reuses `state/`.
+- **Remove only Langfuse's data:** the `lf-db` teardown in the "Advanced" note in [Teardown order](#teardown-order-langfuse-before-clickhouse).
 
-## 16. Troubleshooting
+## Troubleshooting
 
 Each entry gives a symptom, its cause and the fix.
 
 **Web and worker pods crash-loop with `password authentication failed`**
 
-- *Cause:* the `langfuse` PostgreSQL role does not exist. Chainguard's PostgreSQL image ignores the subchart's first-boot script (section 7), and the role step was skipped, usually because the install stopped before it.
+- *Cause:* the `langfuse` PostgreSQL role does not exist. Chainguard's PostgreSQL image ignores the subchart's first-boot script ([Step 15](#step-15--langfuse-itself-lf-app)), and the role step was skipped, usually because the install stopped before it.
 - *Fix:* run `scripts/up.sh` again. The role step creates the role (`role: created`) and the pods recover on the kubelet's next restart.
 
 **The web pod restarts with `Dirty database version N. Fix and force version.`**
 
-- *Cause:* a ClickHouse migration was interrupted, and `golang-migrate` left `schema_migrations` marked dirty. The role's relaxed liveness probe (section 7) prevents the usual trigger, a probe killing the pod mid-migration, but anything that interrupts a first start, such as a node replacement, can leave the same mark.
+- *Cause:* a ClickHouse migration was interrupted, and `golang-migrate` left `schema_migrations` marked dirty. The role's relaxed liveness probe ([Step 15](#step-15--langfuse-itself-lf-app)) prevents the usual trigger, a probe killing the pod mid-migration, but anything that interrupts a first start, such as a node replacement, can leave the same mark.
 - *Fix:* on a fresh install with no data worth keeping, purge Langfuse's database and let it rebuild. Run `scripts/play.sh --tags lf-db -e langfuse_db_state=absent`, then run `scripts/up.sh`. It recreates the database and user, and the crash-looping pod recovers on its next restart. On a database that already holds data, use `golang-migrate`'s `force` instead.
 
 **A Valkey or PostgreSQL pod fails to start with `/bin/sh` not found or a permission error on its volume**
 
-- *Cause:* the mirrored image or the security context does not match the Chainguard variant the role expects (section 7). Valkey needs the `latest-dev` variant because the subchart's init container runs a shell script, and both stores run as Chainguard's uids (`65532` for Valkey, `70` for PostgreSQL).
+- *Cause:* the mirrored image or the security context does not match the Chainguard variant the role expects ([Step 15](#step-15--langfuse-itself-lf-app)). Valkey needs the `latest-dev` variant because the subchart's init container runs a shell script, and both stores run as Chainguard's uids (`65532` for Valkey, `70` for PostgreSQL).
 - *Fix:* keep `versions.chainguard_valkey_tag` and `versions.chainguard_postgres_tag` at their defaults, or if you bump them, keep the same variants and uids. Re-run `scripts/up.sh`.
 
 **Helm fails with `Secret "langfuse-app" ... invalid ownership metadata`**
 
-- *Cause:* an object named `langfuse-app` already exists in the namespace that Helm did not create. The chart owns that name (section 7).
+- *Cause:* an object named `langfuse-app` already exists in the namespace that Helm did not create. The chart owns that name ([Step 15](#step-15--langfuse-itself-lf-app)).
 - *Fix:* delete the object you created (`kubectl delete secret langfuse-app -n langfuse`) and re-run `scripts/up.sh`. Keep the kit's Secret names.
 
 **`lf-app` fails and prints pods, events and logs**
 
 - *Cause:* one of the waits or assertions failed. The role's rescue block prints every pod, the newest Warning events and the last lines of the web and worker logs before it stops.
-- *Fix:* read those three blocks. They show the actual cause, such as an image that cannot be pulled, a volume that will not attach or a probe that keeps failing. The release stays installed, so fix the cause and re-run `scripts/up.sh`, or tear Langfuse down (section 13).
+- *Fix:* read those three blocks. They show the actual cause, such as an image that cannot be pulled, a volume that will not attach or a probe that keeps failing. The release stays installed, so fix the cause and re-run `scripts/up.sh`, or tear Langfuse down ([Teardown order](#teardown-order-langfuse-before-clickhouse)).
 
 **With TLS on, the Service events show `SyncLoadBalancerFailed ... DuplicateListener`, or `Wait for the listener to terminate TLS` times out with `TCP`**
 
-- *Cause:* the cloud controller cannot change a listener's protocol (section 9). The role does that itself with `aws elbv2 modify-listener`, right after it patches the Service. If the switch is still pending, or its task failed, the listener stays `TCP` and the controller keeps retrying the impossible `CreateListener`.
+- *Cause:* the cloud controller cannot change a listener's protocol ([TLS at the load balancer](#tls-at-the-load-balancer)). The role does that itself with `aws elbv2 modify-listener`, right after it patches the Service. If the switch is still pending, or its task failed, the listener stays `TCP` and the controller keeps retrying the impossible `CreateListener`.
 - *Fix:* re-run `scripts/up.sh`. The listener switch task runs when the listener is not yet TLS with the current certificate. If the task fails again, its error message (usually a missing AWS permission for `elasticloadbalancing:ModifyListener`) is the next thing to read. The `SyncLoadBalancerFailed` events from before the switch stay in the namespace for about an hour. They are history, not a current problem.
 
 **`curl` exits 60 with `SSL certificate problem: self-signed certificate`**
 
 - *Cause:* the client does not trust the role's certificate. This is expected without the CA file.
-- *Fix:* pass `--cacert state/langfuse-tls-cert.pem` (section 9). Do not use `-k`.
+- *Fix:* pass `--cacert state/langfuse-tls-cert.pem` ([TLS at the load balancer](#tls-at-the-load-balancer)). Do not use `-k`.
 
 **The browser lands on the wrong address after login**
 
@@ -673,7 +673,7 @@ Each entry gives a symptom, its cause and the fix.
 **The role fails with an OpenSSL instruction when `tls` is on**
 
 - *Cause:* the `openssl` on your `PATH` is LibreSSL (the macOS default), not OpenSSL 3.
-- *Fix:* install OpenSSL 3 and put it first on `PATH` (section 9).
+- *Fix:* install OpenSSL 3 and put it first on `PATH` ([TLS at the load balancer](#tls-at-the-load-balancer)).
 
 **The smoke test warns that the NLB does not answer**
 
@@ -689,7 +689,7 @@ Each entry gives a symptom, its cause and the fix.
 
 Run these in order after Langfuse is up, from a shell where you ran `source scripts/env.sh`. Each gives a command and the result you should see, and they double as workshop exercises.
 
-1. **You know what the switch changes.** Without looking, name the three things `langfuse.enabled: true` adds when you run `scripts/up.sh` (section 3). You should be able to say that Step 2 mirrors four more images and a chart, that `up.sh` appends `lf-storage lf-db lf-app`, and that `down.sh` removes Langfuse first.
+1. **You know what the switch changes.** Without looking, name the three things `langfuse.enabled: true` adds when you run `scripts/up.sh` ([The switch](#the-switch-and-what-it-changes)). You should be able to say that Step 2 mirrors four more images and a chart, that `up.sh` appends `lf-storage lf-db lf-app`, and that `down.sh` removes Langfuse first.
 
 2. **The images and chart are in your registry.**
 
@@ -707,11 +707,11 @@ Run these in order after Langfuse is up, from a shell where you ran `source scri
 
    You should see only image names that begin with your ECR hostname.
 
-4. **The role has no access keys.** Run the `kubectl exec ... env | grep` command from section 5. You should see `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, and no `ACCESS_KEY`.
+4. **The role has no access keys.** Run the `kubectl exec ... env | grep` command from [Step 13](#step-13--a-bucket-and-an-irsa-role-lf-storage). You should see `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, and no `ACCESS_KEY`.
 
-5. **The ClickHouse user is least-privilege.** Run `scripts/ch-client.sh -q "SHOW GRANTS FOR langfuse"`. You should see the eight `GRANT` lines from section 6, with the wide grant scoped to `langfuse.*`.
+5. **The ClickHouse user is least-privilege.** Run `scripts/ch-client.sh -q "SHOW GRANTS FOR langfuse"`. You should see the eight `GRANT` lines from [Step 14](#step-14--a-database-and-a-user-inside-clickhouse-lf-db), with the wide grant scoped to `langfuse.*`.
 
-6. **The migrations landed on the shared engine.** Run the `system.tables` query from section 7. You should see 13 tables, and every table that is not a view on a `Shared*MergeTree` engine.
+6. **The migrations landed on the shared engine.** Run the `system.tables` query from [Step 15](#step-15--langfuse-itself-lf-app). You should see 13 tables, and every table that is not a view on a `Shared*MergeTree` engine.
 
 7. **The pods are available.**
 
@@ -719,14 +719,14 @@ Run these in order after Langfuse is up, from a shell where you ran `source scri
    kubectl get deployment -n langfuse langfuse-web langfuse-worker
    ```
 
-   You should see `1/1` under `READY` for both. The role's own check of the health endpoint through the `langfuse-web` Service is the `Langfuse must answer through its Service` task in section 7.
+   You should see `1/1` under `READY` for both. The role's own check of the health endpoint through the `langfuse-web` Service is the `Langfuse must answer through its Service` task in [Step 15](#step-15--langfuse-itself-lf-app).
 
 8. **A trace makes the round trip.** Run `scripts/langfuse-smoke.sh`. You should see `API returns the trace: ... observations=2 (SPAN, GENERATION)`, two rows from `langfuse.events_core` with the same `trace_id`, and a final `[ ok ]` line.
 
-9. **The traces are in `events_core`, not `traces`.** Run `scripts/ch-client.sh -q "SELECT (SELECT count() FROM langfuse.events_core), (SELECT count() FROM langfuse.traces)"`. You should see a positive number, then `0`. Explain why, using section 10.
+9. **The traces are in `events_core`, not `traces`.** Run `scripts/ch-client.sh -q "SELECT (SELECT count() FROM langfuse.events_core), (SELECT count() FROM langfuse.traces)"`. You should see a positive number, then `0`. Explain why, using [The smoke test](#the-smoke-test).
 
-10. **Rerunning changes nothing.** Run `scripts/play.sh --tags langfuse` (the individual-steps form from section 3). The final `PLAY RECAP` should show `changed=0` and `failed=0`.
+10. **Rerunning changes nothing.** Run `scripts/play.sh --tags langfuse` (the individual-steps form from [The switch](#the-switch-and-what-it-changes)). The final `PLAY RECAP` should show `changed=0` and `failed=0`.
 
-11. **You can explain the teardown order.** Say why `down.sh` removes Langfuse before the load balancer, the cluster and the nodes (section 13), and which command removes only Langfuse's data.
+11. **You can explain the teardown order.** Say why `down.sh` removes Langfuse before the load balancer, the cluster and the nodes ([Teardown order](#teardown-order-langfuse-before-clickhouse)), and which command removes only Langfuse's data.
 
-12. **If TLS is on:** run the checks in "Check TLS yourself" (section 9). The `curl --cacert` request should return `HTTP 200`, and the same request without `--cacert` should exit 60.
+12. **If TLS is on:** run the checks in "Check TLS yourself" ([TLS at the load balancer](#tls-at-the-load-balancer)). The `curl --cacert` request should return `HTTP 200`, and the same request without `--cacert` should exit 60.

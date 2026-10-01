@@ -43,7 +43,7 @@
 # has never loaded, crashes that server process before authentication. The
 # check is therefore itself the crash trigger on a server that is in that
 # state. The JWKS gate in Step 9 is point-in-time (see docs/part-9-sso.md,
-# section 6). Run --negative only when you accept a possible server restart,
+# "ClickHouse sign-in"). Run --negative only when you accept a possible server restart,
 # for example right after a rollout you have watched load the JWKS. It sends
 # nothing else, and the token is discarded with the process.
 #
@@ -251,7 +251,7 @@ PY
     if [[ "$AFTER" == "$BEFORE" ]]; then
       ok "server pod restart counts unchanged ($BEFORE)"
     else
-      fail "server pod restart counts changed: before '$BEFORE', after '$AFTER' -- see docs/part-9-sso.md, section 6"; note_problem
+      fail "server pod restart counts changed: before '$BEFORE', after '$AFTER' -- see docs/part-9-sso.md, ClickHouse sign-in"; note_problem
     fi
   fi
 fi

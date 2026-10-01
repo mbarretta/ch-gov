@@ -10,7 +10,7 @@
 
 Parts 1 to 4 end with a working cluster that only `kubectl` can reach. This step gives it an address. The step is not in the tutorial, and it comes with one finding that matters more than the step itself.
 
-You choose the load balancer type with one setting, `clickhouse.load_balancer.type`. Put it in `state/deploy-vars.yml` (see section 3b of [Part 1](part-1-prerequisites.md)) to override the default in `ansible/group_vars/all.yml`:
+You choose the load balancer type with one setting, `clickhouse.load_balancer.type`. Put it in `state/deploy-vars.yml` (see [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)) to override the default in `ansible/group_vars/all.yml`:
 
 ```yaml
 clickhouse:
@@ -137,7 +137,7 @@ An NLB is billed hourly (about $0.0225/hr, or $17 a month) plus a small per-LCU 
 
 Deleting the Service is what deletes the NLB, its target groups and the security-group rules, because the controller acts on the delete event. So remove the load balancer **before** the cluster, the node groups or the control plane. If you delete the EKS cluster with the Service still in it, the NLB is orphaned: still billing, still holding an ENI in each private subnet, and blocking the VPC stack's deletion.
 
-You should not have to remember that. `scripts/down.sh` removes the load balancer first, then the cluster (while the nodes are still up, so the operator and the CSI driver can clean up after it), then the node groups. `--all` goes on through the operator, prerequisites, storage, EKS and the VPC. Section 5b of [Part 1](part-1-prerequisites.md) has the full reasoning.
+You should not have to remember that. `scripts/down.sh` removes the load balancer first, then the cluster (while the nodes are still up, so the operator and the CSI driver can clean up after it), then the node groups. `--all` goes on through the operator, prerequisites, storage, EKS and the VPC. [Part 1, The two scripts you will actually use](part-1-prerequisites.md#the-two-scripts-you-will-actually-use-upsh-and-downsh) has the full reasoning.
 
 > **Advanced: run individual steps.** If you tear down by hand, keep the same order:
 >

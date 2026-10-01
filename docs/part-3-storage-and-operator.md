@@ -18,7 +18,7 @@ By the end of Part 2 you have a Kubernetes cluster with eight nodes and nothing 
 > scripts/play.sh --tags operator   # Step 8
 > ```
 >
-> Add `--check` for a dry run. Section 5 of [Part 1](part-1-prerequisites.md) explains what `play.sh` sets up for you.
+> Add `--check` for a dry run. [Part 1, Running the playbook](part-1-prerequisites.md#running-the-playbook-scriptsplaysh) explains what `play.sh` sets up for you.
 
 ---
 

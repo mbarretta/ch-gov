@@ -16,7 +16,7 @@ To turn the switch on, set `fips: true` in `state/deploy-vars.yml` (or in `ansib
 
 ---
 
-## 1. AWS API endpoints
+## AWS API endpoints
 
 **The risk.** `fips: true` changes which registry the controller pulls container images from, but every other AWS API call this project's automation makes (STS, IAM, EKS, CloudFormation, S3) would still go to AWS's standard endpoints. A FIPS posture that covers only image pulls is not a FIPS posture for the control plane.
 
@@ -52,7 +52,7 @@ In `profile` mode nothing is rendered, because the kit uses your own AWS configu
 | ClickHouse's fetch of Cognito's JWKS document (only with `sso.enabled` and `sso.clickhouse_jwt.enabled`) | **No** | Not wired. The server's own TLS stack requests the JWKS URL, and `use_fips_endpoint` does not reach it |
 | Any other pod-side AWS SDK call outside the paths above | **No**, unless independently configured | No blanket coverage exists |
 
-The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). The two Cognito rows are named gaps in the same way: they apply only when the optional single sign-on capability is switched on, and in AWS GovCloud the Cognito endpoints are FIPS-only per AWS, which [Part 9](part-9-sso.md) section 10 covers. The controller's own calls that create the Cognito stack are covered by the first row. VPC interface endpoints for ECR, STS, and CloudWatch, which would let an airgapped deployment drop the NAT gateway (present only in this learning environment), are outside what the kit builds. See [Scope and boundaries](limitations.md).
+The Langfuse gap is a real, named limitation, not an oversight to read past. See [FIPS.md](../FIPS.md). The two Cognito rows are named gaps in the same way: they apply only when the optional single sign-on capability is switched on, and in AWS GovCloud the Cognito endpoints are FIPS-only per AWS, which [Part 9, GovCloud notes](part-9-sso.md#govcloud-notes) covers. The controller's own calls that create the Cognito stack are covered by the first row. VPC interface endpoints for ECR, STS, and CloudWatch, which would let an airgapped deployment drop the NAT gateway (present only in this learning environment), are outside what the kit builds. See [Scope and boundaries](limitations.md).
 
 **Self-check**
 
@@ -75,7 +75,7 @@ These checks are yours to make on your own cluster:
 
 ---
 
-## 2. Customer-managed KMS keys
+## Customer-managed KMS keys
 
 **The risk.** Without this section, both S3 buckets use S3-managed encryption, and every EBS-backed volume (Keeper's persistent disk, plus Langfuse's PostgreSQL and Valkey volumes if Langfuse is enabled) sits behind whatever default key AWS supplies, with no dedicated key to control or rotate.
 
@@ -127,7 +127,7 @@ Two items are yours to confirm on a real cluster:
 
 ---
 
-## 3. EKS Secrets envelope encryption
+## EKS Secrets envelope encryption
 
 **The risk, stated correctly.** This is the one section where the "risk" needs a correction before anything else. An EKS 1.28 or later cluster (this kit deploys 1.36) already receives envelope encryption of Kubernetes Secrets in etcd by default, using an AWS-owned key. `fips: false` does **not** mean Secrets sit unencrypted. It means the key encrypting them is one AWS owns and you do not control. This section's actual value is swapping in a customer-managed key for explicit ownership, policy, and lifecycle control, not introducing encryption where none existed.
 
@@ -138,7 +138,7 @@ EnableSecretsEncryption: "{{ 'true' if fips else 'false' }}"
 
 **What the role does, in order:**
 
-1. `ansible/roles/eks_cluster/files/eks-cluster.yaml` has an `EnableSecretsEncryption` CloudFormation parameter, a matching `SecretsEncryptionEnabled` condition, and a dedicated `EksSecretsKey`. That key is separate from every key in section 2, and its policy grants the cluster's own IAM role `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey`, and `kms:CreateGrant` plus account-root admin. The template also defines an alias and sets `EncryptionConfig: !If [...]` on the `AWS::EKS::Cluster` resource, following the `Conditions:` and `!If` idiom the same template already uses for `PublicEndpointAccess` and `EndpointPublicAccess`.
+1. `ansible/roles/eks_cluster/files/eks-cluster.yaml` has an `EnableSecretsEncryption` CloudFormation parameter, a matching `SecretsEncryptionEnabled` condition, and a dedicated `EksSecretsKey`. That key is separate from every key in [Customer-managed KMS keys](#customer-managed-kms-keys), and its policy grants the cluster's own IAM role `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey`, and `kms:CreateGrant` plus account-root admin. The template also defines an alias and sets `EncryptionConfig: !If [...]` on the `AWS::EKS::Cluster` resource, following the `Conditions:` and `!If` idiom the same template already uses for `PublicEndpointAccess` and `EndpointPublicAccess`.
 2. The role's report includes a line describing the intended `EncryptionConfig` outcome, read back from the CloudFormation stack's own outputs rather than from a live `aws eks describe-cluster` call. It documents intent against the template, not a live cluster's actual state.
 3. An `ansible.builtin.assert` guard requires `-e confirm_encryption_config=true` alongside `fips: true` before applying to a cluster that **already exists**, mirroring the repo's existing `clear_failed_stack` and `allow_open_internet` explicit-confirmation pattern.
 
@@ -157,7 +157,7 @@ On a real cluster, confirm that `describe-cluster` reports the customer-managed 
 
 ---
 
-## 4. In-transit TLS: ClickHouse native, Langfuse to ClickHouse, and the Langfuse NLB
+## In-transit TLS: ClickHouse native, Langfuse to ClickHouse, and the Langfuse NLB
 
 **The risk.** Three network hops inside this deployment would be cleartext regardless of `fips`: ClickHouse's own native protocol (port 9000) and Keeper-to-Keeper traffic, the Langfuse-to-ClickHouse hop (both the one-time schema migration and every ongoing query), and Langfuse's own load balancer (which supports hand-enabled TLS, but not a FIPS-designated policy or a FIPS-sized key). This section covers all three, because they share one CA and one derived key-size variable. Grafana's load balancer follows the same rule as Langfuse's. See [Part 8](part-8-grafana.md).
 
