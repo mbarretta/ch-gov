@@ -12,12 +12,12 @@
 Parts 1–5 end with a ClickHouse cluster behind a load balancer. [Part 6](part-6-langfuse.md) adds Langfuse next to it, off by default. These three steps add a second, independent optional capability, also off by default: a Grafana server with one pre-provisioned datasource pointed at the ClickHouse cluster you already built. It is there for learning and workshops, when you want to explore the data with dashboards instead of only `SELECT` statements. With the switch off, nothing else changes.
 
 ```bash
-# in state/deploy-vars.yml (or ansible/group_vars/all.yml):  grafana.enabled: true
+# in config/deploy-vars.yml (or ansible/group_vars/all.yml):  grafana.enabled: true
 scripts/up.sh                     # Steps 1-18 in order; every step is idempotent, so re-running over a live stack is safe
 scripts/grafana-smoke.sh          # check the datasource, run a real query through it
 ```
 
-Grafana needs Docker Hardened Images credentials before it can install. [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows where to put them, and [Two things Grafana needs](#two-things-grafana-needs-that-langfuse-did-not) below explains why.
+Grafana needs Docker Hardened Images credentials before it can install. [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml) shows where to put them, and [Two things Grafana needs](#two-things-grafana-needs-that-langfuse-did-not) below explains why.
 
 ---
 
@@ -49,7 +49,7 @@ There is no starter dashboard, and nothing is provisioned beyond the datasource.
 
 Langfuse's images come from `docker.langfuse.com` and Chainguard's anonymous `cgr.dev`, and its one extra artifact is a chart. Grafana's install adds two requirements.
 
-**DHI is a paid, authenticated catalog.** Docker Hardened Images (DHI) publishes hardened, minimal builds of common images, including Grafana's own upstream image and `awscli`. Pulling from `dhi.io` needs a Docker Hub account entitled to the catalog, unlike Chainguard's anonymous pulls. Step 2's `image_sync` logs in to `dhi.io` with `skopeo login`, passing the credential on stdin and never in a command line, the same way it handles ECR. It logs in only when an artifact in the list actually sources from `dhi.io`, so a run with Grafana off never asks for the credential. Where the credential comes from (`dhi.username` and `dhi.token` in `state/deploy-vars.yml`, or `DHI_USERNAME` and `DHI_TOKEN` in the environment) is covered once, for every optional credential the kit needs, in [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml).
+**DHI is a paid, authenticated catalog.** Docker Hardened Images (DHI) publishes hardened, minimal builds of common images, including Grafana's own upstream image and `awscli`. Pulling from `dhi.io` needs a Docker Hub account entitled to the catalog, unlike Chainguard's anonymous pulls. Step 2's `image_sync` logs in to `dhi.io` with `skopeo login`, passing the credential on stdin and never in a command line, the same way it handles ECR. It logs in only when an artifact in the list actually sources from `dhi.io`, so a run with Grafana off never asks for the credential. Where the credential comes from (`dhi.username` and `dhi.token` in `config/deploy-vars.yml`, or `DHI_USERNAME` and `DHI_TOKEN` in the environment) is covered once, for every optional credential the kit needs, in [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml).
 
 **The ClickHouse datasource is a plugin, and the cluster is not meant to fetch it.** `grafana-clickhouse-datasource` is not baked into any image. A pod that fetched it from `grafana.com` at startup would need the cluster to reach the internet, which the airgapped design of ClickHouse Government avoids. So Step 16 mirrors one pinned, SHA256-verified copy of the plugin zip into your own S3 bucket from your machine, the same "mirror once, pull only from your own account" shape Step 2 uses for images. Step 18's pod then reaches the bucket through an IRSA-authenticated initContainer, and never reaches `grafana.com`. IRSA (IAM roles for service accounts) is the mechanism that lets a pod assume an AWS role without static keys.
 
@@ -357,7 +357,7 @@ If you lose `state/`, you lose these files. Protect and back it up as you would 
 ## Troubleshooting
 
 **Step 2 stops with `An artifact sources from dhi.io but the DHI username/token are empty or still a <...> placeholder`.**
-Cause: Grafana is on, and neither `dhi.username` and `dhi.token` in `state/deploy-vars.yml` nor `DHI_USERNAME` and `DHI_TOKEN` in the environment is set. Fix: set them as [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) shows, using an account entitled to the DHI catalog, then re-run `scripts/up.sh`.
+Cause: Grafana is on, and neither `dhi.username` and `dhi.token` in `config/deploy-vars.yml` nor `DHI_USERNAME` and `DHI_TOKEN` in the environment is set. Fix: set them as [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml) shows, using an account entitled to the DHI catalog, then re-run `scripts/up.sh`.
 
 **The Grafana pod stays in `Init` and an initContainer fails before it does any work.**
 Cause: an initContainer image has no shell. The hardened runtime tags of both DHI images ship none, and the initContainers start with `sh -c`. Fix: keep `versions.grafana_app_dev` and `versions.awscli_app` on `-dev` tags, and keep `versions.grafana_app` on the runtime tag for the main container. To read an initContainer's log, run `kubectl logs -n grafana deploy/grafana -c gf-plugin-presign` or `-c gf-plugin-install`. The role prints the same tails when the rollout fails.

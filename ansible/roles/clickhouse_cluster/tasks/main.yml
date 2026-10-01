@@ -388,7 +388,9 @@
           # when the body is a JWKS document. The pod goes in `default`,
           # which exists on a first install; the ClickHouse namespace may not.
           # The marker is checked instead of the exit status because kubectl run
-          # does not reliably relay the container's exit code.
+          # does not reliably relay the container's exit code. For the same
+          # reason it can return no output at all when the container finishes
+          # before kubectl attaches, so the probe retries until the marker shows.
           ansible.builtin.command:
             argv:
               - kubectl
@@ -422,6 +424,9 @@
           environment:
             KUBECONFIG: "{{ kubeconfig_path }}"
           register: _cl_jwt_probe
+          until: "'JWKS_REACHABLE' in _cl_jwt_probe.stdout"
+          retries: 3
+          delay: 5
           failed_when: false
           changed_when: false
           check_mode: false
@@ -431,7 +436,7 @@
             that: "'JWKS_REACHABLE' in _cl_jwt_probe.stdout"
             fail_msg: >-
               A pod on the server nodes cannot fetch {{ _cl_jwt_out.jwks_uri }}
-              ({{ (_cl_jwt_probe.stdout ~ _cl_jwt_probe.stderr) | trim | truncate(400) }}).
+              ({{ (_cl_jwt_probe.stdout ~ _cl_jwt_probe.stderr) | trim | default('the probe pod returned no output', true) | truncate(400) }}).
               The JWT user directory is not enabled, because a ClickHouse server whose
               JWKS never loaded crashes on the first token that carries a key ID. Fix
               the route from the server nodes to Cognito (NAT or a VPC endpoint), then re-run.

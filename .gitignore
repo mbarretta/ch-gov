@@ -10,10 +10,15 @@
 .aws/config
 
 *.log
-# state/* (not state/) so the tracked example below can be re-included --
-# git refuses to un-ignore a file under a directory that is itself excluded.
-state/*
-!state/deploy-vars.yml.example
+# state/ is what a run writes (kubeconfig, generated passwords, certificates).
+state/
+
+# config/ is what you set before a run. The tracked examples show every file
+# in it; config/* (not config/) so they can be re-included -- git refuses to
+# un-ignore a file under a directory that is itself excluded.
+config/*
+!config/README.md
+!config/*.example
 logs/
 kubeconfig*
 

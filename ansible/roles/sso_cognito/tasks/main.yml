@@ -61,7 +61,7 @@
     fail_msg: >-
       sso.cognito.domain_prefix must be set when sso.enabled is true: lowercase
       letters, digits and hyphens, unique within {{ aws.target_region }}, and
-      without "aws", "amazon" or "cognito". Set it in state/deploy-vars.yml.
+      without "aws", "amazon" or "cognito". Set it in config/deploy-vars.yml.
     success_msg: "Hosted-UI domain prefix: {{ sso.cognito.domain_prefix }}"
 
 - name: Fail clearly when the group list is not usable

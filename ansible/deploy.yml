@@ -48,7 +48,7 @@
         fail_msg: >-
           size '{{ size }}' is not a known profile. Valid sizes:
           {{ size_profiles.keys() | list | sort | join(', ') }}. Set size in
-          state/deploy-vars.yml or pass -e size=<name>.
+          config/deploy-vars.yml or pass -e size=<name>.
         success_msg: "size '{{ size }}' is a known profile"
       tags: [always]
 
@@ -81,8 +81,8 @@
         fail_msg: >-
           These settings still hold a <...> placeholder:
           {{ _placeholder_keys | join(', ') }}.
-          Set real values in state/deploy-vars.yml (see
-          state/deploy-vars.yml.example) and re-run.
+          Set real values in config/deploy-vars.yml (see
+          config/deploy-vars.yml.example) and re-run.
         success_msg: "no placeholder values in the active deployment inputs"
       tags: [always]
 

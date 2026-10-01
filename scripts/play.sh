@@ -69,8 +69,8 @@ cd "$CH_ROOT/ansible"
 PY="$CH_ROOT/.venv/bin/python3"
 [[ -x "$PY" ]] || PY="$(command -v python3 || true)"
 
-# $CH_EXTRA_VARS (from common.sh: -e @state/deploy-vars.yml, then -e
-# @state/deploy-flags.json when go.sh has recorded flags; or empty) goes
+# $CH_EXTRA_VARS (from common.sh: -e @config/deploy-vars.yml, then -e
+# @config/deploy-flags.json when go.sh has recorded flags; or empty) goes
 # unquoted and ahead of "$@" in both branches below on purpose, so it
 # word-splits into its own -e/@file pair and so any explicit -e a caller
 # passes in "$@" still wins on conflicting keys -- Ansible lets the last -e

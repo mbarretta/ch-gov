@@ -27,7 +27,7 @@ fips: false
 # memory. tutorial = the upstream tutorial's node and pod sizes. The profiles
 # are defined in size_profiles below.
 #   size: minimal | tutorial
-# Override in state/deploy-vars.yml, or per run with -e size=tutorial.
+# Override in config/deploy-vars.yml, or per run with -e size=tutorial.
 # ---------------------------------------------------------------------------
 size: "minimal"
 
@@ -60,7 +60,7 @@ aws:
 
   # auth_mode: sso only -- ignored in profile mode.
   # Your IAM Identity Center portal. The placeholder must be replaced before
-  # `aws sso login` can work; state/deploy-vars.yml is the place for it.
+  # `aws sso login` can work; config/deploy-vars.yml is the place for it.
   sso_start_url: "https://<YOUR_SSO_PORTAL_ID>.awsapps.com/start"
   sso_session_name: "ch-gov"
   sso_region: "{{ aws.target_region }}"
@@ -557,7 +557,7 @@ all_artifacts: "{{ container_images + helm_charts + third_party_images
 
 # Docker Hardened Images login (grafana.enabled only). Never hardcoded here,
 # never written to group_vars or any other committed file -- this is a public
-# tutorial repo. Real values belong in the gitignored state/deploy-vars.yml,
+# tutorial repo. Real values belong in the gitignored config/deploy-vars.yml,
 # same as the aws: block above (see its comment); dhi.username/dhi.token
 # there win when set. Falls back to DHI_USERNAME/DHI_TOKEN in the environment
 # for callers (CI, ad-hoc shells) that would rather not touch that file. The
@@ -667,7 +667,7 @@ grafana_state_files:
 # Cognito client secret lives only in state/ (see sso_state_files) and in
 # Kubernetes Secrets, never in this file.
 #
-# Keep the whole block in step with state/deploy-vars.yml.example. Nested
+# Keep the whole block in step with config/deploy-vars.yml.example. Nested
 # dictionaries merge key by key across sources (ansible.cfg), lists replace.
 # This block sits before langfuse:, which must stay near the end of the file
 # (see the warning above it).

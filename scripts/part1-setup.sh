@@ -18,7 +18,7 @@
 #   ./part1-setup.sh --check      verify only; change nothing (safe to re-run)
 #   ./part1-setup.sh --tools-only stop after the tools (steps 1-4): no AWS profile
 #                                 or registry checks, so it works before you have
-#                                 edited state/deploy-vars.yml or logged in. Combine
+#                                 edited config/deploy-vars.yml or logged in. Combine
 #                                 with --check to verify the tools without installing.
 #                                 scripts/go.sh uses this.
 #

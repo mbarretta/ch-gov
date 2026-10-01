@@ -7,12 +7,12 @@
 > - How TLS at the load balancer works, what a self-signed certificate does and does not give you, and how to trust it from a client.
 > - How to operate and tear down Langfuse with the scripts the kit provides, and what to check when something goes wrong.
 >
-> **Run it:** set `langfuse.enabled: true` in `state/deploy-vars.yml`, run `scripts/up.sh`, then run `scripts/langfuse-smoke.sh` to post a trace and read it back from ClickHouse. Langfuse is optional and off by default. The kit is sized for learning and workshops, not production.
+> **Run it:** set `langfuse.enabled: true` in `config/deploy-vars.yml`, run `scripts/up.sh`, then run `scripts/langfuse-smoke.sh` to post a trace and read it back from ClickHouse. Langfuse is optional and off by default. The kit is sized for learning and workshops, not production.
 
 Parts 1–5 end with a ClickHouse cluster behind a load balancer. Steps 13–15 put a Langfuse server next to it, on the same nodes, and point it at that cluster for its analytics tables. The result is one working example of the idea "ClickHouse Government holds Langfuse's traces." With the switch off, nothing else changes.
 
 ```bash
-# in state/deploy-vars.yml:  langfuse:  {enabled: true}
+# in config/deploy-vars.yml:  langfuse:  {enabled: true}
 scripts/up.sh                     # Steps 1-15 in order; --from lb if the cluster is already up
 scripts/langfuse-smoke.sh         # post a trace, read it back from ClickHouse
 ```
@@ -60,7 +60,7 @@ Nothing new is created at the AWS compute or edge layer: no node group, VPC, EKS
 
 ## The switch, and what it changes
 
-Everything hangs off one block in the configuration. Its defaults live in `ansible/group_vars/all.yml`, and your overrides go in `state/deploy-vars.yml`, which changes only the keys you set ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)). The defaults are:
+Everything hangs off one block in the configuration. Its defaults live in `ansible/group_vars/all.yml`, and your overrides go in `config/deploy-vars.yml`, which changes only the keys you set ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)). The defaults are:
 
 ```yaml
 langfuse:
@@ -88,7 +88,7 @@ langfuse:
   signup_disabled: true     # no self-service accounts on a server that may be public
 ```
 
-To turn it on, put this in `state/deploy-vars.yml`:
+To turn it on, put this in `config/deploy-vars.yml`:
 
 ```yaml
 langfuse:
@@ -343,7 +343,7 @@ langfuse:
     tls_cert_days: 825      # validity of the self-signed certificate
 ```
 
-Put that in `state/deploy-vars.yml` and run `scripts/up.sh`. The role needs OpenSSL 3 on `PATH`. On macOS that means `brew install openssl@3` with `/opt/homebrew/bin` first, and the role fails with that instruction if it finds macOS's LibreSSL instead.
+Put that in `config/deploy-vars.yml` and run `scripts/up.sh`. The role needs OpenSSL 3 on `PATH`. On macOS that means `brew install openssl@3` with `/opt/homebrew/bin` first, and the role fails with that instruction if it finds macOS's LibreSSL instead.
 
 **`fips: true` turns this on for you.** The repo has a single `fips` boolean, and you should not also have to flip a second switch. So the role computes an *effective* TLS state: `tls` OR `fips`, whenever `load_balancer.type` is not `none`. With `fips: false`, `tls` alone decides, exactly as above. With `fips: true` and a `type` of `internal` or `public`, the NLB terminates TLS whether or not you also set `tls: true`. `load_balancer.type: none` has no NLB at all, so there is nothing to terminate TLS on. A `none` deployment stays `http://localhost:3000` through the port-forward regardless of `fips`. Two more `fips: true` changes ride along with the same certificate:
 

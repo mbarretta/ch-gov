@@ -33,7 +33,7 @@ ch_resolve || exit 1
 # storage, so it exists before the cluster step reads its issuer, and the
 # ClickHouse roles for token logins (ch-jwt) right after verify, once the
 # cluster answers. sso_enabled/sso_jwt_enabled (lib/common.sh) read the merged
-# sso: block, so a state/deploy-vars.yml override counts. --from slices this
+# sso: block, so a config/deploy-vars.yml override counts. --from slices this
 # same list, so it keeps the order.
 SSO_ENABLED=false; SSO_JWT=false
 sso_enabled && SSO_ENABLED=true

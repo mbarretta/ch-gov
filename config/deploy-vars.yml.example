@@ -1,6 +1,6 @@
 # Tracked example of the local override for ansible/group_vars/all.yml. See
-# docs/part-1-prerequisites.md section 3b -- the real file,
-# state/deploy-vars.yml, is generated automatically (gitignored) the first
+# docs/part-1-prerequisites.md, "Persisting your account IDs" -- the real file,
+# config/deploy-vars.yml, is generated automatically (gitignored) the first
 # time you run any script under scripts/, with this exact shape.
 # Only the keys you set here change; every other default keeps its all.yml
 # value (dictionaries merge key by key).
@@ -41,7 +41,7 @@ dhi:
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
 # scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
-# command-line flags instead. It records them in state/deploy-flags.json, which is
+# command-line flags instead. It records them in config/deploy-flags.json, which is
 # layered on top of this file, so a value set by a flag wins over the same key here.
 #
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's

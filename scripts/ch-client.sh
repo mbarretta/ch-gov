@@ -72,7 +72,7 @@ else die "clickhouse-client not installed: brew install clickhouse"; fi
 ((FRESH)) && { ((SSO)) || die "--fresh only applies with --sso"; export CH_SSO_FRESH=1; }
 TOKEN=""
 if ((SSO)); then
-  sso_jwt_enabled || die "--sso needs sso.enabled and sso.clickhouse_jwt.enabled in state/deploy-vars.yml, then: scripts/play.sh --tags sso-idp,cluster,ch-jwt"
+  sso_jwt_enabled || die "--sso needs sso.enabled and sso.clickhouse_jwt.enabled in config/deploy-vars.yml, then: scripts/play.sh --tags sso-idp,cluster,ch-jwt"
   TOKEN="${CH_JWT:-}"
   [[ -n "$TOKEN" ]] || TOKEN="$(sso_login_id_token)" || exit 1
 else

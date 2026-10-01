@@ -1,0 +1,7 @@
+{
+  "fips": false,
+  "size": "minimal",
+  "langfuse": { "enabled": false },
+  "grafana": { "enabled": false },
+  "sso": { "enabled": false }
+}

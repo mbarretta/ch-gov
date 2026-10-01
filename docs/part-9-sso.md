@@ -13,7 +13,7 @@
 Parts 1–5 end with a ClickHouse cluster behind a load balancer. [Part 6](part-6-langfuse.md) and [Part 8](part-8-grafana.md) add Langfuse and Grafana next to it. This part adds a third optional capability, also off by default: people sign in as themselves instead of sharing the generated admin passwords. With `sso.enabled: false` (the shipped default) no existing step renders anything different and no AWS resource is created.
 
 ```bash
-# in state/deploy-vars.yml (or ansible/group_vars/all.yml):  sso.enabled: true  (plus the keys under "The switches")
+# in config/deploy-vars.yml (or ansible/group_vars/all.yml):  sso.enabled: true  (plus the keys under "The switches")
 scripts/up.sh                       # Steps 1-18 in order; sso-idp runs after storage, ch-jwt after verify
 scripts/sso-smoke.sh                # check discovery, Langfuse's provider list, and a token login
 scripts/ch-client.sh --sso          # open a ClickHouse session as yourself
@@ -66,7 +66,7 @@ The tag `sso` selects both 6b and 11b. The order matters and `scripts/up.sh` kee
 
 ## The switches: the `sso:` variables
 
-Put overrides in `state/deploy-vars.yml`. `ansible/group_vars/all.yml` holds the defaults, and `state/deploy-vars.yml.example` carries the same block commented out. `ansible/ansible.cfg` sets `hash_behaviour = merge`, so nested mappings under `sso:` merge key by key across sources while lists (`groups`, `enforce_domains`, `networks`) are replaced whole. A run that does not use that `ansible.cfg` replaces the entire `sso` mapping instead, so copy the complete block when in doubt.
+Put overrides in `config/deploy-vars.yml`. `ansible/group_vars/all.yml` holds the defaults, and `config/deploy-vars.yml.example` carries the same block commented out. `ansible/ansible.cfg` sets `hash_behaviour = merge`, so nested mappings under `sso:` merge key by key across sources while lists (`groups`, `enforce_domains`, `networks`) are replaced whole. A run that does not use that `ansible.cfg` replaces the entire `sso` mapping instead, so copy the complete block when in doubt.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -262,7 +262,7 @@ In order, it:
 3. **Logs in to ClickHouse with the token**, when `sso.clickhouse_jwt.enabled` is on and a token is supplied through `CH_JWT` or `--sso`. It checks that `SELECT currentUser()` starts with `JWT::` and that `SHOW GRANTS` for that user is not empty. It reads `SHOW GRANTS` and not `currentRoles()` for the reason in [ClickHouse sign-in](#clickhouse-sign-in-step-9).
 4. **Sends a forged token, only with `--negative`,** when `sso.clickhouse_jwt.enabled` is on. The script builds a token locally with Python's standard library: a header with a `kid`, a payload with the ClickHouse client ID as `aud`, and a random signature. It passes when `clickhouse-client` reports `AUTHENTICATION_FAILED` and the server pods' restart counts are the same before and after. **This check is opt-in because it is the crash trigger described in [ClickHouse sign-in](#clickhouse-sign-in-step-9):** a token with a `kid` sent to a server whose JWKS has never loaded crashes that server. No default path, including `scripts/up.sh` and a plain `scripts/sso-smoke.sh`, sends such a token. Without `--negative` the step is skipped with a message that says so.
 
-Parts that are switched off are skipped with a message that says so. The script reads the same merged configuration the playbook does, so a `state/deploy-vars.yml` override of `sso:` counts. **What it does not cover:** the Langfuse browser login itself, group membership of a particular person, and anything behind a SAML provider.
+Parts that are switched off are skipped with a message that says so. The script reads the same merged configuration the playbook does, so a `config/deploy-vars.yml` override of `sso:` counts. **What it does not cover:** the Langfuse browser login itself, group membership of a particular person, and anything behind a SAML provider.
 
 ## Why the service paths stay on passwords
 
@@ -333,7 +333,7 @@ state/:     sso-cognito-outputs.json (no secret), sso-cognito-client-secret (060
 
 ## Troubleshooting
 
-- **`domain_prefix must be set`.** Set `sso.cognito.domain_prefix` in `state/deploy-vars.yml`. It is unique within the region and must not contain `aws`, `amazon` or `cognito`.
+- **`domain_prefix must be set`.** Set `sso.cognito.domain_prefix` in `config/deploy-vars.yml`. It is unique within the region and must not contain `aws`, `amazon` or `cognito`.
 - **Step 6b asks for `langfuse.url`.** Cognito accepts only `https` callbacks. Set `langfuse.url` to the address people use and run `scripts/play.sh --tags sso-idp,lf-app`.
 - **Step 9 says a pod cannot fetch the JWKS URL.** Fix the route from the server nodes to the Cognito host (NAT or an endpoint) and re-run. Helm has not been touched.
 - **Step 15 stops with `sso.langfuse.enabled opens Langfuse sign-up`.** Neither `sso.langfuse.disable_password_login` nor `sso.langfuse.allow_password_signup` is `true`. Pick one as described in [Langfuse sign-in](#langfuse-sign-in-step-15), then run `scripts/play.sh --tags lf-app`.

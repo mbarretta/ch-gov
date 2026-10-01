@@ -11,7 +11,7 @@
 
 The upstream tutorial for this deployment is [deploy-aws](https://clickhouse.com/docs/cloud/clickhouse-private/tutorials/deploy-aws). The playbook implements its Steps 1 to 5 in the roles named in each section below, and this Part explains the reasoning behind them.
 
-Three placeholders appear in this Part, and each is a value you set in `state/deploy-vars.yml` ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)). `<YOUR_ACCOUNT_ID>` is your AWS account (`aws.target_account_id`). `<SOURCE_ECR_ACCOUNT_ID>` is the account that hosts ClickHouse's source registry (`aws.source_ecr_account_id`), which ClickHouse gives you. `<region>` is your AWS Region (`aws.target_region`, default `us-east-1`).
+Three placeholders appear in this Part, and each is a value you set in `config/deploy-vars.yml` ([Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)). `<YOUR_ACCOUNT_ID>` is your AWS account (`aws.target_account_id`). `<SOURCE_ECR_ACCOUNT_ID>` is the account that hosts ClickHouse's source registry (`aws.source_ecr_account_id`), which ClickHouse gives you. `<region>` is your AWS Region (`aws.target_region`, default `us-east-1`).
 
 ## Advanced: run individual steps
 
@@ -150,7 +150,7 @@ A plain tag is therefore a manifest list, and each node pulls the entry that mat
 fips: false     # true = FIPS x86_64 build
 ```
 
-Set `fips: true` in `state/deploy-vars.yml` to make it persistent. For a single run, pass it on the command line:
+Set `fips: true` in `config/deploy-vars.yml` to make it persistent. For a single run, pass it on the command line:
 
 ```bash
 scripts/play.sh --tags images                 # standard
@@ -222,7 +222,7 @@ In `us-east-1`, `us-east-1e` offers none of the default node instance types. The
 | private ×3 | `10.20.0.0/18`, `.64.0/18`, `.128.0/18` | all nodes and pods |
 | public ×3 | `10.20.192.0/20`, `.208.0/20`, `.224.0/20` | NAT gateways, internet-facing load balancers |
 
-**Why /18 for the private subnets** (about 16,000 addresses each): the AWS VPC CNI gives every *pod* a real VPC IP address. Pod density is therefore bounded by subnet size, not only by node count, and undersizing is painful to fix later. You can change the ranges under `infrastructure` in `state/deploy-vars.yml`.
+**Why /18 for the private subnets** (about 16,000 addresses each): the AWS VPC CNI gives every *pod* a real VPC IP address. Pod density is therefore bounded by subnet size, not only by node count, and undersizing is painful to fix later. You can change the ranges under `infrastructure` in `config/deploy-vars.yml`.
 
 ### Two things EKS needs that are easy to miss
 
@@ -387,7 +387,7 @@ That last row is the one people miss. If you taint every node group, CoreDNS nev
 
 The kit ships two size profiles, and one setting chooses between them. `minimal` is the default. It uses small node types and gives the ClickHouse pods a modest, fixed amount of CPU and memory, so it suits learning and workshops. `tutorial` is the sizing the upstream tutorial specifies: much larger nodes and pods.
 
-To select a profile, set `size` in `state/deploy-vars.yml`, or pass it for a single run:
+To select a profile, set `size` in `config/deploy-vars.yml`, or pass it for a single run:
 
 ```yaml
 size: tutorial     # or minimal, the default

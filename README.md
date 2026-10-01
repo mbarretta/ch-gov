@@ -22,14 +22,14 @@ You need three things before you start, and all of them come from your ClickHous
 
 - **The entitlement.** Access to ClickHouse Government (ClickHouse Private), which is what lets you read its container images.
 - **Access to the image registry for your AWS account.** ClickHouse sets up the pull role `ClickHouseAirgapECRPullRole` in your AWS account, with the trust and the read access to the source registry that it needs. You do not create it. Share your AWS account ID with your ClickHouse contact, and the kit checks, before it copies anything, that your account can assume the role.
-- **The source registry's account ID.** ClickHouse tells you the AWS account that hosts the images. In the docs and in `ansible/group_vars/all.yml` it appears as the placeholder `<SOURCE_ECR_ACCOUNT_ID>`, and you set the real value as `aws.source_ecr_account_id` in `state/deploy-vars.yml`. Part 1 walks through this file.
+- **The source registry's account ID.** ClickHouse tells you the AWS account that hosts the images. In the docs and in `ansible/group_vars/all.yml` it appears as the placeholder `<SOURCE_ECR_ACCOUNT_ID>`, and you set the real value as `aws.source_ecr_account_id` in `config/deploy-vars.yml`. Part 1 walks through this file.
 
 You also need an AWS account of your own with permission to create VPCs, EKS clusters, IAM roles, S3 buckets, KMS keys, and ECR repositories, and a way to sign in to it, either AWS IAM Identity Center (SSO) or a named profile you already have.
 
 ## Third-party accounts
 
 - **Chainguard (free tier).** Only if you turn on Langfuse. Its bundled PostgreSQL and Valkey run on Chainguard images from `cgr.dev`, which the free tier serves without a login, so you need internet access for the image copy but no account.
-- **Docker Hardened Images (DHI) entitlement.** Only if you turn on Grafana. Its images come from `dhi.io`, which requires a Docker Hub account entitled to the DHI catalog. You supply the username and an access token in `state/deploy-vars.yml` or in the `DHI_USERNAME` and `DHI_TOKEN` environment variables. A run without Grafana never asks for them.
+- **Docker Hardened Images (DHI) entitlement.** Only if you turn on Grafana. Its images come from `dhi.io`, which requires a Docker Hub account entitled to the DHI catalog. You supply the username and an access token in `config/deploy-vars.yml` or in the `DHI_USERNAME` and `DHI_TOKEN` environment variables. A run without Grafana never asks for them.
 
 ## What it costs and how long it takes
 
@@ -72,11 +72,11 @@ The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your 
 
 ## Quickstart
 
-[Part 1](docs/part-1-prerequisites.md) has the ordered setup box with the details of each command. The order matters. A first `scripts/part1-setup.sh` run installs the tools and creates `state/deploy-vars.yml`, but its AWS profile checks report failures until you have edited that file and logged in. Once you have, run `scripts/part1-setup.sh --check` to confirm, then start the deploy.
+[Part 1](docs/part-1-prerequisites.md) has the ordered setup box with the details of each command. The order matters. A first `scripts/part1-setup.sh` run installs the tools and creates `config/deploy-vars.yml`, but its AWS profile checks report failures until you have edited that file and logged in. Once you have, run `scripts/part1-setup.sh --check` to confirm, then start the deploy.
 
 ```bash
-scripts/part1-setup.sh    # install the tools; creates state/deploy-vars.yml (profile checks fail until the next two steps)
-# edit state/deploy-vars.yml: your account ID, the source registry account ID,
+scripts/part1-setup.sh    # install the tools; creates config/deploy-vars.yml (profile checks fail until the next two steps)
+# edit config/deploy-vars.yml: your account ID, the source registry account ID,
 # and your SSO portal URL (or set aws.auth_mode: profile to use a profile you already have)
 source scripts/env.sh     # point this shell at the project's AWS configuration
 aws sso login             # SSO mode only
@@ -90,9 +90,9 @@ When `scripts/up.sh` finishes, it prints how to connect. To check that the clust
 scripts/ch-client.sh -q "SELECT version()"
 ```
 
-To include the optional capabilities, set `enabled: true` in the `langfuse:` block, the `grafana:` block, or both, in `state/deploy-vars.yml`. Then run `scripts/up.sh` again. Every step is idempotent, so running it over an existing stack changes only what differs.
+To include the optional capabilities, set `enabled: true` in the `langfuse:` block, the `grafana:` block, or both, in `config/deploy-vars.yml`. Then run `scripts/up.sh` again. Every step is idempotent, so running it over an existing stack changes only what differs.
 
-**Or do it all with one command.** `scripts/go.sh` runs the whole sequence above, from installing the tools to `scripts/up.sh`, and takes a flag for each optional component. It signs you in to AWS when you are not, and stops before it spends anything if an input is missing. Your account IDs and portal URL still go in `state/deploy-vars.yml`, which the first run creates.
+**Or do it all with one command.** `scripts/go.sh` runs the whole sequence above, from installing the tools to `scripts/up.sh`, and takes a flag for each optional component. It signs you in to AWS when you are not, and stops before it spends anything if an input is missing. Your account IDs and portal URL still go in `config/deploy-vars.yml`, which the first run creates.
 
 ```bash
 scripts/go.sh --dry-run --langfuse --grafana    # show the plan and check the inputs; deploys nothing
@@ -100,7 +100,7 @@ scripts/go.sh --langfuse --grafana              # ClickHouse, plus Langfuse and 
 scripts/go.sh --fips --size tutorial            # the FIPS build, at the tutorial's larger sizes
 ```
 
-The flags are `--langfuse`, `--grafana`, `--sso`, `--fips` and `--size`, and each on/off flag has a `--no-` form. The script remembers them in `state/deploy-flags.json`, which sits on top of `state/deploy-vars.yml`, so `scripts/up.sh` and the other scripts see the same setup. Run `scripts/go.sh --help` for all of them, including the choices that single sign-on asks you to make.
+The flags are `--langfuse`, `--grafana`, `--sso`, `--fips` and `--size`, and each on/off flag has a `--no-` form. The script remembers them in `config/deploy-flags.json`, which sits on top of `config/deploy-vars.yml`, so `scripts/up.sh` and the other scripts see the same setup. Both files live in [`config/`](config/README.md), with a tracked `.example` beside each, so you can also write the setup by hand. Run `scripts/go.sh --help` for all of them, including the choices that single sign-on asks you to make.
 
 To stop, use the teardown script:
 
@@ -124,7 +124,8 @@ For the FIPS posture on its own, where the validated cryptography is ClickHouse'
 | [`FIPS.md`](FIPS.md) | The FIPS 140-3 posture in one page: what `fips: true` covers and what it does not |
 | `ansible/` | The playbook and roles that build each step, and `ansible/group_vars/all.yml`, the one configuration file with a comment on every value |
 | `scripts/` | The scripts you run: `go.sh` (everything in one command), `up.sh`, `down.sh`, `play.sh`, `ch-client.sh`, the smoke tests, and setup helpers |
-| `state/` | Local files the scripts generate, such as passwords, the kubeconfig and the flags `go.sh` records. Everything in it except the tracked example is gitignored |
+| [`config/`](config/README.md) | The settings you choose before a run: `deploy-vars.yml` (account IDs and overrides) and `deploy-flags.json` (the component switches `go.sh` records). Each has a tracked `.example`; the real files are gitignored |
+| `state/` | Local files a run generates, such as passwords and the kubeconfig. Gitignored |
 
 ## Check yourself
 

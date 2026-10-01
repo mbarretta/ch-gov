@@ -12,7 +12,7 @@ Each section states the risk it closes, the `group_vars` ternary that gates it, 
 
 **Where to look.** Every mechanism below comes from the code, the Helm charts, and the CloudFormation templates in this repository, and the self-checks let you confirm each one on your own cluster. [Scope and boundaries](limitations.md) collects what the kit covers and leaves out by design, and [FIPS.md](../FIPS.md) is the one-page summary.
 
-To turn the switch on, set `fips: true` in `state/deploy-vars.yml` (or in `ansible/group_vars/all.yml`) before you run `scripts/up.sh`. The self-checks assume you have run `source scripts/env.sh` so that `kubectl` and the AWS CLI point at this project.
+To turn the switch on, set `fips: true` in `config/deploy-vars.yml` (or in `ansible/group_vars/all.yml`) before you run `scripts/up.sh`. The self-checks assume you have run `source scripts/env.sh` so that `kubectl` and the AWS CLI point at this project.
 
 ---
 

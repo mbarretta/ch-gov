@@ -166,7 +166,7 @@ Steps 13–15 are off by default and change nothing when they are off. Switched 
 
 ### Optional: Grafana on top
 
-Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
+Steps 16–18 are also off by default, and independent of Langfuse. Switched on (`grafana.enabled: true`), they install Grafana with one datasource already wired up: a read-only user (Step 17) reached through a plugin mirrored into your own S3 bucket (Step 16), because the airgapped design does not let the cluster fetch it live. When both options are on, that one datasource can see Langfuse's tables too, with no separate grant. Grafana's images come from DHI (Docker Hardened Images), a paid catalog that needs a login, unlike Chainguard's anonymous pulls. That is a second credential, and [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml) covers it. The steps, the plugin-mirror mechanism, and the costs and teardown rules are in **Part 8**.
 
 ### Optional: single sign-on
 
@@ -182,7 +182,7 @@ Everything above is automated as an **Ansible playbook** with one role per step,
 scripts/part1-setup.sh
 ```
 
-This installs and version-checks the tools, creates a project-local Python virtual environment for Ansible, and installs the Ansible collections and the preflight plugin. It is safe to rerun. On macOS it installs missing tools with Homebrew. On Linux you install the tools first, and [Part 1, The seven tools](part-1-prerequisites.md#the-seven-tools-and-what-each-one-is-for) shows how. The first script you run also creates `state/deploy-vars.yml`, the file where your account details go.
+This installs and version-checks the tools, creates a project-local Python virtual environment for Ansible, and installs the Ansible collections and the preflight plugin. It is safe to rerun. On macOS it installs missing tools with Homebrew. On Linux you install the tools first, and [Part 1, The seven tools](part-1-prerequisites.md#the-seven-tools-and-what-each-one-is-for) shows how. The first script you run also creates `config/deploy-vars.yml`, the file where your account details go.
 
 ### Give the kit AWS access
 
@@ -193,7 +193,7 @@ The kit needs two AWS profiles: `target_profile` (your account, default name `ch
 
 The role behind `ch-gov-ecr-pull` is `ClickHouseAirgapECRPullRole`. ClickHouse sets it up in your account. You share your AWS account ID with your ClickHouse contact, and you do not create the role.
 
-For SSO, fill in your account IDs and portal URL in `state/deploy-vars.yml`, then log in:
+For SSO, fill in your account IDs and portal URL in `config/deploy-vars.yml`, then log in:
 
 ```bash
 source scripts/env.sh                       # points the AWS CLI at the repo's config
@@ -204,7 +204,7 @@ Tokens last hours, not days. Every script checks your credentials first and prin
 
 ### Look at the one config file
 
-`ansible/group_vars/all.yml` holds the defaults for everything. Put your own values in `state/deploy-vars.yml`, which overrides only the keys you set. These are the values you are most likely to touch:
+`ansible/group_vars/all.yml` holds the defaults for everything. Put your own values in `config/deploy-vars.yml`, which overrides only the keys you set. These are the values you are most likely to touch:
 
 | Key | Default | What it decides |
 |---|---|---|
@@ -291,11 +291,19 @@ it as fixed once deployed.
 | `clickhouse-admin-password` | The `default` user's password. Generated on first run |
 | `clickhouse-prometheus-password` | For the metrics endpoint |
 | `preflight/` | The rendered preflight spec and the last report |
-| `deploy-vars.yml` | Your account IDs and other overrides. See [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) |
 | `skopeo-auth.json` | Short-lived registry credentials from Step 2 |
 
 Lose `state/` and you lose the admin password. Back it up somewhere
 appropriate if the cluster matters.
+
+### On your machine, in `config/` (gitignored)
+
+| File | What |
+|---|---|
+| `deploy-vars.yml` | Your account IDs and other overrides. See [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml) |
+| `deploy-flags.json` | The component switches `scripts/go.sh` records. Layered on top of `deploy-vars.yml` |
+
+The tracked `.example` file beside each one shows its shape. `config/` is what you set before a run and `state/` is what a run writes, so you can delete `state/` without losing your settings.
 
 ## Operating it
 

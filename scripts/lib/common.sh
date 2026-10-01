@@ -29,7 +29,7 @@ die()   { fail "$*"; exit 1; }
 
 # ---- merged configuration resolver ------------------------------------------
 # Every script reads its configuration through Ansible, the same way the
-# playbook does, so state/deploy-vars.yml (passed with -e @file) over
+# playbook does, so config/deploy-vars.yml (passed with -e @file) over
 # ansible/group_vars/all.yml is merged identically everywhere: dictionaries
 # merge key by key (hash_behaviour = merge in ansible/ansible.cfg, which is why
 # the call runs from ansible/) and Jinja defaults such as sso_region or the
@@ -42,11 +42,11 @@ CH_VARS_JSON=""
 # The second override layer, written by scripts/go.sh from its component
 # flags (--langfuse, --grafana, --sso, --fips, --size). It is JSON, which YAML
 # accepts, so go.sh can merge into it with jq instead of editing the
-# commented state/deploy-vars.yml. It loads after deploy-vars.yml, so a key set
+# commented config/deploy-vars.yml. It loads after deploy-vars.yml, so a key set
 # in both takes this file's value, and it holds only the keys a flag has set.
 # The variable can be pointed elsewhere before the first resolve (go.sh
 # --dry-run does this to preview a plan without writing anything).
-CH_FLAGS_FILE="${CH_FLAGS_FILE:-$CH_PROJECT_ROOT/state/deploy-flags.json}"
+CH_FLAGS_FILE="${CH_FLAGS_FILE:-$CH_PROJECT_ROOT/config/deploy-flags.json}"
 export CH_FLAGS_FILE
 
 ch_resolve() {
@@ -54,7 +54,7 @@ ch_resolve() {
   have ansible || { fail "ansible is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
   have jq      || { fail "jq is not installed -- run scripts/part1-setup.sh" >&2; return 1; }
   local extra=() out errf rc=0 json
-  [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]] && extra=(-e "@$CH_PROJECT_ROOT/state/deploy-vars.yml")
+  [[ -f "$CH_PROJECT_ROOT/config/deploy-vars.yml" ]] && extra=(-e "@$CH_PROJECT_ROOT/config/deploy-vars.yml")
   [[ -s "$CH_FLAGS_FILE" ]] && extra+=(-e "@$CH_FLAGS_FILE")
   errf="$(mktemp)"
   # dhi_configured is a boolean on purpose: the Docker Hub token itself never
@@ -70,7 +70,7 @@ ch_resolve() {
     return 0
   fi
   CH_VARS_JSON=""
-  fail "could not resolve the configuration (ansible/group_vars/all.yml over state/deploy-vars.yml) with Ansible" >&2
+  fail "could not resolve the configuration (ansible/group_vars/all.yml over config/deploy-vars.yml) with Ansible" >&2
   { [[ -n "$out" ]] && printf '%s\n' "$out"; cat "$errf"; } | head -20 | sed 's/^/      /' >&2
   rm -f "$errf"
   return 1
@@ -173,12 +173,12 @@ render_aws_config() {
 # ansible/group_vars/all.yml's aws: block ships with two placeholders
 # (target_account_id, source_ecr_account_id) because this is a public
 # tutorial repo -- a real account number has no business in a tracked file.
-# state/deploy-vars.yml is the gitignored local override a deployer fills in
+# config/deploy-vars.yml is the gitignored local override a deployer fills in
 # once with their real values, instead of hand-editing all.yml. Only fills in
 # the file when it's missing, so it never clobbers a copy someone has already
-# filled in. Keep it in step with state/deploy-vars.yml.example.
+# filled in. Keep it in step with config/deploy-vars.yml.example.
 render_deploy_vars() {
-  local out="$CH_PROJECT_ROOT/state/deploy-vars.yml"
+  local out="$CH_PROJECT_ROOT/config/deploy-vars.yml"
   if [[ -f "$out" ]]; then
     chmod 600 "$out"
     return 0
@@ -187,7 +187,7 @@ render_deploy_vars() {
   cat > "$out" <<'EOF'
 # Local override for ansible/group_vars/all.yml. Only the keys you set here
 # change; every other default keeps its all.yml value (dictionaries merge key
-# by key). This file is gitignored (state/) and every script picks it up
+# by key). This file is gitignored (config/) and every script picks it up
 # automatically afterward.
 aws:
   # sso     -- the kit renders a project-local .aws/config and you log in with
@@ -226,7 +226,7 @@ dhi:
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
 # scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
-# command-line flags instead. It records them in state/deploy-flags.json, which is
+# command-line flags instead. It records them in config/deploy-flags.json, which is
 # layered on top of this file, so a value set by a flag wins over the same key here.
 #
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's
@@ -254,6 +254,23 @@ dhi:
 EOF
   chmod 600 "$out"
 }
+# The settings used to live in state/. Move a copy left there by an earlier
+# checkout into config/ so it is not silently ignored. Never overwrites a file
+# already in config/.
+migrate_legacy_config() {
+  local f
+  for f in deploy-vars.yml deploy-flags.json; do
+    [[ -f "$CH_PROJECT_ROOT/state/$f" ]] || continue
+    if [[ -e "$CH_PROJECT_ROOT/config/$f" ]]; then
+      warn "state/$f is no longer read; config/$f is used instead. Delete the old copy when you no longer need it"
+    else
+      mkdir -p "$CH_PROJECT_ROOT/config"
+      mv "$CH_PROJECT_ROOT/state/$f" "$CH_PROJECT_ROOT/config/$f"
+      warn "moved state/$f to config/$f; your settings now live in config/"
+    fi
+  done
+}
+migrate_legacy_config
 render_deploy_vars
 
 # Tracks non-fatal problems so the script can exit non-zero at the very end
@@ -413,7 +430,7 @@ gf_cacert() {
 
 # ---- Single sign-on (optional Steps 6b and 11b) -----------------------------
 # sso: sits before langfuse: in group_vars, and these helpers read it through
-# ch_var like everything else, so state/deploy-vars.yml is merged over all.yml
+# ch_var like everything else, so config/deploy-vars.yml is merged over all.yml
 # key by key exactly as the playbook resolves it (nested mappings merge, lists
 # replace). Nothing here scrapes the YAML file.
 
@@ -632,7 +649,7 @@ XML
 # this file is sourced, unless the caller sets CH_DEFER_INIT=1 first and calls
 # ch_init itself later (scripts/part1-setup.sh does, because Ansible and jq are
 # what it installs). render_deploy_vars ran first so a fresh checkout resolves
-# against the freshly written state/deploy-vars.yml, not only all.yml.
+# against the freshly written config/deploy-vars.yml, not only all.yml.
 #
 # aws.auth_mode sso always exports AWS_CONFIG_FILE as the repo-local
 # .aws/config, replacing any value the caller had set; profile mode leaves it
@@ -646,12 +663,12 @@ ch_init() {
   elif ch_fips_enabled; then
     export AWS_USE_FIPS_ENDPOINT=true
   fi
-  # Non-empty only once state/deploy-vars.yml exists (render_deploy_vars always
+  # Non-empty only once config/deploy-vars.yml exists (render_deploy_vars always
   # creates it, so in practice this is "always" -- the explicit check keeps the
   # intent, "load the override file when there is one", legible at the
   # scripts/play.sh call site).
   CH_EXTRA_VARS=""
-  [[ -f "$CH_PROJECT_ROOT/state/deploy-vars.yml" ]] && CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/state/deploy-vars.yml"
+  [[ -f "$CH_PROJECT_ROOT/config/deploy-vars.yml" ]] && CH_EXTRA_VARS="-e @$CH_PROJECT_ROOT/config/deploy-vars.yml"
   # The flags layer goes second so it wins on a key both files set, matching
   # the order ch_resolve passes them in.
   [[ -s "$CH_FLAGS_FILE" ]] && CH_EXTRA_VARS="${CH_EXTRA_VARS:+$CH_EXTRA_VARS }-e @$CH_FLAGS_FILE"

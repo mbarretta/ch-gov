@@ -6,11 +6,11 @@
 > - How `internal` and `public` differ, why the source ranges are never left empty, and why the kit probes from a different node than the servers.
 > - How to check the load balancer, connect through it, and remove it in the right order.
 >
-> **Run it:** `scripts/up.sh` runs this step last, after the cluster is verified. To change the load balancer type later, edit `state/deploy-vars.yml` and run `scripts/up.sh --from lb`. Connect with `scripts/ch-client.sh --lb` from anywhere the load balancer's address is reachable.
+> **Run it:** `scripts/up.sh` runs this step last, after the cluster is verified. To change the load balancer type later, edit `config/deploy-vars.yml` and run `scripts/up.sh --from lb`. Connect with `scripts/ch-client.sh --lb` from anywhere the load balancer's address is reachable.
 
 Parts 1 to 4 end with a working cluster that only `kubectl` can reach. This step gives it an address. The step is not in the tutorial, and it comes with one finding that matters more than the step itself.
 
-You choose the load balancer type with one setting, `clickhouse.load_balancer.type`. Put it in `state/deploy-vars.yml` (see [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)) to override the default in `ansible/group_vars/all.yml`:
+You choose the load balancer type with one setting, `clickhouse.load_balancer.type`. Put it in `config/deploy-vars.yml` (see [Part 1, Persisting your account IDs](part-1-prerequisites.md#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)) to override the default in `ansible/group_vars/all.yml`:
 
 ```yaml
 clickhouse:

@@ -14,7 +14,7 @@
 #   --grafana             Grafana with a ClickHouse datasource (Steps 16-18). Needs a
 #                         Docker Hardened Images login: DHI_USERNAME and DHI_TOKEN in
 #                         the environment, or dhi.username and dhi.token in
-#                         state/deploy-vars.yml
+#                         config/deploy-vars.yml
 #   --sso                 Amazon Cognito single sign-on (Steps 6b and 11b): ClickHouse
 #                         token logins, plus Langfuse sign-in when Langfuse is on.
 #                         Needs --sso-domain-prefix the first time
@@ -36,20 +36,20 @@
 #
 # What it does, in order:
 #   1. installs and checks the tools          (scripts/part1-setup.sh --tools-only)
-#   2. records your component flags           (state/deploy-flags.json)
+#   2. records your component flags           (config/deploy-flags.json)
 #   3. checks the inputs the components need  (account IDs, DHI login, SSO choices)
 #   4. signs in to AWS when you are not       (aws sso login, in sso mode)
 #   5. checks both AWS profiles and the source registry (scripts/part1-setup.sh --check)
 #   6. builds the stack                       (scripts/up.sh: prints the cost, asks, builds)
 #
-# Flags are remembered. They are written to state/deploy-flags.json, which is layered
-# over state/deploy-vars.yml, so up.sh, down.sh, play.sh and the smoke tests all see
+# Flags are remembered. They are written to config/deploy-flags.json, which is layered
+# over config/deploy-vars.yml, so up.sh, down.sh, play.sh and the smoke tests all see
 # the same configuration. A component you leave off the command line keeps its current
 # setting; --no-langfuse and friends switch one off. Switching a component off only
 # changes the configuration -- scripts/down.sh removes what is already deployed. Flags
 # are recorded before the input checks run, so a run that a check then stops keeps them.
 #
-# Your account IDs and SSO portal URL are not flags. They go in state/deploy-vars.yml,
+# Your account IDs and SSO portal URL are not flags. They go in config/deploy-vars.yml,
 # which the first run creates; the script stops and names the keys that still hold a
 # <placeholder>. Anything else in the configuration (the load balancer type, the SSO
 # role grants, domain restrictions) is also set there. Every step is idempotent, so
@@ -166,11 +166,11 @@ else
   merged="$(jq -S --argjson p "$PATCH" '. * $p' <<<"$current")"
   if ((DRY)); then
     printf '%s\n' "$merged" > "$CH_FLAGS_FILE"
-    ok "would record in state/deploy-flags.json: $(jq -c . <<<"$PATCH")"
+    ok "would record in config/deploy-flags.json: $(jq -c . <<<"$PATCH")"
   else
     mkdir -p "$(dirname "$CH_FLAGS_FILE")"
     (umask 077; printf '%s\n' "$merged" > "$CH_FLAGS_FILE")
-    ok "recorded in state/deploy-flags.json: $(jq -c . <<<"$PATCH")"
+    ok "recorded in config/deploy-flags.json: $(jq -c . <<<"$PATCH")"
   fi
 fi
 
@@ -202,12 +202,12 @@ if [[ "$(ch_auth_mode)" == sso ]]; then
   fi
 fi
 if ((PROBLEMS)); then
-  info "edit state/deploy-vars.yml (state/deploy-vars.yml.example explains each key), then re-run this script"
+  info "edit config/deploy-vars.yml (config/deploy-vars.yml.example explains each key), then re-run this script"
 fi
 
 LF_ON="$(lf_var '  enabled:')"; GF_ON="$(gf_var '  enabled:')"; SSO_ON="$(sso_var enabled)"
 if is_true "$GF_ON" && [[ "$(ch_var dhi_configured)" != true ]]; then
-  fail "Grafana is on but there is no Docker Hardened Images login: set DHI_USERNAME and DHI_TOKEN in the environment, or dhi.username and dhi.token in state/deploy-vars.yml"
+  fail "Grafana is on but there is no Docker Hardened Images login: set DHI_USERNAME and DHI_TOKEN in the environment, or dhi.username and dhi.token in config/deploy-vars.yml"
   note_problem
 fi
 if is_true "$SSO_ON"; then
@@ -230,7 +230,7 @@ ok "components:  $COMPONENTS"
 ok "build:       $(ch_fips_enabled && echo 'FIPS (x86_64)' || echo 'standard (arm64)'), size $(ch_var size), $(ch_var aws.target_region)"
 ok "estimate:    ~\$$(ch_hourly_cost)/hr with the stack up (before the add-ons' load balancers, ~\$0.02/hr each)"
 if is_true "$SSO_ON" && is_true "$(sso_var clickhouse_jwt.enabled)" && [[ "$(jq -r '.sso.clickhouse_jwt.role_grants | length' <<<"$CH_VARS_JSON")" == 0 ]]; then
-  info "sso.clickhouse_jwt.role_grants is empty, so a token login reaches ClickHouse with no privileges until you add grants in state/deploy-vars.yml"
+  info "sso.clickhouse_jwt.role_grants is empty, so a token login reaches ClickHouse with no privileges until you add grants in config/deploy-vars.yml"
 fi
 if is_true "$SSO_ON" && ! is_true "$LF_ON"; then
   info "sso.langfuse.enabled has no effect while Langfuse is off; add --langfuse for Langfuse sign-in"

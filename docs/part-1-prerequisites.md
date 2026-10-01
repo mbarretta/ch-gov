@@ -13,15 +13,15 @@
 ### Do this in order
 
 1. **Install the tools.** Run `scripts/part1-setup.sh` ([The seven tools](#the-seven-tools-and-what-each-one-is-for)). On macOS it installs what is missing. On Linux, install the tools first.
-2. **Edit `state/deploy-vars.yml`.** The first script you run creates it. Replace the `<...>` placeholders with your account ID, the source registry account ID and, in SSO mode, your portal URL ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)).
+2. **Edit `config/deploy-vars.yml`.** The first script you run creates it. Replace the `<...>` placeholders with your account ID, the source registry account ID and, in SSO mode, your portal URL ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)).
 3. **Log in.** `source scripts/env.sh`, then `aws sso login --profile "$AWS_PROFILE"` ([AWS access](#aws-access-one-setting-two-paths)). In `profile` mode, refresh your credentials the way your organization does.
 4. **Check everything.** Run `scripts/part1-setup.sh --check` ([Check your setup](#check-your-setup)).
 
 The first time you run the setup script, before steps 2 and 3, it reports failures for the two AWS profiles. That is expected: the profiles cannot authenticate until the file is edited and you are logged in. Run the check again after step 3.
 
-**Prefer one command?** `scripts/go.sh` does steps 1, 3 and 4 for you and then runs `scripts/up.sh`. You still do step 2 yourself, because your account IDs are yours to enter: the first run creates `state/deploy-vars.yml`, stops, and names each key that still holds a `<...>` placeholder. Once the file is filled in, the same command installs the tools, signs you in to AWS when you are not signed in, runs the check, and starts the deploy. Its flags switch the optional components on (`--langfuse`, `--grafana`, `--sso`) and choose the build (`--fips`, `--size`). Add `--dry-run` to see the plan and check your inputs first, without installing, signing in, or deploying anything.
+**Prefer one command?** `scripts/go.sh` does steps 1, 3 and 4 for you and then runs `scripts/up.sh`. You still do step 2 yourself, because your account IDs are yours to enter: the first run creates `config/deploy-vars.yml`, stops, and names each key that still holds a `<...>` placeholder. Once the file is filled in, the same command installs the tools, signs you in to AWS when you are not signed in, runs the check, and starts the deploy. Its flags switch the optional components on (`--langfuse`, `--grafana`, `--sso`) and choose the build (`--fips`, `--size`). Add `--dry-run` to see the plan and check your inputs first, without installing, signing in, or deploying anything.
 
-`go.sh` records the flags you pass in `state/deploy-flags.json`, a second override file that is layered on top of `state/deploy-vars.yml`. A flag you leave off keeps its last value, and `--no-langfuse` and its siblings switch a component off. Because every script reads both files, `scripts/up.sh`, `scripts/play.sh` and the smoke tests agree with `go.sh` about what is switched on. Switching a component off changes only the configuration, and `scripts/down.sh` removes what is already deployed.
+`go.sh` records the flags you pass in `config/deploy-flags.json`, a second override file that is layered on top of `config/deploy-vars.yml`. A flag you leave off keeps its last value, and `--no-langfuse` and its siblings switch a component off. Because every script reads both files, `scripts/up.sh`, `scripts/play.sh` and the smoke tests agree with `go.sh` about what is switched on. Switching a component off changes only the configuration, and `scripts/down.sh` removes what is already deployed. You can also write the file yourself: copy `config/deploy-flags.json.example` to `config/deploy-flags.json` and edit it.
 
 ---
 
@@ -145,11 +145,11 @@ The setting `aws.auth_mode` decides who creates those profiles:
 | `sso` (default) | You sign in with AWS IAM Identity Center (SSO). | Renders a project-local `.aws/config` with both profiles and points the AWS CLI at it. |
 | `profile` | You already have a working named profile. | Renders nothing. It uses your own AWS config, and both profiles must exist there. |
 
-You set these keys in `state/deploy-vars.yml`. [Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml) explains that file, and the defaults live in `ansible/group_vars/all.yml`.
+You set these keys in `config/deploy-vars.yml`. [Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml) explains that file, and the defaults live in `ansible/group_vars/all.yml`.
 
 ### Path A: SSO with IAM Identity Center (`auth_mode: sso`)
 
-Set these keys in `state/deploy-vars.yml`:
+Set these keys in `config/deploy-vars.yml`:
 
 | Key | What to put there |
 |---|---|
@@ -198,7 +198,7 @@ SSO tokens expire after a few hours. When commands start failing with `Error loa
 
 ### Path B: an existing profile (`auth_mode: profile`)
 
-Use this path when your organization already gives you AWS credentials through named profiles, for example through `aws configure`, a credential helper, or a company login tool. Set these keys in `state/deploy-vars.yml`:
+Use this path when your organization already gives you AWS credentials through named profiles, for example through `aws configure`, a credential helper, or a company login tool. Set these keys in `config/deploy-vars.yml`:
 
 ```yaml
 aws:
@@ -265,13 +265,13 @@ One more rule follows from how EKS works. The identity that creates the cluster 
 
 ---
 
-## Persisting your account IDs and SSO portal: `state/deploy-vars.yml`
+## Persisting your account IDs and SSO portal: `config/deploy-vars.yml`
 
-The `aws:` block in `ansible/group_vars/all.yml` ships with placeholders such as `"<YOUR_ACCOUNT_ID>"` and `"<SOURCE_ECR_ACCOUNT_ID>"`. Real account numbers do not belong in a tracked file, and every script and role reads those values, so you fill them in somewhere else: `state/deploy-vars.yml`.
+The `aws:` block in `ansible/group_vars/all.yml` ships with placeholders such as `"<YOUR_ACCOUNT_ID>"` and `"<SOURCE_ECR_ACCOUNT_ID>"`. Real account numbers do not belong in a tracked file, and every script and role reads those values, so you fill them in somewhere else: `config/deploy-vars.yml`.
 
-**Do not hand-edit `.aws/config` or its template, `ansible/files/aws-config.ini.j2`.** `ansible/deploy.yml` re-renders `.aws/config` on every run (`tags: [always]`), so a hand edit is overwritten. `state/deploy-vars.yml` is the one place your values survive.
+**Do not hand-edit `.aws/config` or its template, `ansible/files/aws-config.ini.j2`.** `ansible/deploy.yml` re-renders `.aws/config` on every run (`tags: [always]`), so a hand edit is overwritten. `config/deploy-vars.yml` is the one place your values survive.
 
-The first time you run any script under `scripts/` (each one sources `scripts/lib/common.sh`), the kit generates `state/deploy-vars.yml` for you. It is gitignored, so it can never be committed by accident. It holds the same `aws:` shape as `all.yml`. A tracked copy at `state/deploy-vars.yml.example` shows the file without running anything:
+The first time you run any script under `scripts/` (each one sources `scripts/lib/common.sh`), the kit generates `config/deploy-vars.yml` for you. It is gitignored, so it can never be committed by accident. It holds the same `aws:` shape as `all.yml`. A tracked copy at `config/deploy-vars.yml.example` shows the file without running anything:
 
 ```yaml
 aws:
@@ -296,17 +296,19 @@ dhi:
   token: ""      # your Docker Hub DHI access token
 ```
 
-Open the file once, as step 2 of "Do this in order" at the top of this Part says, and replace every `<...>` placeholder that applies to your `auth_mode`: the two account IDs always, and `sso_start_url` in SSO mode. Only the keys you set change. Every other key keeps its `all.yml` default, because dictionaries merge key by key. `scripts/play.sh` passes the file to Ansible automatically as `-e @state/deploy-vars.yml`.
+Open the file once, as step 2 of "Do this in order" at the top of this Part says, and replace every `<...>` placeholder that applies to your `auth_mode`: the two account IDs always, and `sso_start_url` in SSO mode. Only the keys you set change. Every other key keeps its `all.yml` default, because dictionaries merge key by key. `scripts/play.sh` passes the file to Ansible automatically as `-e @config/deploy-vars.yml`.
 
 If a placeholder is still there, the playbook stops before it touches AWS. It names the offending key and never prints your values.
 
-The generated file and `state/deploy-vars.yml.example` also end with commented-out `fips:`, `langfuse:` and `grafana:` switches that stay off until you uncomment them, as [Part 6](part-6-langfuse.md), [Part 7](part-7-fips-hardening.md) and [Part 8](part-8-grafana.md) explain. The same file can set `size: tutorial` to swap the default `minimal` node and pod sizes for the upstream tutorial's larger ones, and [Part 4](part-4-cluster-preflight-verify.md) explains the difference.
+The generated file and `config/deploy-vars.yml.example` also end with commented-out `fips:`, `langfuse:` and `grafana:` switches that stay off until you uncomment them, as [Part 6](part-6-langfuse.md), [Part 7](part-7-fips-hardening.md) and [Part 8](part-8-grafana.md) explain. The same file can set `size: tutorial` to swap the default `minimal` node and pod sizes for the upstream tutorial's larger ones, and [Part 4](part-4-cluster-preflight-verify.md) explains the difference.
+
+Both files live in `config/`, the directory for everything you set before a run. `state/` holds only what a run writes, so deleting `state/` does not lose your settings. `config/deploy-flags.json.example` shows the switch file, which sits on top of `deploy-vars.yml`: a key set in both takes the switch file's value.
 
 ### DHI credentials (Grafana only)
 
 Docker Hardened Images (DHI) is a paid, entitled catalog of images on `dhi.io`. You need DHI credentials in exactly one situation: **when `grafana.enabled` is `true`.** In that case Step 2 mirrors the Grafana and `awscli` images from `dhi.io`, and `image_sync` logs in to that registry first. With Grafana off, the playbook never asks for the credentials. The ClickHouse, Langfuse and Chainguard images are pulled without them.
 
-Provide them in `state/deploy-vars.yml`, using the `dhi:` block shown earlier:
+Provide them in `config/deploy-vars.yml`, using the `dhi:` block shown earlier:
 
 ```yaml
 dhi:
@@ -401,7 +403,7 @@ Run these checks in order. Each one gives a command and the result you should se
    next: source scripts/env.sh, then scripts/up.sh
    ```
 
-   The exit status is `0`. On a first run, before you have edited `state/deploy-vars.yml` and logged in, expect failures for the two profiles instead. Fix them in the order shown under "Do this in order", and run the check again.
+   The exit status is `0`. On a first run, before you have edited `config/deploy-vars.yml` and logged in, expect failures for the two profiles instead. Fix them in the order shown under "Do this in order", and run the check again.
 
 2. **Your shell points at the repo's configuration.**
 
@@ -459,22 +461,22 @@ Each entry gives the symptom, the cause and the fix.
 - *Cause (SSO mode):* the AWS CLI is not reading the repo's `.aws/config`, because your shell never sourced `scripts/env.sh`.
 - *Cause (profile mode):* the profile is missing from the config file the CLI reads.
 - *Fix:* in SSO mode, run `source scripts/env.sh` or go through the scripts. In profile mode, add the profile to your AWS config, and check that the names match `target_profile` and `source_ecr_profile`.
-- *On a first run:* if you have not yet edited `state/deploy-vars.yml` or logged in, see the entry "The first `scripts/part1-setup.sh` run reports ..." below.
+- *On a first run:* if you have not yet edited `config/deploy-vars.yml` or logged in, see the entry "The first `scripts/part1-setup.sh` run reports ..." below.
 
 **`These settings still hold a <...> placeholder`**
 
-- *Cause:* `state/deploy-vars.yml` still contains a value such as `<YOUR_ACCOUNT_ID>`. The message lists the keys.
-- *Fix:* edit `state/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)) and run again.
+- *Cause:* `config/deploy-vars.yml` still contains a value such as `<YOUR_ACCOUNT_ID>`. The message lists the keys.
+- *Fix:* edit `config/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)) and run again.
 
 **The first `scripts/part1-setup.sh` run reports `profile '...' not defined` or `will not authenticate`**
 
-- *Cause:* you have not yet edited `state/deploy-vars.yml` or logged in. The profiles cannot authenticate before that.
-- *Fix:* follow "Do this in order" at the top of this Part: edit the file ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)), log in ([AWS access](#aws-access-one-setting-two-paths)), then run `scripts/part1-setup.sh --check` again.
+- *Cause:* you have not yet edited `config/deploy-vars.yml` or logged in. The profiles cannot authenticate before that.
+- *Fix:* follow "Do this in order" at the top of this Part: edit the file ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)), log in ([AWS access](#aws-access-one-setting-two-paths)), then run `scripts/part1-setup.sh --check` again.
 
 **`Profile '...' resolves to account X, but group_vars says Y`**
 
 - *Cause:* `target_account_id` does not match the account your `target_profile` actually signs in to.
-- *Fix:* correct `target_account_id` in `state/deploy-vars.yml`, or point `target_profile` at the right account.
+- *Fix:* correct `target_account_id` in `config/deploy-vars.yml`, or point `target_profile` at the right account.
 
 **`Profile '...' could not authenticate`, or `authenticates, but not as the ECR pull role`**
 
@@ -504,7 +506,7 @@ Each entry gives the symptom, the cause and the fix.
 **The image copy in Step 2 fails because a tag does not exist**
 
 - *Cause:* ClickHouse purges old tags from the source registry over time, and the versions pinned under `versions:` in `ansible/group_vars/all.yml` can fall out of date.
-- *Fix:* run `scripts/part1-setup.sh` and read the tags it lists in the final section. Set the matching entry under `versions:` in `state/deploy-vars.yml` to a tag that exists, then run again. Enter the base tag only: with `fips: true` the kit appends the `-fips` suffix itself.
+- *Fix:* run `scripts/part1-setup.sh` and read the tags it lists in the final section. Set the matching entry under `versions:` in `config/deploy-vars.yml` to a tag that exists, then run again. Enter the base tag only: with `fips: true` the kit appends the `-fips` suffix itself.
 
 **`kubectl` prints a version-skew warning**
 
@@ -519,7 +521,7 @@ Each entry gives the symptom, the cause and the fix.
 **`An artifact sources from dhi.io but the DHI username/token are empty`**
 
 - *Cause:* `grafana.enabled` is `true` and no DHI credentials are set.
-- *Fix:* set `dhi.username` and `dhi.token` in `state/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-statedeploy-varsyml)).
+- *Fix:* set `dhi.username` and `dhi.token` in `config/deploy-vars.yml` ([Persisting your account IDs](#persisting-your-account-ids-and-sso-portal-configdeploy-varsyml)).
 
 **`kubectl preflight` is not found in your own shell**
 

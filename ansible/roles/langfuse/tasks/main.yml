@@ -168,7 +168,7 @@
           sso.langfuse.enabled opens Langfuse sign-up (Cognito users are created through the sign-up path),
           so with the email and password form shown anyone who can reach Langfuse can register an account
           that joins org {{ langfuse.init.org_id }} as {{ sso.langfuse.default_org_role }}.
-          Choose one in state/deploy-vars.yml: sso.langfuse.disable_password_login: true (Cognito is the
+          Choose one in config/deploy-vars.yml: sso.langfuse.disable_password_login: true (Cognito is the
           only way in), or sso.langfuse.allow_password_signup: true (accept open password sign-up, limited
           by sso.langfuse.enforce_domains and langfuse.load_balancer.allowed_cidrs). Then run:
           ansible-playbook deploy.yml --tags lf-app

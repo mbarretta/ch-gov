@@ -13,7 +13,7 @@ _ch_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 
 # Resolved in a bash subshell (common.sh is bash-only; this file is also
 # sourced from zsh): the auth mode, the deployment profile, whether fips is on,
-# and the mode-appropriate login hint, from state/deploy-vars.yml over
+# and the mode-appropriate login hint, from config/deploy-vars.yml over
 # ansible/group_vars/all.yml. Any problem resolving is printed by common.sh on
 # stderr.
 _ch_vals="$(bash -c '
