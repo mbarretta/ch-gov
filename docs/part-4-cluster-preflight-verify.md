@@ -5,6 +5,7 @@
 > - How the operator turns one `ClickHouseCluster` specification into Keeper and server pods, and how names, namespaces and IRSA all derive from a single release name.
 > - How to read ClickHouse's own preflight report, and what the expected warnings mean.
 > - How to prove you have a real cluster, not three separate databases, by writing on one replica and reading from another.
+> - Optionally, how a second service shares the cluster's Keeper and data on compute of its own, and what it refuses.
 >
 > **Run it:** `scripts/up.sh` runs every step in order, including these three, and asks before it starts. To resume from this point after a `scripts/down.sh`, run `scripts/up.sh --from cluster`. Then connect with `scripts/ch-client.sh`.
 
@@ -18,6 +19,7 @@ Parts 2 and 3 built a Kubernetes cluster that knows what a ClickHouseCluster *is
 > scripts/play.sh --tags cluster      # Step 9
 > scripts/play.sh --tags preflight    # Step 10
 > scripts/play.sh --tags verify       # Step 11
+> scripts/play.sh --tags second-service   # Step 11c, the optional second service
 > ```
 >
 > [Part 1, Running the playbook](part-1-prerequisites.md#running-the-playbook-scriptsplaysh) explains what `play.sh` sets up for you.
@@ -165,6 +167,8 @@ The SSD read cache is specified as `cacheDiskSize: 300Gi`, and the chart convert
 
 Servers get **no EBS volume**. `featureFlags.disableMetadataPersistentVolumes` defaults to `true`, which sets `disableServerStorageVolumes` and `enableDatabaseDisk` on the CR. Data lives in S3, table metadata lives in Keeper through the Shared Catalog, and nothing sits on local disk except the cache. Keeper keeps a 10Gi `gp3-encrypted` volume per replica (50Gi with `size: tutorial`). It is the only persistent state in the cluster, and the only thing teardown has to clean up.
 
+Because a server holds nothing but its cache, a second set of servers can read the same tables through the same Keeper and S3 prefix. The optional [Step 11c](#step-11c--a-second-service-on-the-same-keeper-and-data-optional) builds one, the second service.
+
 Log level is `information` for both, not the chart's `trace`. Servers have no volume, so logs go to stdout and the node's rotation, and `trace` would make `kubectl logs` unusable.
 
 ### What the role verifies before it finishes
@@ -302,6 +306,121 @@ The script does the tutorial's port-forward, reads the admin password from `stat
 
 ---
 
+## Step 11c — A second service on the same Keeper and data (optional)
+
+Everything so far builds one ClickHouse service: three servers that read and write the same tables. Because those servers keep nothing but a cache, a second set of servers can read the same tables too, with CPU and memory of its own. ClickHouse calls this **compute-compute separation**. A dashboard workload can then run on its own compute, and a burst of heavy queries never competes with the service taking writes for CPU or cache.
+
+The kit can show this with an optional **second service**. It is off by default, and with it off nothing in Steps 1 to 12 changes. The name Step 11b already belongs to single sign-on ([Part 9](part-9-sso.md)), so this step is 11c, and its load balancer is Step 12b in [Part 5](part-5-load-balancer.md#a-load-balancer-for-the-second-service). The letters mark optional steps that hang off a main step rather than a strict order: Step 11c runs right after Step 11, ahead of Step 11b when both are on, and the two do not depend on each other.
+
+### A parent and a child
+
+ClickHouse Private models the pair as a **parent** and a **child**. The cluster from Step 9, `default-us-01`, is the parent, and it stays the one read-write service. The second service, `second-us-01`, is the child. The child keeps no Keeper and no table data of its own. It uses the parent's:
+
+- **Keeper quorum.** Table definitions, part lists and the Shared Catalog come from the parent's three Keeper pods.
+- **S3 data.** It reads the same bucket under the same key prefix, so it sees every part the parent writes.
+- **Users.** A user created on the parent can sign in on the second service, with the same grants.
+
+What the child has of its own is compute: its server pods, on nodes of their own. The chart turns a cluster into a child with three values, and the kit sets them on the second service's release:
+
+```yaml
+parentCluster: {name: c-default-us-01, namespace: ns-default-us-01}
+isReadonly: true
+keeper: {replicaCount: 0}
+```
+
+Everything else in the release is the parent's: the bucket, Region, endpoint and key prefix, the admin user and password, and the JWT user directory when single sign-on is on. Under `fips: true` the second service gets its own TLS certificate, signed by the same CA as the parent's, so a client that trusts one trusts both. Langfuse, Grafana and single sign-on keep using the parent, because they write.
+
+### The switch
+
+One setting turns it on, `clickhouse.second_service.enabled`. You can set it in `config/deploy-vars.yml`, or let `scripts/go.sh` record it for you:
+
+```bash
+scripts/go.sh --second-service      # on; --no-second-service turns it off again
+```
+
+The rest of the block in `ansible/group_vars/all.yml` names the child and sizes it:
+
+```yaml
+clickhouse:
+  second_service:
+    enabled: false
+    cluster_name: "second-us-01"
+    namespace: "ns-second-us-01"
+    service_account: "ch-second-us-01-sa"
+    replicas: 1
+```
+
+Its pods take the same CPU, memory and cache size as the parent's servers (`clickhouse.server`). With the switch on, `scripts/up.sh` adds the `second-service` step after `verify`. To run only this step, use `scripts/play.sh --tags second-service`.
+
+### Why it needs its own namespace, node group and service account
+
+The switch reaches back into earlier steps, because a second cluster needs three things the first one already has:
+
+- **Its own namespace, `ns-second-us-01`.** The chart's ResourceQuota allows one ClickHouseCluster per namespace (see [Step 9](#the-namespace-convention)), so the child cannot share the parent's.
+- **Its own node group.** Step 5 adds a fourth node group, `second-server`, built like the server group with local NVMe for the cache and the same `do-not-schedule` taint. Its nodes carry the label `clickhouseGroup: second-server-arm64` (`second-server` with `fips: true`), and the second service's pods select them. Separate nodes are the point of the exercise: the child's queries cannot take CPU or cache from the parent.
+- **Its own service account, `ch-second-us-01-sa`.** The chart derives it from the release name, as it does `ch-default-us-01-sa`. Step 6 adds it as a second subject in the S3 role's trust policy, so the child's pods can read the parent's bucket ([Part 3](part-3-storage-and-operator.md#reading-the-trust-policy) shows the policy).
+
+### The operator flag, and why it matters
+
+Step 8 turns on one more operator setting while the switch is on, `operator.featureFlags.privateComputeSeparationEnabled` ([Part 3](part-3-storage-and-operator.md#a-feature-flag-for-the-second-service) has the details). With the flag on, a child registers itself with its parent, and the parent's ClickHouseCluster lists it under `spec.hydraChildrenInstances`. The parent then knows that the child's replicas in the shared Keeper are legitimate.
+
+Without the flag, that list stays empty. The parent's routine cleanup of stale replicas can then treat a restarting child's replicas as leftovers and remove them from Keeper. Nothing fails at install time, which makes the flag easy to miss and its absence hard to trace. The role therefore waits for the parent to list `c-second-us-01` before it does anything else, and that listing is the proof that the flag works.
+
+### What "inserts and mutations refused" means
+
+`isReadonly: true` makes the second service refuse two kinds of statement:
+
+- **Inserts.** An `INSERT` fails with an error from the server, and no row is written.
+- **Mutations.** `ALTER TABLE ... UPDATE` and `ALTER TABLE ... DELETE` are refused too. The second service also does not assign merges, so the parent alone decides how parts are combined.
+
+It does **not** refuse DDL. A `CREATE TABLE` or `DROP TABLE` run on the second service reaches the shared catalog in Keeper, and the parent sees the change. User and grant statements are not refused either, and they land in the same shared metadata. Treat the second service as a place to run queries, not as a security boundary: who may change what is still decided by users and grants, as on the parent. [Learning setup vs. production](limitations.md#access-and-security-defaults) lists this with the kit's other defaults.
+
+### Shared users
+
+Users and grants live in the shared Keeper, so the second service knows every user the parent knows without being told. `scripts/ch-client.sh --second` connects with the same admin user and password as the parent, and a user you create on the parent can sign in on the second service at once. Its grants apply there too, except that the second service still refuses its inserts and mutations.
+
+### The parent restarts once when the child attaches
+
+When the child first registers, the parent's server configuration changes to include it, and the operator restarts the parent's server pods one at a time. The parent stays available through it, because only one replica is down at a time, but expect a few minutes of restarts in `kubectl get pods -n ns-default-us-01` right after the second service comes up. The role waits for the restart to finish before it runs its checks. The parent restarts once more, the same way, when the child is removed.
+
+### The round trip that proves it
+
+The role checks each part of the parent and child relationship with a real round trip:
+
+1. It creates a `SharedMergeTree` table on a **parent** pod and inserts three rows.
+2. It reads them from a **second service** pod. The count of 3 proves that the child sees the parent's Keeper and S3 data, because it has no copy of either.
+3. It runs an `INSERT` on the second service and expects it to fail. Then it counts the rows on the parent again. Three rows still there proves that the row was never written, not just that the command exited with an error.
+4. It creates a user on the parent and signs in as that user on the second service.
+5. It drops the test database and the user.
+
+The role prints the server's own error text for the refused `INSERT` rather than matching a fixed string, so the check does not depend on the wording of a message. The summary looks like this:
+
+```
+second service: c-second-us-01 in ns-second-us-01, 1 replica(s), child of c-default-us-01
+wrote 3 rows on the parent (c-default-us-01-server-<suffix>-0), read from the second service (c-second-us-01-server-<suffix>-0): count/max/host = 3  3  c-second-us-01-server-<suffix>-0
+INSERT on the second service refused, exit <code>: <the server's error message>
+a user created on the parent signed in on the second service: user/host = second_service_probe  c-second-us-01-server-<suffix>-0
+test database and user dropped
+connect from your laptop: scripts/ch-client.sh --second
+```
+
+From your machine, `scripts/ch-client.sh --second` port-forwards to a second-service pod the same way the plain command does for the parent. It combines with `--lb` and `--sso`.
+
+### Teardown order
+
+The child goes before the parent, and before anything it depends on. `scripts/down.sh` handles that: its plan removes the second service's load balancer, then the second service, then the parent's load balancer and the parent cluster. It includes those two steps only when the second service is actually there, so it also removes a second service you have already switched off. To remove only the second service, use the `scripts/play.sh` form:
+
+```bash
+scripts/play.sh --tags second-lb -e second_lb_state=absent
+scripts/play.sh --tags second-service -e second_service_state=absent
+```
+
+Removing it uninstalls the release, waits for its pods to go, and deletes `ns-second-us-01`. The child has no volumes, so nothing else needs cleaning up. The parent, its namespace and the shared S3 data are left alone.
+
+The operator flag has to stay on until the child is gone, for the reason given earlier. That is why switching the second service off is a two-part job: remove it with the commands above first, then run with `enabled: false`, which shrinks its node group to zero, drops its service account from the trust policy and turns the operator flag off. If you switch it off while the second service is still deployed, the playbook stops at the start of the run, before it changes anything, with a message that says how to remove the second service first.
+
+---
+
 ## Troubleshooting
 
 **Keeper or server pods stay `Pending`, and the failure output says `8 node(s) didn't match Pod's node affinity/selector`**
@@ -334,11 +453,33 @@ The script does the tutorial's port-forward, reads the admin password from `stat
 - *Cause:* you filtered on `ch-s3-<uuid>/`, but with `enableKeyTemplate` the uuid sits one level below a three-character shard prefix.
 - *Fix:* filter on the uuid segment, as `scripts/s3-purge-cluster-data.sh --dry-run` does.
 
+**Step 11c fails with `No nodes are labelled clickhouseGroup=second-server...`**
+
+- *Cause:* the second service runs on its own node group, and Step 5 creates that group only while `clickhouse.second_service.enabled` is `true`. Turning the switch on after Step 5 ran leaves the group missing.
+- *Fix:* run `scripts/play.sh --tags nodes`, then `scripts/play.sh --tags second-service`. Running `scripts/up.sh` again does both in order.
+
+**Step 11c fails because the parent never lists `c-second-us-01` in `spec.hydraChildrenInstances`**
+
+- *Cause:* the operator is running without its compute-separation feature flag, usually because the switch was turned on after Step 8 ran. Without the flag the child never registers with the parent.
+- *Fix:* run `scripts/play.sh --tags operator` with the switch on, then `scripts/play.sh --tags second-service` again. The operator's log has the detail: `kubectl logs -n clickhouse-operator-system -l app.kubernetes.io/instance=clickhouse-operator -c manager`.
+
+**The parent's server pods restart one by one right after the second service comes up**
+
+- *Cause:* this is expected. Attaching the child changes the parent's server configuration, and the operator rolls the change out one pod at a time.
+- *Fix:* none needed. The role waits for the restart to finish before its checks, and the parent restarts once more when the second service is removed.
+
+**A run stops at the start with `clickhouse.second_service.enabled is false, but the second service is still deployed`**
+
+- *Cause:* the switch is off while the second service is still in the cluster. Continuing would remove its nodes, its access to S3 and the operator's feature flag while it is still attached to the parent, so the playbook stops before it changes anything.
+- *Fix:* to keep it, turn the switch back on with `scripts/go.sh --second-service`. To remove it, run the two teardown commands in [Teardown order](#teardown-order), then run again with the switch off. `scripts/down.sh` removes it for you in the right order.
+
 ---
 
 ## Cost check
 
 Steps 9–11 add nothing to the hourly rate. The pods fit on the node groups that Step 5 already pays for, servers have no volume, and Keeper's three 10Gi gp3 volumes cost pennies. With the default `minimal` size the rate stays at about **$2.32/hr** with nodes up and about $0.15/hr with them down. S3 data is billed by the GB and survives everything except a deliberate delete.
+
+The optional second service is the exception. It adds one server-sized node: about $0.43/hr with the standard build and $0.47/hr with `fips: true` at the `minimal` size, or about $3.42/hr ($3.80/hr with `fips: true`) with `size: tutorial`. Its own load balancer adds $0.0225/hr more ([Part 5](part-5-load-balancer.md#a-load-balancer-for-the-second-service)). With both, the default rate is about $2.77/hr. `scripts/up.sh` and `scripts/go.sh` include them in the figure they print.
 
 ## Self-checks
 
@@ -446,6 +587,31 @@ NS=ns-default-us-01
 
    **Exercise:** why does the total change if you write the same servers as `20Gi` instead of `20G`?
 
-11. **You know how to stop the meter.** Run `scripts/down.sh --nodes-only` when you finish for the day, and `scripts/up.sh --from nodes` to resume.
+11. **Optional: the parent lists the second service as its child.** Skip this and the next item if the second service is off.
+
+    ```bash
+    kubectl get clickhousecluster c-default-us-01 -n "$NS" \
+      -o jsonpath='{range .spec.hydraChildrenInstances[*]}{.clickHouseClusterRef.name}{"\n"}{end}'
+    kubectl get pods -n ns-second-us-01 -o wide
+    ```
+
+    The first command should print `c-second-us-01`. The second should show one server pod, `Running`, on a node of the `second-server` group, and no Keeper pods.
+
+    **Exercise:** the second service has no Keeper pods and no volumes. Where do its table definitions and its data come from?
+
+12. **Optional: the second service reads but does not write.**
+
+    ```bash
+    scripts/ch-client.sh --second -q "SELECT hostName(), count() FROM system.tables"
+    scripts/ch-client.sh -q "CREATE TABLE default.scratch (id UInt32) ENGINE = SharedMergeTree ORDER BY id"
+    scripts/ch-client.sh --second -q "INSERT INTO default.scratch VALUES (1)"
+    scripts/ch-client.sh -q "DROP TABLE default.scratch SYNC"
+    ```
+
+    The first command should print a `c-second-us-01-server` pod name. The third should fail with an error from the server, and the table stays empty.
+
+    **Exercise:** a `DROP TABLE` run on the second service would succeed. Why, and what does that mean for who you let connect to it?
+
+13. **You know how to stop the meter.** Run `scripts/down.sh --nodes-only` when you finish for the day, and `scripts/up.sh --from nodes` to resume.
 
 **Next:** [Part 5](part-5-load-balancer.md) puts a load balancer in front of the servers.

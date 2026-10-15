@@ -14,6 +14,7 @@ ClickHouse Government is ClickHouse Private with a FIPS-validated cryptography b
 - **FIPS 140-3 mode.** What the single `fips` switch changes, from images and instance types to AWS endpoints, encryption keys, and TLS between components, and what it does not cover. The validated cryptography is ClickHouse's; [limitations](docs/limitations.md) says what the kit covers and does not cover by design.
 - **Langfuse on ClickHouse (optional).** How an application uses ClickHouse Private as its analytics store, including a smoke test that sends a trace in and reads it back out of ClickHouse.
 - **Grafana with a ClickHouse datasource (optional).** How a dashboard tool is wired to the cluster with a read-only user and a plugin mirrored into your own S3 bucket.
+- **A second service (optional).** How a second set of servers shares the cluster's Keeper and S3 data on compute of its own, and why it refuses inserts and mutations but not schema changes.
 - **How to operate it.** How to connect, verify, watch the cost meter, stop and resume the cluster, and tear everything down.
 
 ## What you need from ClickHouse
@@ -42,6 +43,7 @@ The figures below are planning estimates for `us-east-1` with the default `minim
 | Everything up, standard build | $2.32 an hour, about $56 a day | `scripts/up.sh` |
 | Everything up, `fips: true` | $2.58 an hour, about $62 a day | `scripts/up.sh` with `fips: true` |
 | Langfuse or Grafana switched on | about $0.02 an hour more for each | `enabled: true` in the `langfuse:` or `grafana:` block |
+| Second service switched on | about $0.45 an hour more ($0.50 with `fips: true`): one more server node and its own load balancer | `scripts/go.sh --second-service`, or `enabled: true` in the `clickhouse.second_service` block |
 | Nodes down, VPC and EKS kept | about $0.15 an hour | `scripts/down.sh` |
 | Everything removed except S3 data and ECR images | close to $0 | `scripts/down.sh --all` |
 
@@ -51,7 +53,7 @@ For time, plan on roughly an hour for the first `scripts/up.sh`, most of it wait
 
 ## How to use these docs
 
-The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your machine ready. Parts 2 to 5 follow the deployment steps one at a time, and Parts 6 to 8 cover the optional capabilities and the FIPS switch. [Limitations](docs/limitations.md) says where this learning setup differs from a production one.
+The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your machine ready. Parts 2 to 5 follow the deployment steps one at a time, and Parts 6 to 9 cover the optional capabilities and the FIPS switch. The optional second service is covered inside Parts 4 and 5, next to the steps it builds on. [Limitations](docs/limitations.md) says where this learning setup differs from a production one.
 
 **Self-paced path.** Read Part 0 for the concepts, then Part 1 to set up your machine. Start `scripts/up.sh`, and while it runs, read Parts 2 to 5 to see what each step is doing and why. Add Part 6 and Part 8 if you switch on Langfuse or Grafana, read Part 7 if you use FIPS mode, and finish with the limitations page.
 
@@ -63,8 +65,8 @@ The docs are numbered Parts. Part 0 is the concepts primer and Part 1 gets your 
 | [Part 1](docs/part-1-prerequisites.md) | Tools, AWS access, your account IDs, and the `up.sh` and `down.sh` scripts | Deploy: setup |
 | [Part 2](docs/part-2-image-sync.md) | Steps 1 to 5: the pull role, copying images into your registry, the VPC, EKS, and node groups | Deploy |
 | [Part 3](docs/part-3-storage-and-operator.md) | Steps 6 to 8: the S3 bucket, IAM roles for service accounts, Kubernetes prerequisites, and the operator | Deploy |
-| [Part 4](docs/part-4-cluster-preflight-verify.md) | Steps 9 to 11: the ClickHouse cluster, preflight checks, and proving it works | Deploy, then operate: verify and connect |
-| [Part 5](docs/part-5-load-balancer.md) | Step 12: reaching the cluster from outside with a load balancer | Deploy, then operate: connect |
+| [Part 4](docs/part-4-cluster-preflight-verify.md) | Steps 9 to 11: the ClickHouse cluster, preflight checks, and proving it works; optional Step 11c: a second service on the same Keeper and data | Deploy, then operate: verify and connect |
+| [Part 5](docs/part-5-load-balancer.md) | Step 12: reaching the cluster from outside with a load balancer; optional Step 12b: a load balancer for the second service | Deploy, then operate: connect |
 | [Part 6](docs/part-6-langfuse.md) | Steps 13 to 15: Langfuse on ClickHouse, TLS, the smoke test, and teardown order | Deploy, then operate: smoke test and teardown |
 | [Part 7](docs/part-7-fips-hardening.md) | What `fips: true` changes: endpoints, encryption keys, and TLS | Deploy: configuration and self-checks |
 | [Part 8](docs/part-8-grafana.md) | Steps 16 to 18: Grafana with a ClickHouse datasource, and its smoke test | Deploy, then operate: smoke test and teardown |
@@ -100,7 +102,7 @@ scripts/go.sh --langfuse --grafana              # ClickHouse, plus Langfuse and 
 scripts/go.sh --fips --size tutorial            # the FIPS build, at the tutorial's larger sizes
 ```
 
-The flags are `--langfuse`, `--grafana`, `--sso`, `--fips` and `--size`, and each on/off flag has a `--no-` form. The script remembers them in `config/deploy-flags.json`, which sits on top of `config/deploy-vars.yml`, so `scripts/up.sh` and the other scripts see the same setup. Both files live in [`config/`](config/README.md), with a tracked `.example` beside each, so you can also write the setup by hand. Run `scripts/go.sh --help` for all of them, including the choices that single sign-on asks you to make.
+The flags are `--langfuse`, `--grafana`, `--sso`, `--second-service`, `--fips` and `--size`, and each on/off flag has a `--no-` form. `--second-service` adds a second ClickHouse service that shares the cluster's Keeper and data on compute of its own and refuses inserts and mutations, and [Part 4](docs/part-4-cluster-preflight-verify.md#step-11c--a-second-service-on-the-same-keeper-and-data-optional) explains it. The script remembers them in `config/deploy-flags.json`, which sits on top of `config/deploy-vars.yml`, so `scripts/up.sh` and the other scripts see the same setup. Both files live in [`config/`](config/README.md), with a tracked `.example` beside each, so you can also write the setup by hand. Run `scripts/go.sh --help` for all of them, including the choices that single sign-on asks you to make.
 
 To stop, use the teardown script:
 
@@ -131,7 +133,7 @@ For the FIPS posture on its own, where the validated cryptography is ClickHouse'
 
 Use these as a quick review or as exercises in a workshop.
 
-1. Run `kubectl get nodes -L clickhouseGroup` after `source scripts/env.sh`. You should see eight nodes: three keeper, three server, and two operator nodes. Only the keeper and server nodes carry the `clickhouseGroup` label, with an `-arm64` suffix in the standard build (`keeper-arm64`, `server-arm64`), so the two operator nodes show `<none>`. Which pods would you expect on each, and why?
+1. Run `kubectl get nodes -L clickhouseGroup` after `source scripts/env.sh`. You should see eight nodes: three keeper, three server, and two operator nodes (nine with the optional second service, whose node is labelled `second-server-arm64`). Only the keeper and server nodes carry the `clickhouseGroup` label, with an `-arm64` suffix in the standard build (`keeper-arm64`, `server-arm64`), so the two operator nodes show `<none>`. Which pods would you expect on each, and why?
 2. Run `kubectl -n ns-default-us-01 get pods -o wide`. You should see three Keeper pods and three server pods, all Running, spread across different nodes. Why does the cluster need an odd number of Keeper nodes?
 3. Find where the estimated hourly cost is printed and compare it with the table above. What would change it?
 4. After `scripts/down.sh`, what is still running, what does it cost, and what does `scripts/up.sh --from nodes` recreate?

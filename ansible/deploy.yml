@@ -6,14 +6,14 @@
 #                                                  #   (+13-15 when langfuse.enabled,
 #                                                  #    +16-18 when grafana.enabled,
 #                                                  #    +6b/11b when sso.enabled,
-#                                                  #    +the second service and its load
-#                                                  #     balancer when
+#                                                  #    +11c/12b, the second service and
+#                                                  #     its load balancer, when
 #                                                  #     clickhouse.second_service.enabled)
 #   ansible-playbook deploy.yml --tags images      # just the pull-role check, ECR setup + image sync
 #   ansible-playbook deploy.yml --tags langfuse    # just the optional Steps 13-15
 #   ansible-playbook deploy.yml --tags grafana     # just the optional Steps 16-18
 #   ansible-playbook deploy.yml --tags sso         # just the optional Steps 6b and 11b
-#   ansible-playbook deploy.yml --tags second-service,second-lb   # just the optional second service
+#   ansible-playbook deploy.yml --tags second-service,second-lb   # just the optional Steps 11c and 12b
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
 #
@@ -27,10 +27,12 @@
 # Steps 6b and 11b are optional and off by default (sso.enabled in group_vars):
 # an Amazon Cognito user pool for Langfuse sign-in (OIDC) and ClickHouse JWT
 # sign-in. The numbering of Steps 1-18 is unchanged.
-# The second service is optional and off by default
+# Steps 11c and 12b are optional and off by default
 # (clickhouse.second_service.enabled in group_vars): a second ClickHouse
 # cluster on the first one's Keeper and S3 data, with compute of its own,
 # installed after Step 11 and given its own load balancer after Step 12.
+# 11b was already single sign-on's, hence 11c; 11c runs before 11b, and the
+# two do not depend on each other.
 
 - name: ClickHouse Private -- AWS EKS
   hosts: localhost
@@ -197,7 +199,7 @@
     - role: clickhouse_verify
       tags: [k8s, verify]
 
-    # --- Optional: the second service, on Step 9's Keeper and S3 data ---------
+    # --- Step 11c (optional): the second service, on Step 9's Keeper and S3 data
     # A second cluster attached to the first as its child, with its own node
     # group (Step 5) and refusing inserts and mutations. Ordered after Step 11
     # so the parent is known good before anything attaches to it. Same when:
@@ -223,7 +225,7 @@
     - role: clickhouse_loadbalancer
       tags: [k8s, lb]
 
-    # --- Optional: the second service's own load balancer ---------------------
+    # --- Step 12b (optional): the second service's own load balancer ----------
     # Step 12's role again, given the second service's cluster, namespace and
     # clickhouse.second_service.load_balancer, so it makes a Service of its own
     # (<name>-lb in the second service's namespace). Its own tag and state
