@@ -42,6 +42,14 @@
 #     `scripts/play.sh --tags ch-jwt -e ch_jwt_state=absent` drops just them.
 #     The state/ files describing the pool are kept. Only what exists is torn
 #     down, same as Langfuse.
+#   * The second service (optional, clickhouse.second_service) goes BEFORE the
+#     main load balancer and cluster, its own load balancer first. It runs on
+#     the main cluster's Keeper, so removing that cluster first would leave it
+#     attached to nothing. Removing it needs the operator and the nodes alive,
+#     like the cluster, and the operator still running with its private-Hydra
+#     feature flag, which --all removes only later, with the operator. Only
+#     what exists is torn down, so a second service still deployed after its
+#     switch went back to false is removed too.
 #
 # What each mode leaves behind and what it costs:
 #   --nodes-only  VPC, EKS, IRSA, operator, StorageClass, cluster objects (Pending),
@@ -80,6 +88,8 @@ LF_NAMESPACE="$(lf_var '  namespace:')"
 LF_RELEASE="$(lf_var '  release:')"
 GF_NAMESPACE="$(gf_var '  namespace:')"
 GF_RELEASE="$(gf_var '  release:')"
+SECOND_NS="$(ch_var clickhouse.second_service.namespace)"
+SECOND_CLUSTER="$(ch_var clickhouse.second_service.cluster_name)"
 
 # tag:state-variable pairs, in teardown order. lf-db (the Langfuse database
 # and user inside ClickHouse) and gf-db (the Grafana ClickHouse user, Step
@@ -90,8 +100,11 @@ GF_RELEASE="$(gf_var '  release:')"
 # grafana_db_state).
 case "$MODE" in
   nodes)   PLAN=(nodes:nodegroups_state) ;;
-  default) PLAN=(lf-app:langfuse_state gf-app:grafana_state lb:lb_state cluster:cluster_state sso-idp:sso_idp_state nodes:nodegroups_state) ;;
+  default) PLAN=(lf-app:langfuse_state gf-app:grafana_state
+                 second-lb:second_lb_state second-service:second_service_state
+                 lb:lb_state cluster:cluster_state sso-idp:sso_idp_state nodes:nodegroups_state) ;;
   all)     PLAN=(lf-app:langfuse_state lf-db:langfuse_db_state gf-app:grafana_state gf-db:grafana_db_state
+                 second-lb:second_lb_state second-service:second_service_state
                  lb:lb_state cluster:cluster_state sso-idp:sso_idp_state
                  operator:operator_state prereqs:prereqs_state lf-storage:langfuse_storage_state gf-storage:grafana_storage_state
                  nodes:nodegroups_state storage:storage_state eks:eks_state vpc:vpc_state) ;;
@@ -139,6 +152,18 @@ sso_idp_exists() {
   aws cloudformation describe-stacks --stack-name "${ENVIRONMENT_NAME}-sso" \
     --profile "$TARGET_PROFILE" --region "$REGION" >/dev/null 2>&1
 }
+# --- Second service: keep second-lb and second-service only when there ------
+# Same reasoning as Langfuse above: deploy.yml tears both down whenever their
+# *_state is absent, whether or not clickhouse.second_service.enabled is still
+# true. second-service checks the release and the namespace, so a run that
+# died after creating the namespace still gets cleaned up.
+second_lb_exists() {
+  kubectl get service "$SECOND_CLUSTER-lb" -n "$SECOND_NS" >/dev/null 2>&1
+}
+second_service_exists() {
+  helm status -n "$SECOND_NS" "$SECOND_CLUSTER" >/dev/null 2>&1 \
+    || kubectl get namespace "$SECOND_NS" >/dev/null 2>&1
+}
 LF_STORAGE=0; GF_STORAGE=0
 kept=()
 for entry in "${PLAN[@]}"; do
@@ -150,14 +175,18 @@ for entry in "${PLAN[@]}"; do
     gf-db)      kubectl get namespace "$GF_NAMESPACE" >/dev/null 2>&1 || continue ;;
     gf-storage) gf_storage_exists || continue; GF_STORAGE=1 ;;
     sso-idp)    sso_idp_exists || continue ;;
+    second-lb)  second_lb_exists || continue ;;
+    second-service) second_service_exists || continue ;;
   esac
   kept+=("$entry")
 done
 PLAN=("${kept[@]}")   # never empty: nodes is in every plan and is never dropped
 
 # --- guard: the cluster cannot be removed without nodes -----------------------
-# Both namespaces hold PVC-backed pods (Keeper; Langfuse's PostgreSQL and
-# Valkey), so either would hang in Terminating with the CSI controller gone.
+# The ClickHouse and Langfuse namespaces hold PVC-backed pods (Keeper;
+# Langfuse's PostgreSQL and Valkey), so either would hang in Terminating with
+# the CSI controller gone. The second service's namespace has no volumes, but
+# its ClickHouseCluster's finalizers need the operator, which needs the nodes.
 if [[ "$MODE" != nodes ]]; then
   # `|| die`: under set -eo pipefail a failing kubectl used to abort the script
   # right here with no output at all. Say what usually broke instead.
@@ -165,17 +194,18 @@ if [[ "$MODE" != nodes ]]; then
     || die "kubectl cannot reach the cluster -- no kubeconfig at state/kubeconfig (scripts/up.sh writes it)," \
            "expired AWS credentials ($(ch_login_hint))," \
            "or the EKS cluster is gone"
-  ns_exists=$(kubectl get namespace "$NS" -o name 2>/dev/null || true)
-  lf_ns_exists=$(kubectl get namespace "$LF_NAMESPACE" -o name 2>/dev/null || true)
-  if [[ ( -n "$ns_exists" || -n "$lf_ns_exists" ) && "$nodes" -eq 0 ]]; then
-    if [[ -n "$ns_exists" && -n "$lf_ns_exists" ]]; then
-      fail "the ClickHouse namespace $NS and the Langfuse namespace $LF_NAMESPACE exist but there are no nodes."
-    elif [[ -n "$ns_exists" ]]; then
-      fail "the ClickHouse namespace $NS exists but there are no nodes."
-    else
-      fail "the Langfuse namespace $LF_NAMESPACE exists but there are no nodes."
-    fi
-    info "removing it now would hang: the operator and the EBS CSI controller are not running."
+  stuck=()
+  for ns_desc in "ClickHouse:$NS" "second service:$SECOND_NS" "Langfuse:$LF_NAMESPACE"; do
+    kubectl get namespace "${ns_desc##*:}" >/dev/null 2>&1 && stuck+=("the ${ns_desc%%:*} namespace ${ns_desc##*:}")
+  done
+  if ((${#stuck[@]} > 0)) && [[ "$nodes" -eq 0 ]]; then
+    # One phrase: "A", "A and B", "A, B and C".
+    list="${stuck[0]}"
+    for ((i = 1; i < ${#stuck[@]}; i++)); do
+      if ((i == ${#stuck[@]} - 1)); then list+=" and ${stuck[$i]}"; else list+=", ${stuck[$i]}"; fi
+    done
+    fail "$list $( ((${#stuck[@]} == 1)) && echo exists || echo exist) but there are no nodes."
+    info "removing $( ((${#stuck[@]} == 1)) && echo it || echo them) now would hang: the operator and the EBS CSI controller are not running."
     info "either bring the nodes back first (scripts/up.sh --from nodes --yes, ~10 min) and re-run this,"
     info "or use --nodes-only, which is already the state you are in."
     exit 1

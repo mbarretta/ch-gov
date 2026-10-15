@@ -5,11 +5,15 @@
 #   ansible-playbook deploy.yml                    # everything, Steps 1-12
 #                                                  #   (+13-15 when langfuse.enabled,
 #                                                  #    +16-18 when grafana.enabled,
-#                                                  #    +6b/11b when sso.enabled)
+#                                                  #    +6b/11b when sso.enabled,
+#                                                  #    +the second service and its load
+#                                                  #     balancer when
+#                                                  #     clickhouse.second_service.enabled)
 #   ansible-playbook deploy.yml --tags images      # just the pull-role check, ECR setup + image sync
 #   ansible-playbook deploy.yml --tags langfuse    # just the optional Steps 13-15
 #   ansible-playbook deploy.yml --tags grafana     # just the optional Steps 16-18
 #   ansible-playbook deploy.yml --tags sso         # just the optional Steps 6b and 11b
+#   ansible-playbook deploy.yml --tags second-service,second-lb   # just the optional second service
 #   ansible-playbook deploy.yml --check            # dry run
 #   ansible-playbook deploy.yml -e fips=true       # FIPS build
 #
@@ -23,6 +27,10 @@
 # Steps 6b and 11b are optional and off by default (sso.enabled in group_vars):
 # an Amazon Cognito user pool for Langfuse sign-in (OIDC) and ClickHouse JWT
 # sign-in. The numbering of Steps 1-18 is unchanged.
+# The second service is optional and off by default
+# (clickhouse.second_service.enabled in group_vars): a second ClickHouse
+# cluster on the first one's Keeper and S3 data, with compute of its own,
+# installed after Step 11 and given its own load balancer after Step 12.
 
 - name: ClickHouse Private -- AWS EKS
   hosts: localhost
@@ -122,6 +130,15 @@
           - "artifacts:       {{ all_artifacts | map(attribute='repo') | list | join(', ') }}"
       tags: [always]
 
+    # Stops the run before Steps 5, 6 and 8 when clickhouse.second_service is
+    # switched off but the second service is still deployed: those steps would
+    # remove its node group, its IRSA subject and the operator flag it depends
+    # on. Tagged like those three steps, so it runs whenever one of them will.
+    # See the file for what it checks and when it stands aside.
+    - name: Guard against switching the second service off while it is deployed
+      ansible.builtin.import_tasks: roles/clickhouse_second_service/tasks/guard.yml
+      tags: [infra, nodes, storage, k8s, operator]
+
   roles:
     # --- Step 1: IAM role for ECR access -----------------------------------
     # The role is arranged with ClickHouse, never created here. This step only
@@ -180,6 +197,19 @@
     - role: clickhouse_verify
       tags: [k8s, verify]
 
+    # --- Optional: the second service, on Step 9's Keeper and S3 data ---------
+    # A second cluster attached to the first as its child, with its own node
+    # group (Step 5) and refusing inserts and mutations. Ordered after Step 11
+    # so the parent is known good before anything attaches to it. Same when:
+    # shape as Langfuse's roles below: nothing may change while
+    # clickhouse.second_service.enabled is false, and the `== 'absent'` half
+    # keeps the teardown reachable after the switch goes back to false.
+    - role: clickhouse_second_service
+      tags: [k8s, second-service]
+      when: >-
+        (clickhouse.second_service.enabled | bool)
+        or (second_service_state | default('present')) == 'absent'
+
     # --- Step 11b (optional): ClickHouse JWT sign-in from Cognito tokens ------
     # Needs Step 6b's state files on disk and the running cluster from Step 9;
     # ordered after Step 11's verification so a broken cluster is caught first.
@@ -193,10 +223,31 @@
     - role: clickhouse_loadbalancer
       tags: [k8s, lb]
 
+    # --- Optional: the second service's own load balancer ---------------------
+    # Step 12's role again, given the second service's cluster, namespace and
+    # clickhouse.second_service.load_balancer, so it makes a Service of its own
+    # (<name>-lb in the second service's namespace). Its own tag and state
+    # variable keep the two teardowns apart. Same when: shape as the second
+    # service above.
+    - role: clickhouse_loadbalancer
+      tags: [k8s, second-lb]
+      when: >-
+        (clickhouse.second_service.enabled | bool)
+        or (second_lb_state | default('present')) == 'absent'
+      vars:
+        clickhouse_lb_cluster_name: "{{ clickhouse.second_service.cluster_name }}"
+        clickhouse_lb_namespace: "{{ clickhouse.second_service.namespace }}"
+        clickhouse_lb_replicas: "{{ clickhouse.second_service.replicas }}"
+        clickhouse_lb_config: "{{ clickhouse.second_service.load_balancer }}"
+        clickhouse_lb_config_name: clickhouse.second_service.load_balancer
+        clickhouse_lb_state_var: second_lb_state
+        clickhouse_lb_tag: second-lb
+        clickhouse_lb_client_args: "--second --lb"
+
     # --- Steps 13-15 (optional): Langfuse on top of ClickHouse Private ---------
     # Steps 1-12 gate themselves (each role ends the play when its inputs say
-    # so); these three are the first with a role-level `when`, because the
-    # whole feature is a switch in group_vars and nothing about a ClickHouse-
+    # so); these three, like the optional roles above, have a role-level
+    # `when`, because the whole feature is a switch in group_vars and nothing about a ClickHouse-
     # only run may change while it is off. The `or ... == 'absent'` half keeps
     # the teardown reachable after the switch goes back to false: down.sh
     # removes Langfuse whenever it is actually there, and that must not depend

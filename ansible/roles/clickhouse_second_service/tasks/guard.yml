@@ -1,0 +1,110 @@
+---
+# A guard against switching the second service off while it is still there.
+#
+# deploy.yml imports this file at the end of its pre_tasks, tagged like the
+# three steps it protects, so it runs before any of them on every run that
+# would reach one: Step 5 (eks_nodegroups) shrinks the second-server node
+# group to 0 nodes, Step 6 (storage_iam) drops the second service's account
+# from the IRSA trust policy, and Step 8 (clickhouse_operator) turns the
+# operator's private-Hydra feature flag back off, all as soon as
+# clickhouse.second_service.enabled is false. The last one matters most:
+# without the flag the parent no longer tracks the child, and the parent's
+# replica cleanup can remove the child's replicas from the shared Keeper.
+#
+# So when the switch is off but the child's release or its ClickHouseCluster
+# is still in the cluster, the run stops here, before anything changes, and
+# says how to remove the second service first. Its teardowns run with the
+# switch off too, and this guard is what keeps the operator's flag on until
+# they have.
+#
+# Nothing here runs while the switch is on, or while any <name>_state=absent
+# teardown is in progress (scripts/down.sh passes one on every step, and its
+# plan removes the second service before anything it depends on). On a fresh
+# deployment there is no kubeconfig yet, and with no cluster behind the
+# kubeconfig there is no second service either, so both pass.
+
+- name: Guard against a second service left running with its switch off
+  vars:
+    # Every <name>_state the run was given, such as second_service_state or
+    # nodegroups_state. The leading [a-z] leaves out the roles' own
+    # underscore-prefixed facts.
+    _ssg_states: "{{ query('ansible.builtin.varnames', '^[a-z][a-z0-9_]*_state$') }}"
+    _ssg_teardown: "{{ 'absent' in (query('ansible.builtin.vars', *_ssg_states) if _ssg_states else []) }}"
+  when:
+    - not (clickhouse.second_service.enabled | bool)
+    - not (_ssg_teardown | bool)
+  block:
+    - name: Look for a kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: _ssg_kubeconfig
+      check_mode: false
+
+    - name: Look for the second service's ClickHouseCluster
+      # --ignore-not-found: rc 0 and no output means it is not there. A
+      # non-zero rc means the cluster could not be asked, or the operator's
+      # CRD is not installed yet.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - clickhousecluster
+          - c-{{ clickhouse.second_service.cluster_name }}
+          - --namespace={{ clickhouse.second_service.namespace }}
+          - --ignore-not-found
+          - --request-timeout=20s
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _ssg_cr
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _ssg_kubeconfig.stat.exists
+
+    - name: Look for the second service's Helm release
+      # A release whose CR is already gone still counts: a later teardown of
+      # it is what removes the namespace.
+      ansible.builtin.command:
+        argv:
+          - helm
+          - list
+          - --namespace={{ clickhouse.second_service.namespace }}
+          - --filter=^{{ clickhouse.second_service.cluster_name }}$
+          - --short
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _ssg_release
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _ssg_kubeconfig.stat.exists
+
+    - name: Stop if the second service is still deployed
+      vars:
+        _ssg_found: >-
+          {{ (['Helm release ' ~ clickhouse.second_service.cluster_name]
+              if (_ssg_release.rc | default(1)) == 0 and (_ssg_release.stdout | default('') | trim) != '' else [])
+             + (['ClickHouseCluster c-' ~ clickhouse.second_service.cluster_name]
+                if (_ssg_cr.rc | default(1)) == 0 and (_ssg_cr.stdout | default('') | trim) != '' else []) }}
+      ansible.builtin.assert:
+        that: _ssg_found | length == 0
+        fail_msg: >-
+          clickhouse.second_service.enabled is false, but the second service is still
+          deployed: {{ _ssg_found | join(' and ') }} in
+          {{ clickhouse.second_service.namespace }}. This run would take away its nodes,
+          its access to the S3 data and the operator's private-Hydra flag while it is
+          still attached to c-{{ clickhouse.cluster_name }}, and without the flag the
+          parent's replica cleanup can remove the second service's replicas from the
+          shared Keeper. Nothing has been changed. To keep the second service, set
+          clickhouse.second_service.enabled back to true (scripts/go.sh --second-service).
+          To remove it, tear it down first, while the operator still runs with its flag:
+          scripts/play.sh --tags second-lb -e second_lb_state=absent, then
+          scripts/play.sh --tags second-service -e second_service_state=absent.
+          Then re-run with the switch off.
+        success_msg: >-
+          {{ 'no second service in ' ~ clickhouse.second_service.namespace
+             if ((_ssg_cr.rc | default(1)) == 0 or (_ssg_release.rc | default(1)) == 0)
+             else ('no kubeconfig yet, so no second service to find'
+                   if not _ssg_kubeconfig.stat.exists
+                   else 'the cluster did not answer, so no second service to find') }}

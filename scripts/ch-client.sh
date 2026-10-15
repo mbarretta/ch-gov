@@ -7,6 +7,7 @@
 #   scripts/ch-client.sh --lb [-q ...]         # via the Step 12 load balancer
 #   scripts/ch-client.sh --sso [--lb] [-q ...] # sign in as yourself with Cognito
 #   scripts/ch-client.sh --sso --fresh         # ... asking for credentials again
+#   scripts/ch-client.sh --second [--lb] [--sso] [-q ...]  # the second service
 #
 # Default: does what the tutorial's Step 11 does by hand -- port-forward the
 # first server pod's native port to localhost, connect with the admin user,
@@ -29,6 +30,13 @@
 # (with --sso) signs the browser out of Cognito's hosted-UI session first, so
 # the sign-in page asks for credentials instead of reusing the last user.
 #
+# --second (needs clickhouse.second_service) connects to the second service
+# instead: its own namespace, its server pods and its own load balancer,
+# <name>-lb. It composes with every other option. The admin user and password
+# are the same, since the second service shares the first one's users, and so
+# does a Cognito sign-in, and under fips: true its certificate is signed by
+# the same CA. It refuses inserts and mutations; queries work.
+#
 # fips: true moves both paths to the native TLS port (9440) with --secure
 # and a CA-verified connection against the CA clickhouse_cluster generated
 # (see scripts/lib/common.sh's ch_tls_client_config) -- 9000 has no listener
@@ -46,22 +54,38 @@ source "$CH_ROOT/scripts/lib/common.sh"
 export KUBECONFIG="$CH_ROOT/state/kubeconfig"
 
 # Read what the playbook decided, so this stays in step with group_vars.
-NS="$(ch_var clickhouse.namespace)"
 USER_="$(ch_var clickhouse.admin_username)"
 PW_FILE="$CH_ROOT/state/clickhouse-admin-password"
 LOCAL_PORT="${CH_LOCAL_PORT:-19000}"
 
-# Leading flags, in any order: --lb, --sso and --fresh. Everything after them
-# goes to the client unchanged.
-LB=0; SSO=0; FRESH=0
+# Leading flags, in any order: --lb, --sso, --fresh and --second. Everything
+# after them goes to the client unchanged.
+LB=0; SSO=0; FRESH=0; SECOND=0
 while (($#)); do
   case "$1" in
     --lb)  LB=1 ;;
     --sso) SSO=1 ;;
     --fresh) FRESH=1 ;;
+    --second) SECOND=1 ;;
     *) break ;;
   esac; shift
 done
+
+# Which cluster: the main one, or with --second the second service. The
+# load balancer is <cluster>-lb in the same namespace either way.
+if ((SECOND)); then
+  NS="$(ch_var clickhouse.second_service.namespace)"
+  CLUSTER="$(ch_var clickhouse.second_service.cluster_name)"
+  LB_HINT="set clickhouse.second_service.load_balancer.type and run: scripts/play.sh --tags second-lb"
+  POD_HINT="is the second service deployed? (clickhouse.second_service.enabled; scripts/go.sh --second-service)"
+  WHAT="the second service"
+else
+  NS="$(ch_var clickhouse.namespace)"
+  CLUSTER="$(ch_var clickhouse.cluster_name)"
+  LB_HINT="set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
+  POD_HINT="are the node groups up?"
+  WHAT=""
+fi
 
 if have clickhouse-client; then CLIENT=(clickhouse-client)
 elif have clickhouse; then CLIENT=(clickhouse client)
@@ -105,17 +129,16 @@ WHO="$( ((SSO)) && echo 'Cognito token' || echo "user $USER_")"
 
 # Diagnostics go to stderr so a scripted -q query's output stays clean.
 if ((LB)); then
-  CLUSTER="$(ch_var clickhouse.cluster_name)"
   host="$(kubectl get service "$CLUSTER-lb" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-  [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- set clickhouse.load_balancer.type and run: scripts/play.sh --tags lb"
-  info "connecting to $host:$CH_PORT (NLB) as $WHO$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')" >&2
+  [[ -n "$host" ]] || die "no load balancer Service '$CLUSTER-lb' in $NS -- $LB_HINT"
+  info "connecting to $host:$CH_PORT (NLB${WHAT:+, $WHAT}) as $WHO$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')" >&2
   connect "$host" "$CH_PORT" "$@"
   exit 0
 fi
 
 pod="$(kubectl get pods -n "$NS" -l app.kubernetes.io/name=clickhouse-server \
          --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "$pod" ]] || die "no Running server pod in $NS -- are the node groups up?"
+[[ -n "$pod" ]] || die "no Running server pod in $NS -- $POD_HINT"
 
 kubectl port-forward -n "$NS" "pod/$pod" "$LOCAL_PORT:$CH_PORT" >/dev/null 2>&1 &
 PF=$!
@@ -126,5 +149,5 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 
-info "forwarding localhost:$LOCAL_PORT -> $pod:$CH_PORT in $NS as $WHO$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')" >&2
+info "forwarding localhost:$LOCAL_PORT -> $pod:$CH_PORT in $NS${WHAT:+ ($WHAT)} as $WHO$(((${#SECURE_ARGS[@]})) && echo ', TLS CA-verified')" >&2
 connect 127.0.0.1 "$LOCAL_PORT" "$@"
