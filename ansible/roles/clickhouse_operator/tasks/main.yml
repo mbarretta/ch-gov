@@ -47,7 +47,25 @@
     release_namespace: "{{ clickhouse.operator_namespace }}"
     create_namespace: true
     release_state: "{{ operator_state | default('present') }}"
-    values:
+    values: "{{ _op_values | combine(_op_second_service_values, recursive=true) }}"
+  vars:
+    # Compute-compute separation, only when the second service is on. The
+    # second service attaches to this cluster as a child that shares its
+    # Keeper. With the flag on, the child registers itself in the parent's
+    # list of children; with it off that list stays empty, and the parent's
+    # replica cleanup treats a restarting child's replicas as stale and
+    # drops them from Keeper. Removing the second service therefore needs
+    # the operator to keep the flag until the child is gone.
+    #
+    # privateComputeSeparationEnabled is the chart's current name for this
+    # switch; privateHydraEnabled is its deprecated alias, and either one
+    # sets the operator's FEATURE_FLAG_PRIVATE_HYDRA_ENABLED. When the
+    # second service is off nothing is added, so the operator runs with
+    # exactly the values below.
+    _op_second_service_values: >-
+      {{ {'operator': {'featureFlags': {'privateComputeSeparationEnabled': true}}}
+         if clickhouse.second_service.enabled else {} }}
+    _op_values:
       image:
         # Point at YOUR registry. The chart defaults to ClickHouse's own
         # us-west-2 ECR, which you cannot pull from -- this override is the
