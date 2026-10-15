@@ -134,6 +134,14 @@ infrastructure:
     instance_type: "{{ sz.server_instance_type['fips' if fips else 'arm'] }}"
     min_nodes: "{{ sz.server_min_nodes }}"   # matches the chart's server.replicaCount
     max_nodes: "{{ sz.server_max_nodes }}"
+  # The optional second service's own node group (clickhouse.second_service).
+  # Same instance type as server, because its pods are the same size and need
+  # the same local NVMe for the read cache. Nothing is created while
+  # clickhouse.second_service.enabled is false.
+  second_server:
+    instance_type: "{{ sz.server_instance_type['fips' if fips else 'arm'] }}"
+    min_nodes: "{{ sz.second_server_min_nodes }}"   # matches clickhouse.second_service.replicas
+    max_nodes: "{{ sz.second_server_max_nodes }}"
   operator:
     # x86_64 in both builds -- the tutorial specifies AL2023_x86_64 for this
     # group only. It is also the only untainted group, so cluster add-ons
@@ -167,6 +175,9 @@ pricing:
     m6id.16xlarge: 3.7968
   eks_control_plane_hourly_usd: 0.10
   nat_gateway_hourly_usd: 0.045
+  # One Network Load Balancer's hourly charge, before traffic (LCU) charges.
+  # Counted only for the optional second service's load balancer.
+  nlb_hourly_usd: 0.0225
   # Langfuse (optional Steps 13-15) adds no instances: it runs on the operator
   # node group already priced above. Its own cost is a second NLB (~$0.02/hr)
   # plus pennies of EBS (two small PVCs) and S3.
@@ -192,6 +203,8 @@ size_profiles:
     operator_instance_type: {arm: "m7i.xlarge",    fips: "m7i.xlarge"}
     server_min_nodes: 3
     server_max_nodes: 6
+    second_server_min_nodes: 1
+    second_server_max_nodes: 2
     operator_min_nodes: 2
     operator_max_nodes: 4
     server_cpu: "6"
@@ -244,6 +257,8 @@ size_profiles:
     operator_instance_type: {arm: "m7i.2xlarge",   fips: "m7i.2xlarge"}
     server_min_nodes: 3
     server_max_nodes: 6
+    second_server_min_nodes: 1
+    second_server_max_nodes: 2
     operator_min_nodes: 2
     operator_max_nodes: 4
     server_cpu: "60"
@@ -347,6 +362,36 @@ clickhouse:
   # Derived by the chart as ch-<cluster_name>-sa. Restated here because the
   # IAM trust policy in Step 6 must name it before the chart ever runs.
   service_account: "ch-default-us-01-sa"
+
+  # --- Optional second service ---
+  # A second ClickHouse service that shares this cluster's Keeper and S3 data
+  # but runs on its own compute (infrastructure.second_server), so the kit can
+  # show compute-compute separation. It refuses inserts and mutations; the
+  # cluster above stays the read-write service, and Langfuse, Grafana and
+  # token logins keep using it. Off by default; scripts/go.sh --second-service
+  # switches it on.
+  second_service:
+    enabled: false
+    # The same chart schema as cluster_name above, ^[a-z]+-[a-z]{2}-[0-9]{2}$.
+    # The chart derives the namespace and service account from it, and they
+    # are restated literally below for the same reasons as namespace and
+    # service_account above. The second service needs its own namespace: the
+    # chart's ResourceQuota allows one ClickHouse cluster per namespace.
+    cluster_name: "second-us-01"
+    namespace: "ns-second-us-01"
+    service_account: "ch-second-us-01-sa"
+    # Pod CPU, memory and cache size are the same as clickhouse.server.
+    replicas: 1
+    # Its own load balancer, with the same choices as clickhouse.load_balancer.
+    # Written out in full rather than referring to that block, which would trip
+    # Ansible's recursion guard.
+    load_balancer:
+      type: "internal"     # none | internal | public
+      allowed_cidrs: []
+      ports:
+        - {name: http, port: 8123}
+        - {name: native, port: 9000}
+      cross_zone: true
 
   # One bucket may serve several clusters, distinguished by key prefix. The
   # prefix format is enforced by the chart: ch-s3-<uuid>.
