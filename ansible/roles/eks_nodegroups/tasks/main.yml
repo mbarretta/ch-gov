@@ -7,6 +7,10 @@
 #   server    large, NVMe-backed, the actual database
 #   operator  ordinary nodes for the operator and cluster add-ons
 #
+# A fourth, second-server, joins them when clickhouse.second_service.enabled
+# is true: the same kind of node as server, kept for the second service so
+# its queries never compete with the parent's for CPU or cache.
+#
 # Teardown:  ansible-playbook deploy.yml --tags nodes -e nodegroups_state=absent
 
 - name: Look up the VPC stack outputs
@@ -51,6 +55,15 @@
       '{{ _ng_cluster_status.stdout | trim | default('absent', true) }}', not ACTIVE.
       Run: ansible-playbook deploy.yml --tags eks
 
+- name: Size the second-server group
+  # 0 nodes while the second service is off. The stack's HasSecondServer
+  # condition then leaves the group out, so the stack holds the same
+  # resources it would without the feature.
+  ansible.builtin.set_fact:
+    _ng_second_nodes: >-
+      {{ (infrastructure.second_server.min_nodes | int)
+         if (clickhouse.second_service.enabled | bool) else 0 }}
+
 - name: Announce what this will cost
   vars:
     _price: "{{ pricing.instance_hourly_usd }}"
@@ -60,24 +73,41 @@
                     * (infrastructure.server.min_nodes | int) }}"
     _operator_hr: "{{ (_price[infrastructure.operator.instance_type] | default(0) | float)
                       * (infrastructure.operator.min_nodes | int) }}"
-    _compute_hr: "{{ (_keeper_hr | float) + (_server_hr | float) + (_operator_hr | float) }}"
+    _second_hr: "{{ (_price[infrastructure.second_server.instance_type] | default(0) | float)
+                    * (_ng_second_nodes | int) }}"
+    # The second service's own load balancer is not part of this stack, but
+    # it is counted here so the total matches ch_hourly_cost (scripts/lib).
+    _second_nlb_hr: "{{ (pricing.nlb_hourly_usd | float)
+                        if (_ng_second_nodes | int) > 0
+                           and clickhouse.second_service.load_balancer.type != 'none'
+                        else 0 }}"
+    _compute_hr: "{{ (_keeper_hr | float) + (_server_hr | float) + (_operator_hr | float)
+                     + (_second_hr | float) }}"
     _total_hr: "{{ (_compute_hr | float)
                    + (pricing.eks_control_plane_hourly_usd | float)
                    + (pricing.nat_gateway_hourly_usd | float
-                      * (1 if infrastructure.nat_mode == 'single' else 3)) }}"
-  ansible.builtin.debug:
-    msg:
+                      * (1 if infrastructure.nat_mode == 'single' else 3))
+                   + (_second_nlb_hr | float) }}"
+    # Lines that render empty are dropped, so the second: line and the NLB
+    # appear only while the second service is on, and with it off the banner
+    # reads exactly as it did before the feature existed.
+    _lines:
       - "build:    {{ 'FIPS (x86_64)' if fips else 'standard (arm64)' }}  ami: {{ node_ami_type }}"
       - "keeper:   {{ infrastructure.keeper.node_count }} x {{ infrastructure.keeper.instance_type }}
          = ${{ '%.2f' | format(_keeper_hr | float) }}/hr"
       - "server:   {{ infrastructure.server.min_nodes }} x {{ infrastructure.server.instance_type }}
          = ${{ '%.2f' | format(_server_hr | float) }}/hr  (max {{ infrastructure.server.max_nodes }})"
+      - "{% if (_ng_second_nodes | int) > 0 %}second:   {{ _ng_second_nodes }} x {{ infrastructure.second_server.instance_type }}
+         = ${{ '%.2f' | format(_second_hr | float) }}/hr  (max {{ infrastructure.second_server.max_nodes }}){% endif %}"
       - "operator: {{ infrastructure.operator.min_nodes }} x {{ infrastructure.operator.instance_type }}
          = ${{ '%.2f' | format(_operator_hr | float) }}/hr  (max {{ infrastructure.operator.max_nodes }})"
       - "compute subtotal: ${{ '%.2f' | format(_compute_hr | float) }}/hr"
-      - "with control plane + NAT: ${{ '%.2f' | format(_total_hr | float) }}/hr
+      - "with control plane + NAT{{ ' + second NLB' if (_second_nlb_hr | float) > 0 else '' }}:
+         ${{ '%.2f' | format(_total_hr | float) }}/hr
          (~${{ '%.0f' | format(_total_hr | float * 24) }}/day)"
       - "teardown: ansible-playbook deploy.yml --tags nodes -e nodegroups_state=absent"
+  ansible.builtin.debug:
+    msg: "{{ _lines | select | list }}"
 
 # Same shared-account caution as the cluster stack: a first CREATE that fails
 # leaves a ROLLBACK_COMPLETE husk holding nothing but blocking the name. We
@@ -139,6 +169,9 @@
       ServerInstanceType: "{{ infrastructure.server.instance_type }}"
       ServerMinNodes: "{{ infrastructure.server.min_nodes }}"
       ServerMaxNodes: "{{ infrastructure.server.max_nodes }}"
+      SecondServerInstanceType: "{{ infrastructure.second_server.instance_type }}"
+      SecondServerMinNodes: "{{ _ng_second_nodes }}"
+      SecondServerMaxNodes: "{{ infrastructure.second_server.max_nodes }}"
       OperatorInstanceType: "{{ infrastructure.operator.instance_type }}"
       OperatorMinNodes: "{{ infrastructure.operator.min_nodes }}"
       OperatorMaxNodes: "{{ infrastructure.operator.max_nodes }}"
@@ -177,6 +210,7 @@
     vars:
       _expected: "{{ (infrastructure.keeper.node_count | int)
                      + (infrastructure.server.min_nodes | int)
+                     + (_ng_second_nodes | int)
                      + (infrastructure.operator.min_nodes | int) }}"
     retries: 30
     delay: 10
