@@ -1,0 +1,460 @@
+---
+# The optional second service: a second ClickHouse cluster on the first one's
+# Keeper and S3 data, with compute of its own.
+#
+# ClickHouse Private calls this pair a Hydra parent and child. The child here
+# is clickhouse.second_service (second-us-01, in ns-second-us-01); the parent
+# is the cluster from Step 9. The child keeps no Keeper and no data of its
+# own. It reads the parent's Keeper, the parent's S3 layout, the parent's
+# interserver secret and the users created on the parent, and it runs on its
+# own node group (infrastructure.second_server). isReadonly makes it refuse
+# inserts and mutations, so the parent stays the one read-write service.
+# isReadonly does not refuse DDL: a CREATE or DROP on the second service still
+# reaches the shared catalog.
+#
+# The release is the same one Step 9 installs, through the same tasks
+# (clickhouse_cluster's release.yml, and its tls.yml under fips: true). It
+# differs in three chart values: parentCluster names the parent CR,
+# isReadonly is true, and keeper.replicaCount is 0. Bucket, region, endpoint,
+# key prefix, admin user and password, and the JWT user directory under SSO
+# are the parent's. Its service account, ch-second-us-01-sa, is the second
+# subject the Step 6 IRSA trust policy names.
+#
+# Attaching restarts the parent. When the child first registers, the operator
+# lists it in the parent's spec.hydraChildrenInstances, which changes the
+# parent's server config, and the parent's pods restart one at a time. They
+# restart once more when the child is removed. The operator's private-Hydra
+# feature flag (Step 8, on when clickhouse.second_service.enabled) is what
+# makes the parent track the child at all, and the wait below is its proof.
+#
+# Cost: the second-server node group from Step 5. The pods add nothing else,
+# and the child has no Keeper volumes.
+#
+# Teardown: ansible-playbook deploy.yml --tags second-service -e second_service_state=absent
+#   Removes the release and its namespace. The parent, its namespace and the
+#   shared S3 data are not touched.
+
+- name: Settle the inputs
+  ansible.builtin.set_fact:
+    _ss_state: "{{ second_service_state | default('present') }}"
+    _ss: "{{ clickhouse.second_service }}"
+    _ss_parent_cr: "c-{{ clickhouse.cluster_name }}"
+    _ss_cr: "c-{{ clickhouse.second_service.cluster_name }}"
+
+# --- preconditions ------------------------------------------------------------
+# None of this applies when removing the second service: the parent may
+# already be in trouble, and the node group may already be gone.
+
+- name: Preconditions (skipped on teardown)
+  when: _ss_state != 'absent'
+  block:
+    - name: Read the parent cluster's state
+      # status.state is the operator's one-word summary (Provisioning,
+      # Running, Degraded, ...). Retried for a few minutes so a parent still
+      # finishing a rolling restart from a previous run is waited for.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - clickhousecluster
+          - "{{ _ss_parent_cr }}"
+          - --namespace={{ clickhouse.namespace }}
+          - -o=jsonpath={.status.state}
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _ss_parent_state
+      until: _ss_parent_state.rc == 0 and (_ss_parent_state.stdout | trim) == 'Running'
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail clearly if the parent is missing or not Running
+      ansible.builtin.assert:
+        that:
+          - _ss_parent_state.rc == 0
+          - (_ss_parent_state.stdout | trim) == 'Running'
+        fail_msg: >-
+          The second service attaches to {{ _ss_parent_cr }} in {{ clickhouse.namespace }},
+          which is {{ ('in state ' ~ (_ss_parent_state.stdout | trim | default('(none)', true)))
+                      if _ss_parent_state.rc == 0 else 'not there' }}.
+          Deploy it first: ansible-playbook deploy.yml --tags cluster
+        success_msg: "parent {{ _ss_parent_cr }} is Running"
+
+    - name: Count nodes labelled for the second service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - --selector=clickhouseGroup=second-server{{ node_label_suffix }}
+          - --no-headers
+          - -o=name
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      register: _ss_nodes
+      changed_when: false
+      check_mode: false
+
+    - name: Fail clearly if the second-server node group is not there
+      ansible.builtin.assert:
+        that: _ss_nodes.stdout_lines | length >= 1
+        fail_msg: >-
+          No nodes are labelled clickhouseGroup=second-server{{ node_label_suffix }}.
+          The second service runs on its own node group (infrastructure.second_server),
+          which Step 5 creates only while clickhouse.second_service.enabled is true. Run:
+          ansible-playbook deploy.yml --tags nodes
+        success_msg: "nodes: {{ _ss_nodes.stdout_lines | length }} second-server"
+
+# --- the release ----------------------------------------------------------------
+# release.yml does the rest of the preconditions (operator, StorageClass), the
+# IRSA ARN lookup, the passwords, the TLS leaf under fips: true, the JWT
+# values under SSO, the Helm install or uninstall, the waits and the
+# image-origin and IRSA checks. keeper_replicas 0 skips its Keeper checks.
+
+- name: Install or remove the second service's release
+  ansible.builtin.include_role:
+    name: clickhouse_cluster
+    tasks_from: release.yml
+    # An included role's tasks do not inherit the tags of the task that
+    # includes them, so a tagged run (--tags second-service) would skip all of
+    # them. This include runs only when the role's own tags select it, and
+    # everything it includes must run whenever it does.
+    apply:
+      tags: [always]
+  vars:
+    _rel:
+      name: "{{ _ss.cluster_name }}"
+      namespace: "{{ _ss.namespace }}"
+      service_account: "{{ _ss.service_account }}"
+      replicas: "{{ _ss.replicas }}"
+      node_group: second-server
+      keeper_replicas: 0
+      parent:
+        name: "{{ _ss_parent_cr }}"
+        namespace: "{{ clickhouse.namespace }}"
+      is_readonly: true
+      state: "{{ _ss_state }}"
+
+# --- teardown -------------------------------------------------------------------
+# helm uninstall removes the child's CR; the operator then deletes its
+# StatefulSets and takes it off the parent's hydraChildrenInstances, which
+# restarts the parent's pods once more. The child has no PVCs. Only the
+# child's namespace is deleted here -- the parent's CR, its finalizers and its
+# namespace are left exactly as they are.
+
+- name: Wait for the operator to remove the second service's pods
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace={{ _ss.namespace }}
+      - --for=delete
+      - --timeout=600s
+      - pod
+      - --all
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _ss_state == 'absent'
+
+- name: Delete the second service's namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Namespace
+    name: "{{ _ss.namespace }}"
+    state: absent
+    wait: true
+    wait_timeout: 300
+  when: _ss_state == 'absent'
+
+- name: Teardown summary
+  ansible.builtin.debug:
+    msg:
+      - "second service {{ _ss_cr }} removed, with namespace {{ _ss.namespace }}"
+      - "{{ _ss_parent_cr }} in {{ clickhouse.namespace }} is untouched; its pods restart once as the operator drops the child from hydraChildrenInstances"
+      - "the shared data stays in s3://{{ clickhouse.bucket_name }}: it belongs to the parent"
+  when: _ss_state == 'absent'
+
+- name: Stop here when tearing down
+  ansible.builtin.meta: end_play
+  when: _ss_state == 'absent'
+
+# --- the parent link ------------------------------------------------------------
+
+- name: Wait for the parent to list the second service as its child
+  # The child registers itself in the parent's spec.hydraChildrenInstances
+  # once the operator's private-Hydra flag is on. Without the flag the list
+  # stays empty, and the parent's replica cleanup can later remove a
+  # restarting child's replicas from Keeper.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - clickhousecluster
+      - "{{ _ss_parent_cr }}"
+      - --namespace={{ clickhouse.namespace }}
+      - -o=jsonpath={range .spec.hydraChildrenInstances[*]}{.clickHouseClusterRef.name}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_link
+  until: _ss_link.rc == 0 and _ss_cr in _ss_link.stdout_lines
+  retries: 60
+  delay: 5
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if the parent never listed it
+  ansible.builtin.assert:
+    that:
+      - _ss_link.rc == 0
+      - _ss_cr in _ss_link.stdout_lines
+    fail_msg: >-
+      After 5 minutes {{ _ss_parent_cr }}'s spec.hydraChildrenInstances is
+      [{{ _ss_link.stdout_lines | join(', ') }}], without {{ _ss_cr }}. The usual cause
+      is the operator running without its private-Hydra feature flag: re-run
+      ansible-playbook deploy.yml --tags operator with clickhouse.second_service.enabled
+      true, then this step again. The operator's log says more:
+      kubectl logs -n {{ clickhouse.operator_namespace }} -l app.kubernetes.io/instance=clickhouse-operator -c manager
+    success_msg: "{{ _ss_parent_cr }} lists {{ _ss_cr }} in spec.hydraChildrenInstances"
+
+- name: Wait for the parent's rolling restart to finish
+  # Attaching the child restarts the parent's pods one at a time (see the top
+  # of this file). The operator replaces them itself (updateStrategy
+  # OnDelete), so "done" is every server pod Ready on its StatefulSet's
+  # current revision. Prints one line per pod still to go, then a count.
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      kubectl get pods --namespace={{ clickhouse.namespace }}
+      --selector=app.kubernetes.io/name=clickhouse-server
+      -o=jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.controller-revision-hash}{" "}{.metadata.ownerReferences[0].name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      | { n=0; while read -r pod rev sts ready; do
+            n=$((n+1));
+            cur="$(kubectl get statefulset "$sts" --namespace={{ clickhouse.namespace }} -o=jsonpath='{.status.updateRevision}')";
+            if [ "$ready" != True ] || [ "$rev" != "$cur" ]; then echo "waiting: $pod"; fi;
+          done; echo "pods: $n"; }
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_settle
+  until: >-
+    _ss_settle.rc == 0
+    and (_ss_settle.stdout_lines | select('match', '^waiting: ') | list | length) == 0
+    and ('pods: ' ~ (clickhouse.server.replicas | int)) in _ss_settle.stdout_lines
+  retries: 90
+  delay: 10
+  changed_when: false
+  check_mode: false
+
+# --- prove it -------------------------------------------------------------------
+# A table created and filled on the parent, read back from the second service
+# (shared Keeper and S3), an INSERT the second service refuses, and a user
+# created on the parent that can sign in on the second service. Each exec is
+# retried briefly: a pod can still be settling after the restart above.
+
+- name: Read the admin password
+  ansible.builtin.set_fact:
+    _ss_pw: "{{ lookup('ansible.builtin.file', admin_password_file) }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Make a throwaway password for the sign-in check
+  # Never written to disk: the user is dropped at the end of this role.
+  ansible.builtin.set_fact:
+    _ss_probe_pw: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: List the running server pods of both services
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - pods
+      - --namespace={{ item }}
+      - --selector=app.kubernetes.io/name=clickhouse-server
+      - --field-selector=status.phase=Running
+      - -o=jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  loop:
+    - "{{ clickhouse.namespace }}"
+    - "{{ _ss.namespace }}"
+  register: _ss_pods
+  changed_when: false
+  check_mode: false
+
+- name: Need a running pod on each
+  ansible.builtin.assert:
+    that:
+      - _ss_pods.results[0].stdout_lines | length >= 1
+      - _ss_pods.results[1].stdout_lines | length >= 1
+    fail_msg: >-
+      Running server pods: {{ _ss_pods.results[0].stdout_lines | length }} in {{ clickhouse.namespace }},
+      {{ _ss_pods.results[1].stdout_lines | length }} in {{ _ss.namespace }}.
+
+- name: Pick a pod on each
+  # Every command below runs clickhouse-client inside one of them through
+  # clickhouse_exec_argv and clickhouse_exec_sh (group_vars/all.yml). The
+  # second service's argv is the same with clickhouse_exec_target set to it.
+  ansible.builtin.set_fact:
+    _ss_parent_pod: "{{ _ss_pods.results[0].stdout_lines[0] }}"
+    _ss_child_pod: "{{ _ss_pods.results[1].stdout_lines[0] }}"
+    _ss_exec_parent: "{{ clickhouse_exec_argv }}"
+
+- name: Remember the exec argv for the second service
+  ansible.builtin.set_fact:
+    _ss_exec_child: "{{ clickhouse_exec_argv }}"
+  vars:
+    clickhouse_exec_target: "{{ _ss }}"
+
+- name: Create a table and insert on the parent
+  # Dropped and recreated in one go, so a retry after a half-finished attempt
+  # cannot leave extra rows behind.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_parent + [_ss_parent_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _ss_pw }}\n"
+  vars:
+    _q: |
+      DROP DATABASE IF EXISTS second_service_check SYNC;
+      CREATE DATABASE second_service_check;
+      CREATE TABLE second_service_check.probe (id UInt32, note String)
+        ENGINE = SharedMergeTree ORDER BY id;
+      INSERT INTO second_service_check.probe (id, note) VALUES (1, 'written on {{ _ss_parent_pod }}'), (2, 'shared Keeper'), (3, 'shared S3');
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_write
+  until: _ss_write.rc == 0
+  retries: 6
+  delay: 10
+  changed_when: true
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Read it back from the second service
+  # The second service has no copy of anything: the table definition comes
+  # from the shared Keeper, the parts from the shared S3 prefix.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_child + [_ss_child_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'SELECT count(), max(id), hostName() FROM second_service_check.probe FORMAT TSV'] }}"
+    stdin: "{{ _ss_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_read
+  until: _ss_read.rc == 0 and (_ss_read.stdout.split('\t')[0] | int) == 3
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Try an INSERT on the second service
+  # Expected to fail. The error text is whatever the server says, printed
+  # below rather than matched, so a reworded message cannot break the check.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_child + [_ss_child_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _ss_pw }}\n"
+  vars:
+    _q: "INSERT INTO second_service_check.probe (id, note) VALUES (4, 'should be refused')"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_insert
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Count the rows again, on the parent
+  # A non-zero exit alone could be any failure; three rows still there says
+  # the row was never written.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_parent + [_ss_parent_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'SELECT count() FROM second_service_check.probe'] }}"
+    stdin: "{{ _ss_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_recount
+  until: _ss_recount.rc == 0
+  retries: 6
+  delay: 10
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: The second service refused the INSERT
+  ansible.builtin.assert:
+    that:
+      - _ss_insert.rc != 0
+      - (_ss_recount.stdout | trim) == '3'
+    fail_msg: >-
+      The INSERT on {{ _ss_child_pod }} exited {{ _ss_insert.rc }} and the parent now holds
+      {{ _ss_recount.stdout | trim }} row(s). The second service should refuse writes
+      (isReadonly: true); check the CR: kubectl get clickhousecluster {{ _ss_cr }}
+      -n {{ _ss.namespace }} -o jsonpath='{.spec.isReadonly}'
+    success_msg: >-
+      INSERT refused (exit {{ _ss_insert.rc }}): {{ (_ss_insert.stderr | trim | default('(no message)', true)).splitlines() | first | truncate(300) }}
+
+- name: Create a user on the parent
+  # sha256_hash, so the query carries a hash and not the password -- the
+  # same way langfuse_clickhouse creates its user. The password itself goes
+  # in on stdin at the sign-in below.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_parent + [_ss_parent_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _ss_pw }}\n"
+  vars:
+    _q: |
+      DROP USER IF EXISTS second_service_probe;
+      CREATE USER second_service_probe IDENTIFIED WITH sha256_hash BY '{{ _ss_probe_pw | hash('sha256') }}';
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_user
+  until: _ss_user.rc == 0
+  retries: 6
+  delay: 10
+  changed_when: true
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Sign in as that user on the second service
+  # Users created on the parent live in the shared Keeper, so the second
+  # service knows them without being told.
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_child + [_ss_child_pod, '--', 'sh', '-c', clickhouse_exec_sh, 'second_service_probe', 'SELECT currentUser(), hostName() FORMAT TSV'] }}"
+    stdin: "{{ _ss_probe_pw }}\n"
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_login
+  until: _ss_login.rc == 0 and _ss_login.stdout.startswith('second_service_probe\t')
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Clean up on the parent
+  ansible.builtin.command:
+    argv: "{{ _ss_exec_parent + [_ss_parent_pod, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
+    stdin: "{{ _ss_pw }}\n"
+  vars:
+    _q: |
+      DROP USER IF EXISTS second_service_probe;
+      DROP DATABASE IF EXISTS second_service_check SYNC;
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _ss_cleanup
+  until: _ss_cleanup.rc == 0
+  retries: 6
+  delay: 10
+  changed_when: true
+  check_mode: false
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "second service: {{ _ss_cr }} in {{ _ss.namespace }}, {{ _ss.replicas }} replica(s), child of {{ _ss_parent_cr }}"
+      - "wrote 3 rows on the parent ({{ _ss_parent_pod }}), read from the second service ({{ _ss_child_pod }}): count/max/host = {{ _ss_read.stdout | trim }}"
+      - "INSERT on the second service refused, exit {{ _ss_insert.rc }}: {{ (_ss_insert.stderr | trim | default('(no message)', true)).splitlines() | first | truncate(300) }}"
+      - "a user created on the parent signed in on the second service: user/host = {{ _ss_login.stdout | trim }}"
+      - "test database and user dropped"
+      - "connect from your laptop: scripts/ch-client.sh --second"
