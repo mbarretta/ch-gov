@@ -397,13 +397,13 @@ def ch_view():
                     fill='rgba(187, 51, 255, 0.03)', sub='ClickHouseCluster c-default-us-01 · Helm release default-us-01 (onprem-clickhouse-cluster 1.8.7)'))
     o.append(region(480, 655, 640, 125, 'namespace clickhouse-operator-system', color='#6df8e1', dash='6,3', rx=10,
                     fill='rgba(109, 248, 225, 0.03)'))
-    o.append(region(15, 820, 1105, 170, 'namespace langfuse  (optional · langfuse.enabled)', color='#00cbeb', dash='6,3', rx=10,
-                    fill='rgba(0, 203, 235, 0.03)'))
-    o.append(region(15, 1010, 1105, 170, 'namespace grafana  (optional · grafana.enabled)', color='#f46800', dash='6,3', rx=10,
-                    fill='rgba(244, 104, 0, 0.03)'))
+    o.append(region(480, 820, 640, 160, 'namespace ns-second-us-01  (optional · clickhouse.second_service.enabled)', color='#bb33ff',
+                    dash='6,3', rx=10, fill='rgba(187, 51, 255, 0.03)',
+                    sub='ClickHouseCluster c-second-us-01 · Helm release second-us-01 · parent c-default-us-01'))
 
     SX = [510, 715, 920]  # server/keeper columns
     SW = 175
+    DY = 190  # the Langfuse and Grafana bands sit below the second-service band
     # ---- arrows first
     # native / http clients -> NLB
     o.append(arrow([(230, 128), (260, 128), (260, 165), (288, 165)], 'fe'))
@@ -441,18 +441,15 @@ def ch_view():
     o.append(badge(1273, 282, 'temp creds', 'sec'))
     # keeper -> EBS
     o.append(arrow([(SX[2] + SW, 420), (1148, 420)], 'aws'))
-    # S3 -> KMS
-    # langfuse arrows
-    o.append(arrow([(330, 866), (330, 845), (462, 845), (462, 330), (442, 330)], 'fe', width=1.8))
-    o.append(f'<path d="M 557 866 L 557 845 L 462 845" fill="none" stroke="#00cbeb" stroke-width="1.8"/>')
-    o.append(badge(462, 800, 'HTTP :8123 runtime · native :9000 migrations', 'fe'))
-    o.append(arrow([(200, 908), (238, 908)], 'fe'))
-    o.append(f'<path d="M 330 950 L 330 972 L 1245 972" fill="none" stroke="#00cbeb" stroke-width="1.5"/>')
-    o.append(f'<path d="M 557 950 L 557 972" fill="none" stroke="#00cbeb" stroke-width="1.5"/>')
-    o.append(arrow([(765, 972), (765, 940)], 'fe'))
-    o.append(arrow([(940, 972), (940, 940)], 'fe'))
-    o.append(arrow([(1245, 972), (1245, 950)], 'fe'))
-    o.append(badge(1090, 972, 'web + worker → Postgres · Valkey · S3 (IRSA)', 'fe'))
+    # second service -> the parent's Keeper (it runs none of its own) and the parent's bucket + prefix
+    o.append(arrow([(830, 860), (830, 792), (490, 792), (490, 400), (508, 400)], 'bus', both=True))
+    o.append(badge(660, 792, 'Keeper client → parent quorum', 'bus'))
+    o.append(arrow([(870, 860), (870, 808), (1350, 808), (1350, 190), (1342, 190)], 'db', width=2))
+    o.append(badge(1235, 808, 'HTTPS · parent bucket + prefix', 'db'))
+    # langfuse <- Service (crosses into the shifted Langfuse band)
+    o.append(arrow([(330, 866 + DY), (330, 845 + DY), (462, 845 + DY), (462, 330), (442, 330)], 'fe', width=1.8))
+    o.append(f'<path d="M 557 {866 + DY} L 557 {845 + DY} L 462 {845 + DY}" fill="none" stroke="#00cbeb" stroke-width="1.8"/>')
+    o.append(badge(462, 800 + DY, 'HTTP :8123 runtime · native :9000 migrations', 'fe'))
 
     # ---- left: clients
     o.append(box(20, 100, 210, 56, 'fe', 'clickhouse-client · drivers', [
@@ -519,6 +516,33 @@ def ch_view():
         'HTTP     8123 → fips 8443', 'native   9000 → fips 9440', 'fips zeroes the plaintext', 'ports for every caller'],
         align='start', line_gap=12, tsize=10))
 
+    # ---- second service (child of default-us-01: shares its Keeper, bucket, prefix and users)
+    o.append(box(510, 862, 180, 70, 'sec', 'ServiceAccount', [
+        'ch-second-us-01-sa', 'second trusted subject on', '  ClickHouseS3Role (IRSA)'],
+        icon_name='key', align='start', dashed=True, line_gap=11))
+    o.append(box(715, 862, 175, 104, 'db', 'second-service servers', [
+        'c-second-us-01-server-<id>', 'replicas: 1 by default', 'node group second-server', 'keeper.replicaCount: 0',
+        ('inserts · mutations refused', {'color': '#9a9ea7'}), ('fips: own leaf, shared CA', {'color': '#ffc300'})],
+        logo_name='clickhouse', align='start', dashed=True, line_gap=12))
+    o.append(box(920, 862, 175, 104, 'gen', 'Shared with the parent', [
+        'Keeper quorum', 'S3 bucket and key prefix', 'users and grants', 'interserver seed',
+        ('parent restarts once', {'color': '#9a9ea7'}), ('  when the child attaches', {'color': '#9a9ea7'})],
+        align='start', dashed=True, line_gap=12))
+
+    # ---- langfuse and grafana bands, shifted down by DY
+    o.append(f'<g transform="translate(0, {DY})">')
+    o.append(region(15, 820, 1105, 170, 'namespace langfuse  (optional · langfuse.enabled)', color='#00cbeb', dash='6,3', rx=10,
+                    fill='rgba(0, 203, 235, 0.03)'))
+    o.append(region(15, 1010, 1105, 170, 'namespace grafana  (optional · grafana.enabled)', color='#f46800', dash='6,3', rx=10,
+                    fill='rgba(244, 104, 0, 0.03)'))
+    o.append(arrow([(200, 908), (238, 908)], 'fe'))
+    o.append(f'<path d="M 330 950 L 330 972 L 1245 972" fill="none" stroke="#00cbeb" stroke-width="1.5"/>')
+    o.append(f'<path d="M 557 950 L 557 972" fill="none" stroke="#00cbeb" stroke-width="1.5"/>')
+    o.append(arrow([(765, 972), (765, 940)], 'fe'))
+    o.append(arrow([(940, 972), (940, 940)], 'fe'))
+    o.append(arrow([(1245, 972), (1245, 950)], 'fe'))
+    o.append(badge(1090, 972, 'web + worker → Postgres · Valkey · S3 (IRSA)', 'fe'))
+
     # ---- langfuse
     o.append(box(30, 878, 170, 60, 'aws', 'Langfuse NLB', ['svc langfuse-lb · :80', 'TLS via ACM when enabled'],
                  logo_name='aws', align='start', dashed=True))
@@ -551,11 +575,12 @@ def ch_view():
                  's3:GetObject plugins/* only'], icon_name='key', align='start', dashed=True, tsize=9, lsize=7, line_gap=11))
     o.append(box(1150, 1068, 190, 70, 'aws', 'S3 · Grafana plugins', ['grafana-<acct>-us-east-1', 'IRSA-read, plugins/ prefix'],
                  logo_name='aws-s3', align='start', dashed=True))
+    o.append('</g>')
 
-    o.append(legend(20, 1200, [('db', 'ClickHouse server / keeper'), ('be', 'Operator / k8s object'), ('fe', 'Client / app'),
-                                ('aws', 'AWS service'), ('sec', 'Identity & secrets'), (('line', 'bus', True), 'Keeper / Raft'),
-                                (('line', 'sec', True), 'IRSA credential flow'), (('dashbox', 'fe'), 'Optional (Langfuse)'),
-                                (('dashbox', 'aws'), 'Optional (Grafana)')]))
+    o.append(legend(20, 1200 + DY, [('db', 'ClickHouse server / keeper'), ('be', 'Operator / k8s object'), ('fe', 'Client / app'),
+                                     ('aws', 'AWS service'), ('sec', 'Identity & secrets'), (('line', 'bus', True), 'Keeper / Raft'),
+                                     (('line', 'sec', True), 'IRSA credential flow'), (('dashbox', 'db'), 'Optional (second service)'),
+                                     (('dashbox', 'fe'), 'Optional (Langfuse)'), (('dashbox', 'aws'), 'Optional (Grafana)')]))
 
     cards = [
         ('violet', 'Data path', [
@@ -576,10 +601,16 @@ def ch_view():
             'The in-pod S3 client uses the <code>s3-fips</code> endpoint and the bucket uses a KMS CMK',
             'Verification is CA-chain only, not mutual TLS',
         ], ['8443', '9440', 'RSA 3072']),
+        ('violet', 'Second service (optional)', [
+            'A child cluster <code>c-second-us-01</code> in its own namespace, on its own node group, with its own compute',
+            'It runs no Keeper: it uses the parent\'s quorum and reads the parent\'s bucket and key prefix, so it sees the same tables',
+            'Inserts and mutations are refused there; DDL and user changes are not blocked',
+            'The operator\'s private-Hydra feature flag makes the parent track the child; the parent restarts once when the child attaches',
+        ], ['compute-compute separation', '1 replica']),
     ]
     page('clickhouse-components.html', 'ClickHouse Components',
-         'How the ClickHouse Private parts connect: clients, servers, Keeper, S3, the operator, and the optional Langfuse/Grafana tenants',
-         1360, 1240, '\n'.join(o), cards, FOOTER)
+         'How the ClickHouse Private parts connect: clients, servers, Keeper, S3, the operator, the optional second service, and the optional Langfuse/Grafana tenants',
+         1360, 1240 + DY, '\n'.join(o), cards, FOOTER)
 
 
 # =====================================================================================
