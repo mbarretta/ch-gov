@@ -1,0 +1,41 @@
+---
+# The cluster this run of the role puts a load balancer in front of. Every
+# input defaults to the cluster named by clickhouse.cluster_name, so a plain
+# `- role: clickhouse_loadbalancer` serves it. The second service runs the
+# role again and passes its own values (clickhouse.second_service), which
+# gives it its own Service, <name>-lb, in its own namespace.
+#
+# These are role defaults, never set_fact: a fact would outrank the values a
+# second run of the role passes in, and that run would act on the first
+# cluster again.
+
+# The cluster's name. The Service is <name>-lb; its selector is copied from
+# the operator's c-<name>-server-any Service; the probe expects the
+# hostName() of a c-<name>-server pod.
+clickhouse_lb_cluster_name: "{{ clickhouse.cluster_name }}"
+clickhouse_lb_namespace: "{{ clickhouse.namespace }}"
+
+# Server replicas: the number of healthy targets to wait for, per port.
+clickhouse_lb_replicas: "{{ clickhouse.server.replicas }}"
+
+# The load balancer settings ({type, allowed_cidrs, ports, cross_zone}) and
+# where they live in group_vars, for error messages.
+clickhouse_lb_config: "{{ clickhouse.load_balancer }}"
+clickhouse_lb_config_name: "clickhouse.load_balancer"
+
+# The cluster's TLS Secret (fips: true), whose ca.crt the probe trusts. The
+# names follow clickhouse_cluster's release.yml: the main cluster keeps the
+# group_vars name, any other cluster gets the chart's default,
+# <name>-server-cert-secret.
+clickhouse_lb_tls_secret_name: >-
+  {{ clickhouse_tls_secret_name
+     if clickhouse_lb_cluster_name == clickhouse.cluster_name
+     else clickhouse_lb_cluster_name ~ '-server-cert-secret' }}
+
+# The variable that says present or absent for this run (absent removes the
+# Service and ends the play), the deploy.yml tag that runs it, and the
+# scripts/ch-client.sh arguments that connect through it. The last two are
+# only used in the report.
+clickhouse_lb_state_var: "lb_state"
+clickhouse_lb_tag: "lb"
+clickhouse_lb_client_args: "--lb"
