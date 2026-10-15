@@ -1,0 +1,189 @@
+---
+# Native TLS for one release (fips: true only): a self-signed CA and a leaf
+# server certificate it signs, written into the Secret the chart's openSSL
+# blocks reference. Imported by release.yml, so it is keyed on the same _rel
+# dict and the _rel_tls names release.yml derives.
+#
+# The chart's TLS surface is CA-chain verification only (confirmed against its
+# rendered templates) -- no SNI/hostname/SAN field exists anywhere in
+# server.openSSL/keeper.openSSL's schema -- so one long-lived leaf naming the
+# stable in-cluster service hostnames is sufficient; no LB-hostname-keyed
+# reissue workflow is needed. The SAN list below covers both hostname forms
+# its two callers use (langfuse_clickhouse's bare .svc form, langfuse's
+# migration block's .svc.cluster.local form) plus Keeper's own service when the
+# release runs one, so those roles do not need to reissue this cert.
+#
+# One CA, a leaf per release. The CA is generated once and every release's leaf
+# is signed by it, so a client that trusts clickhouse_tls_ca_cert_file reaches
+# any of them. Each release keeps its own leaf files under state/ and its own
+# Secret in its own namespace: the cluster named by clickhouse.cluster_name
+# keeps clickhouse_tls_cert_file and clickhouse_tls_secret_name, and any other
+# cluster gets clickhouse-tls-<name>-cert.pem and <name>-server-cert-secret.
+# The regeneration check reads the release's own leaf and looks for the
+# release's own host, so installing a second cluster never reissues the
+# first one's certificate.
+
+- name: Read the openssl version
+  ansible.builtin.command:
+    argv: [openssl, version]
+  register: _ch_openssl
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail clearly if it is not OpenSSL 3+
+  # Same reasoning as langfuse's identical guard: the SAN check below
+  # needs `x509 -ext`, and cert generation needs `-noenc` -- both
+  # missing from the LibreSSL that ships as /usr/bin/openssl on macOS.
+  ansible.builtin.assert:
+    that: _ch_openssl.rc == 0 and _ch_openssl.stdout is match('OpenSSL [3-9]')
+    fail_msg: "openssl on PATH is '{{ _ch_openssl.stdout | default('') | trim }}' (rc {{ _ch_openssl.rc }}); fips: true needs OpenSSL 3 -- brew install openssl@3 and put /opt/homebrew/bin first on PATH"
+
+- name: Decide the SANs the ClickHouse TLS leaf certificate must cover
+  ansible.builtin.set_fact:
+    _ch_tls_host: "c-{{ _rel.name }}-server-any.{{ _rel.namespace }}.svc"
+    _ch_tls_sans: >-
+      DNS:c-{{ _rel.name }}-server-any.{{ _rel.namespace }}.svc,
+      DNS:c-{{ _rel.name }}-server-any.{{ _rel.namespace }}.svc.cluster.local{% if (_rel.keeper_replicas | int) > 0 %},
+      DNS:c-{{ _rel.name }}-keeper.{{ _rel.namespace }}.svc,
+      DNS:c-{{ _rel.name }}-keeper.{{ _rel.namespace }}.svc.cluster.local{% endif %}
+
+- name: Look for the CA private key
+  ansible.builtin.stat:
+    path: "{{ clickhouse_tls_ca_key_file }}"
+  register: _ch_tls_ca_key
+  check_mode: false
+
+- name: Generate the self-signed CA (missing only -- a CA has no per-host SAN to go stale)
+  # Its subject names the clickhouse.cluster_name cluster whichever release
+  # creates it, because every release shares this one CA.
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - "rsa:{{ tls_rsa_bits }}"
+      - -noenc
+      - -keyout
+      - "{{ clickhouse_tls_ca_key_file }}"
+      - -out
+      - "{{ clickhouse_tls_ca_cert_file }}"
+      - -days
+      - "3650"
+      - -subj
+      - "/CN=clickhouse-private-{{ clickhouse.cluster_name }}-ca"
+      - -addext
+      - "basicConstraints=critical,CA:true"
+  when: not _ch_tls_ca_key.stat.exists
+  register: _ch_tls_ca_gen
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Keep the CA key owner-readable only
+  ansible.builtin.file:
+    path: "{{ clickhouse_tls_ca_key_file }}"
+    mode: "0600"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Read the SAN of the leaf certificate already there, if any
+  # Same idempotency approach as ansible/roles/langfuse/tasks/main.yml's
+  # cert-generation block: SAN check with failed_when: false (no file,
+  # or not a certificate, both just mean "regenerate").
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ _rel_tls.cert_file }}", -noout, -ext, subjectAltName]
+  register: _ch_tls_leaf_san
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Look for the leaf private key
+  ansible.builtin.stat:
+    path: "{{ _rel_tls.key_file }}"
+  register: _ch_tls_leaf_key
+  check_mode: false
+
+- name: Generate a CSR for the leaf certificate (missing, stale SAN, or a fresh CA)
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -newkey
+      - "rsa:{{ tls_rsa_bits }}"
+      - -noenc
+      - -keyout
+      - "{{ _rel_tls.key_file }}"
+      - -out
+      - "{{ _rel_tls.csr_file }}"
+      - -subj
+      - "/CN={{ _ch_tls_host }}"
+      - -addext
+      - "subjectAltName={{ _ch_tls_sans }}"
+  when: >-
+    not _ch_tls_leaf_key.stat.exists
+    or _ch_tls_leaf_san.rc != 0
+    or ('DNS:' ~ _ch_tls_host) not in _ch_tls_leaf_san.stdout
+    or (_ch_tls_ca_gen.changed | default(false))
+  register: _ch_tls_leaf_csr
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Sign the leaf certificate with the CA
+  # -copy_extensions carries the CSR's subjectAltName through --
+  # `openssl x509 -req` drops extensions by default.
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -req
+      - -in
+      - "{{ _rel_tls.csr_file }}"
+      - -CA
+      - "{{ clickhouse_tls_ca_cert_file }}"
+      - -CAkey
+      - "{{ clickhouse_tls_ca_key_file }}"
+      - -CAcreateserial
+      - -CAserial
+      - "{{ state_dir }}/clickhouse-tls-ca.srl"
+      - -out
+      - "{{ _rel_tls.cert_file }}"
+      - -days
+      - "825"
+      - -copy_extensions
+      - copy
+  when: _ch_tls_leaf_csr is defined and _ch_tls_leaf_csr is changed
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Keep the leaf key owner-readable only
+  ansible.builtin.file:
+    path: "{{ _rel_tls.key_file }}"
+    mode: "0600"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
+
+- name: Ensure the ClickHouse namespace exists
+  # The Secret below must land before the operator builds pods;
+  # helm's own create_namespace (in release.yml's install task, after this)
+  # would otherwise be the first thing to create it, too late for
+  # this. Plain `present` -- idempotent alongside helm's
+  # create_namespace either way.
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Namespace
+    name: "{{ _rel.namespace }}"
+    state: present
+
+- name: Write the CA and leaf cert/key into the Secret the chart's openSSL blocks reference
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ _rel_tls.secret_name }}"
+        namespace: "{{ _rel.namespace }}"
+      type: Opaque
+      stringData:
+        server.crt: "{{ lookup('ansible.builtin.file', _rel_tls.cert_file) }}"
+        server.key: "{{ lookup('ansible.builtin.file', _rel_tls.key_file) }}"
+        ca.crt: "{{ lookup('ansible.builtin.file', clickhouse_tls_ca_cert_file) }}"
+  no_log: "{{ not (show_secrets | default(false) | bool) }}"
