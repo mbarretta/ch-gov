@@ -8,7 +8,7 @@
 >
 > **Run it:** `scripts/up.sh` runs every step in order and asks before it starts. This Part covers the storage, prerequisites and operator steps, which use the tags `storage`, `prereqs` and `operator`. These steps are cheap: an empty bucket, two IAM roles, a CSI driver and one small operator Deployment (one pod with two containers). The nodes from Step 5 are already running, so your hourly rate does not change.
 
-By the end of Part 2 you have a Kubernetes cluster with eight nodes and nothing running on it. These three steps give it somewhere to put data and something to manage ClickHouse for it.
+By the end of Part 2 you have a Kubernetes cluster with eight nodes (nine with the optional second service) and nothing running on it. These three steps give it somewhere to put data and something to manage ClickHouse for it.
 
 > **Advanced: run individual steps.** To run one step at a time, pass its tag to `scripts/play.sh`:
 >
@@ -75,6 +75,17 @@ Everything above depends on the role's trust policy. Read it as three separate c
 
 Because the namespace is part of the `:sub` string, the namespace is not a free choice you make later at `helm install` time. It is fixed here, in IAM. The kit keeps it in one variable, `clickhouse.namespace`, whose default is `ns-default-us-01`. If you change it, run Step 6 again (`scripts/play.sh --tags storage`) so the trust policy names the new namespace.
 
+**With the optional second service, the `:sub` key names two subjects.** The second service ([Part 4, Step 11c](part-4-cluster-preflight-verify.md#step-11c--a-second-service-on-the-same-keeper-and-data-optional)) reads the same data in the same bucket, so it shares this role rather than getting one of its own. While `clickhouse.second_service.enabled` is `true`, the kit renders the value as a list:
+
+```json
+"oidc.eks.us-east-1.amazonaws.com/id/<OIDC_ID>:sub": [
+  "system:serviceaccount:ns-default-us-01:ch-default-us-01-sa",
+  "system:serviceaccount:ns-second-us-01:ch-second-us-01-sa"
+]
+```
+
+`StringEquals` against a list matches any one of its values and nothing else, so the policy still names each service account exactly. The role, its KMS grant under `fips: true` and the `ClickHouseS3RoleArn` output are the same ones the main cluster uses. With the switch off, the template renders the single value shown earlier.
+
 Notice the shape of the condition keys: the issuer URL is part of the key *name*, not the value. That detail matters in the next section.
 
 ### The one place CloudFormation cannot do the job
@@ -133,6 +144,8 @@ server.storage.s3.keyPrefix: ch-s3-4f6a1d2e-8b3c-4a5d-9e7f-1c2b3a4d5e6f
 ```
 
 That is how several ClickHouse clusters share one bucket without colliding. The uuid must be unique per cluster, and the chart's schema rejects anything that does not match the pattern. The kit reads it from `clickhouse.s3_key_prefix`.
+
+The optional second service is the deliberate exception. It is set up with the **same** key prefix as the main cluster, because it is not an independent cluster: it reads the main cluster's tables, and the prefix is where those tables live. A second cluster that should keep its own data needs a uuid of its own.
 
 ### On the role naming convention
 
@@ -300,6 +313,20 @@ that: _op_images.stdout_lines | reject('search', '^' ~ target_registry) | list |
 
 If any container in the operator namespace pulls from anywhere but your registry, the run fails and names the offender, so you do not discover it later as a stuck pod.
 
+### A feature flag for the second service
+
+The optional second service ([Part 4, Step 11c](part-4-cluster-preflight-verify.md#step-11c--a-second-service-on-the-same-keeper-and-data-optional)) needs one more operator setting, and the role adds it only while `clickhouse.second_service.enabled` is `true`:
+
+```yaml
+operator:
+  featureFlags:
+    privateComputeSeparationEnabled: true
+```
+
+The flag lets a child cluster register with its parent. The parent's ClickHouseCluster then lists the child under `spec.hydraChildrenInstances`, and the parent treats the child's replicas in the shared Keeper as its own family's. Without the flag that list stays empty, and the parent's cleanup of stale replicas can remove a restarting child's replicas from Keeper. The pinned operator chart also accepts the older name `privateHydraEnabled` as a deprecated alias. Both set the same environment variable on the operator, `FEATURE_FLAG_PRIVATE_HYDRA_ENABLED`, and the kit uses the current name.
+
+The flag has to outlive the child. Remove the second service first and only then switch it off, which turns the flag off with the next run of this step. `scripts/down.sh` keeps that order, and a run with the switch off stops before it changes anything while the second service is still deployed. With the switch off, the operator's values are exactly the ones shown earlier.
+
 ---
 
 ## Troubleshooting
@@ -362,7 +389,7 @@ Run these in order. Each gives a command and what you should see, and they doubl
 
    The first command prints nothing, because versioning was never enabled. It must never print `Enabled`. The second fails with `NoSuchLifecycleConfiguration`, which is the answer you want.
 
-4. **The ClickHouse role trusts exactly one service account.**
+4. **The ClickHouse role trusts exactly the service accounts you expect.**
 
    ```bash
    ROLE=$(aws cloudformation describe-stacks --stack-name clickhouse-private-irsa --profile "$AWS_PROFILE" \
@@ -371,7 +398,7 @@ Run these in order. Each gives a command and what you should see, and they doubl
      --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition'
    ```
 
-   You should see the `:aud` and `:sub` keys. With default settings the `:sub` value is `system:serviceaccount:ns-default-us-01:ch-default-us-01-sa`.
+   You should see the `:aud` and `:sub` keys. With default settings the `:sub` value is `system:serviceaccount:ns-default-us-01:ch-default-us-01-sa`. With the second service on, `:sub` is a list that adds `system:serviceaccount:ns-second-us-01:ch-second-us-01-sa`.
 
    **Exercise:** which of these two keys stops a different pod in the same cluster from assuming the role?
 

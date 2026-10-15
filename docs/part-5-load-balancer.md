@@ -133,15 +133,21 @@ An internal NLB has a private address. If you resolve it from outside the VPC, y
 
 An NLB is billed hourly (about $0.0225/hr, or $17 a month) plus a small per-LCU charge that a lab will not notice. Cross-zone load balancing adds inter-AZ transfer at $0.01/GB. Setting `type: none` and re-running the step removes the load balancer.
 
+With the optional second service on, its own load balancer is a second NLB at the same $0.0225/hr. `scripts/up.sh` and `scripts/go.sh` count it in the hourly figure they print, unless you set its type to `none`.
+
 ## Teardown order
 
 Deleting the Service is what deletes the NLB, its target groups and the security-group rules, because the controller acts on the delete event. So remove the load balancer **before** the cluster, the node groups or the control plane. If you delete the EKS cluster with the Service still in it, the NLB is orphaned: still billing, still holding an ENI in each private subnet, and blocking the VPC stack's deletion.
 
 You should not have to remember that. `scripts/down.sh` removes the load balancer first, then the cluster (while the nodes are still up, so the operator and the CSI driver can clean up after it), then the node groups. `--all` goes on through the operator, prerequisites, storage, EKS and the VPC. [Part 1, The two scripts you will actually use](part-1-prerequisites.md#the-two-scripts-you-will-actually-use-upsh-and-downsh) has the full reasoning.
 
+With the optional second service, two steps come before all of that: its load balancer goes first, then the second service itself, and only then the main load balancer and the cluster. The order is `second-lb`, `second-service`, `lb`, `cluster`, then the node groups. `scripts/down.sh` includes the first two only when they exist.
+
 > **Advanced: run individual steps.** If you tear down by hand, keep the same order:
 >
 > ```bash
+> scripts/play.sh --tags second-lb -e second_lb_state=absent             # only with the second service
+> scripts/play.sh --tags second-service -e second_service_state=absent   # only with the second service
 > scripts/play.sh --tags lb -e lb_state=absent     # or set type: none and re-run
 > scripts/play.sh --tags cluster -e cluster_state=absent
 > scripts/play.sh --tags nodes -e nodegroups_state=absent
@@ -161,6 +167,35 @@ healthy:   3/3 targets per port (one per server node; other nodes fail the healt
 native 9000:       <count> c-default-us-01-server-<suffix>-0
 http 8123:   Ok.
 ```
+
+## A load balancer for the second service
+
+The optional second service from [Part 4, Step 11c](part-4-cluster-preflight-verify.md#step-11c--a-second-service-on-the-same-keeper-and-data-optional) gets an address of its own in Step 12b. The kit runs this step's role a second time, given the second service's cluster, namespace and replica count, and it builds a second Service with the same design: a legacy NLB, `externalTrafficPolicy: Local`, source ranges that are never empty, and a probe from the operator nodes.
+
+| | Main cluster (Step 12) | Second service (Step 12b) |
+|---|---|---|
+| Service | `default-us-01-lb` in `ns-default-us-01` | `second-us-01-lb` in `ns-second-us-01` |
+| Selector read from | `c-default-us-01-server-any` | `c-second-us-01-server-any` |
+| Settings | `clickhouse.load_balancer` | `clickhouse.second_service.load_balancer` |
+| Healthy targets | 3, one per server | 1 by default, one per second-service replica |
+| Tag and teardown | `lb`, `-e lb_state=absent` | `second-lb`, `-e second_lb_state=absent` |
+| Connect | `scripts/ch-client.sh --lb` | `scripts/ch-client.sh --second --lb` |
+
+Its settings take the same choices as the main block and default to `internal`:
+
+```yaml
+clickhouse:
+  second_service:
+    load_balancer:
+      type: "internal"     # none | internal | public
+      allowed_cidrs: []
+```
+
+Two load balancers mean two separate addresses on purpose. An application that only reads can point at the second service and never touch the compute that takes writes. An application that writes keeps the main address, because the second service refuses inserts and mutations.
+
+With the second service on there is one more node, so each target group registers nine nodes instead of eight. The main load balancer reports 3 healthy of 9, and the second service's reports 1 healthy of 9 with the default single replica. Both are the correct steady state, for the same `externalTrafficPolicy: Local` reason as before.
+
+Setting its `type` to `none` and running `scripts/play.sh --tags second-lb` removes only this load balancer. The main one is not affected, and the reverse is also true. With the switch on, `scripts/up.sh` runs `second-lb` right after `lb`.
 
 ---
 
@@ -229,7 +264,7 @@ NS=ns-default-us-01
    done
    ```
 
-   You should see `3` once per port, which matches `server.replicas`, even though eight nodes are registered. The other five fail the health check by design.
+   You should see `3` once per port, which matches `server.replicas`, even though eight nodes are registered (nine with the second service). The others fail the health check by design.
 
    **Exercise:** why is 3 healthy out of 8 registered the correct steady state?
 
@@ -261,5 +296,16 @@ NS=ns-default-us-01
    After the first command the `-lb` Service is gone, and the NLB disappears from AWS within a minute or so. After the last command it is back.
 
    **Exercise:** why must the load balancer go before the EKS cluster in a teardown?
+
+7. **Optional: the second service has its own load balancer.** Skip this if the second service is off.
+
+   ```bash
+   kubectl get service second-us-01-lb -n ns-second-us-01
+   scripts/ch-client.sh --second --lb -q "SELECT hostName()"   # only works from the VPC, a VPN or peering
+   ```
+
+   You should see a Service of type `LoadBalancer` with an `elb` hostname of its own, different from `default-us-01-lb`'s. Where the address is routable, the query prints a `c-second-us-01-server` pod name.
+
+   **Exercise:** why does `scripts/down.sh` remove this load balancer and the second service before the main load balancer and the cluster?
 
 **Not covered here:** TLS on ports 9440 and 8443 outside `fips: true`. Add it before any real public exposure.

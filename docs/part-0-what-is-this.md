@@ -133,7 +133,7 @@ Nothing here is exotic. It is a normal EKS build with two deliberate oddities: t
 
 ## How a deployment goes, in general
 
-ClickHouse publishes a tutorial for this deployment, and this project follows its steps in order. The kit numbers them 1 to 12 and adds optional Steps 13 to 18 for Langfuse and Grafana, and optional Steps 6b and 11b for single sign-on. In plain terms:
+ClickHouse publishes a tutorial for this deployment, and this project follows its steps in order. The kit numbers them 1 to 12 and adds optional Steps 13 to 18 for Langfuse and Grafana, optional Steps 6b and 11b for single sign-on, and optional Steps 11c and 12b for a second service. In plain terms:
 
 | Step | What happens | What it gives you |
 |---|---|---|
@@ -150,7 +150,9 @@ ClickHouse publishes a tutorial for this deployment, and this project follows it
 | 10 | Preflight checks | ClickHouse's own inspection of the live cluster |
 | 11 | Verify | Proof that a table written on one server is readable from another |
 | 11b (optional) | ClickHouse roles that Cognito group names map to | People log in to ClickHouse with a Cognito token and get only the rights their group grants |
+| 11c (optional) | A second service: more servers on the same Keeper and data, refusing inserts and mutations | Queries on compute of their own, without competing with the service that takes writes |
 | 12 | Load balancer | One stable address for clients |
+| 12b (optional) | A load balancer for the second service | A separate address for clients that only read |
 | 13 (optional) | S3 bucket and IAM role for Langfuse | Storage for Langfuse's raw events, with its own permission |
 | 14 (optional) | A database and user for Langfuse inside ClickHouse | Access to one database, not the whole cluster |
 | 15 (optional) | Install Langfuse | Langfuse running next to ClickHouse and storing its traces there |
@@ -171,6 +173,10 @@ Steps 16–18 are also off by default, and independent of Langfuse. Switched on 
 ### Optional: single sign-on
 
 Steps 6b and 11b are also off by default, and independent of Langfuse and Grafana. Switched on (`sso.enabled: true`), Step 6b builds an Amazon Cognito user pool, which can also federate to an external SAML identity provider. Langfuse can then offer Cognito sign-in (`sso.langfuse.enabled`), and ClickHouse can accept a Cognito token as a login (`sso.clickhouse_jwt.enabled`), with Step 11b creating the roles that Cognito group names map to. `scripts/ch-client.sh --sso` logs you in to ClickHouse as yourself, and `scripts/sso-smoke.sh` checks the setup. The architecture, the variables, the server's JWT caveats, the reason service users keep their passwords and the GovCloud notes are in **Part 9**.
+
+### Optional: a second service
+
+Steps 11c and 12b are also off by default. Switched on (`clickhouse.second_service.enabled: true`, or `scripts/go.sh --second-service`), they add a second ClickHouse service, `second-us-01`, that shares the first cluster's Keeper and S3 data but runs on servers and nodes of its own. ClickHouse calls this compute-compute separation: queries on the second service never take CPU or cache from the service taking writes. The first cluster stays the one read-write service, and the second service refuses inserts and mutations, though not schema changes. It runs one replica by default in its own namespace, `ns-second-us-01`, on a fourth node group, and Step 12b gives it a load balancer of its own. `scripts/ch-client.sh --second` connects to it. Langfuse, Grafana and single sign-on keep using the first cluster. The parent and child model, the operator flag it needs, the round trip that checks it and the teardown order are in **Part 4**, and its load balancer is in **Part 5**.
 
 ## How to deploy it with this project
 
@@ -245,6 +251,7 @@ scripts/up.sh --yes            # no prompt
 > scripts/play.sh --tags cluster       # any of: images vpc eks nodes storage
 >                                      #   prereqs operator cluster preflight verify lb
 >                                      #   (+ lf-storage lf-db lf-app when Langfuse is on, see Part 6)
+>                                      #   (+ second-service second-lb when the second service is on, see Parts 4 and 5)
 > ```
 
 ## What exists once it is up
@@ -256,7 +263,7 @@ scripts/up.sh --yes            # no prompt
 | CloudFormation stacks | `clickhouse-private-vpc`, `-eks`, `-nodegroups`, `-irsa`, `-ebs-csi` | Steps 3, 4, 5, 6, 7 |
 | VPC | `10.20.0.0/16`, 3 private + 3 public subnets, 1 NAT, S3 endpoint | Step 3 |
 | EKS cluster | `clickhouse-private-eks` | Step 4 |
-| EC2 instances | 3 keeper, 3 server, 2 operator nodes (8 total) | Step 5 |
+| EC2 instances | 3 keeper, 3 server, 2 operator nodes (8 total; 9 with the second service's node) | Step 5 |
 | S3 bucket | `clickhouse-private-<account>-<region>` | Step 6 |
 | IAM roles | `clickhouse-private-irsa-ClickHouseS3Role-…` (server pods to S3) and `…-EbsCsiDriverRole-…` (Keeper volumes) | Step 6 |
 | ECR repositories | `clickhouse-server`, `clickhouse-keeper`, `clickhouse-operator`, `kubebuilder/kube-rbac-proxy`, and the three charts under `helm/` | Step 2 |
@@ -329,8 +336,8 @@ scripts/down.sh --all          # everything except the S3 bucket and ECR
 ```
 
 Use the script, not the console, because teardown is **not** the reverse of
-bring-up. Three things point the wrong way (four with Langfuse, five with
-Grafana too), and the script handles them:
+bring-up. Three things point the wrong way, plus one for each optional
+layer you switch on, and the script handles them:
 
 - The load balancer must go before the cluster or EKS, or the NLB is
   orphaned, keeps billing, and blocks deleting the VPC.
@@ -353,6 +360,7 @@ Grafana too), and the script handles them:
   `true`. [Part 8, Operate it: tear it down](part-8-grafana.md#operate-it-tear-it-down) has the details, including the one bucket this project
   actually deletes on teardown rather than keeping.
 - The Cognito stack (optional Step 6b) is removed by `down.sh` after Langfuse, when one exists. The pool and its users go with it. [Part 9, Tear it down](part-9-sso.md#tear-it-down) has the details.
+- The second service (optional Steps 11c and 12b) goes **before the main load balancer and cluster**, its own load balancer first. It runs on the main cluster's Keeper, and removing it needs the operator still running with the feature flag it depends on. `down.sh` removes it only when it exists, even if you have already switched it off. [Part 4, Teardown order](part-4-cluster-preflight-verify.md#teardown-order) has the details.
 
 ### Up again
 
@@ -477,6 +485,8 @@ GRANT SELECT, INSERT ON app.* TO app;
 
 Users and grants are cluster metadata, kept in Keeper and shared by all three
 servers. Create them once, from any replica.
+
+With the optional second service on, they are shared with its servers too, because it uses the same Keeper. A user created on the main cluster signs in on the second service with the same password and grants, and `scripts/ch-client.sh --second` uses the same admin login. The second service still refuses that user's inserts and mutations, whatever the grants say.
 
 ### Where a table actually goes
 

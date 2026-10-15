@@ -123,6 +123,7 @@ These defaults are convenient for learning and worth changing for production.
 - **Generated passwords in `state/`.** The admin passwords are files on the machine that ran the kit. Anyone with the files has the credentials, so protect and back up `state/` as you would any secret store.
 - **Broad Grafana read access.** Grafana's ClickHouse user can read almost everything, including system tables and Langfuse's data. This is a deliberate convenience for exploring, not least privilege.
 - **A seeded organization in Langfuse.** Langfuse starts with a seeded organization, project, and admin login, with sign-up disabled.
+- **A second service that refuses only some writes.** The optional second service refuses inserts and mutations, but not DDL or user changes: a `CREATE TABLE`, `DROP TABLE`, `CREATE USER` or `GRANT` run on it reaches the shared metadata, and the main cluster sees the change. Control who can change what with users and grants, as on the main cluster. It also runs 1 replica by default, so it has no redundancy: while its one pod restarts, the second service does not answer, although the main cluster and the data are unaffected. For more, raise `clickhouse.second_service.replicas` and the size of its node group, `infrastructure.second_server.min_nodes`, together.
 
 ## GovCloud is out of scope
 
