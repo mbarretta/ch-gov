@@ -34,6 +34,8 @@ Resources:
   #        audience cannot be replayed against STS here.
   #   :sub pins the exact system:serviceaccount:<ns>:<name>. Omit it and any
   #        pod in the cluster could assume this role and read the bucket.
+{# With clickhouse.second_service.enabled, :sub below lists a second service
+   account as well; the rendered template explains that at the condition. #}
   ClickHouseS3Role:
     Type: AWS::IAM::Role
     Properties:
@@ -52,7 +54,19 @@ Resources:
             Condition:
               StringEquals:
                 "{{ _oidc_issuer_host }}:aud": "sts.amazonaws.com"
+{% if clickhouse.second_service.enabled %}
+                # With the second service on, :sub names two service accounts:
+                # this cluster's and the second service's. StringEquals against
+                # a list matches either one, and nothing else. The second
+                # service reads this cluster's data in the same bucket, so it
+                # shares this role, its KMS grant and the ClickHouseS3RoleArn
+                # output instead of getting a role of its own.
+                "{{ _oidc_issuer_host }}:sub":
+                  - "system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
+                  - "system:serviceaccount:{{ clickhouse.second_service.namespace }}:{{ clickhouse.second_service.service_account }}"
+{% else %}
                 "{{ _oidc_issuer_host }}:sub": "system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
+{% endif %}
       Policies:
         - PolicyName: clickhouse-s3-access
           PolicyDocument:

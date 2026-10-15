@@ -162,10 +162,18 @@
   when: clickhouse_s3_role_arn is defined
 
 - name: Report the IRSA wiring
+  vars:
+    # The subjects the template's ClickHouseS3Role trusts: the second service's
+    # account joins this cluster's when clickhouse.second_service is enabled.
+    _ch_s3_subjects: >-
+      {{ ['system:serviceaccount:' ~ clickhouse.namespace ~ ':' ~ clickhouse.service_account]
+         + (['system:serviceaccount:' ~ clickhouse.second_service.namespace ~ ':'
+             ~ clickhouse.second_service.service_account]
+            if clickhouse.second_service.enabled else []) }}
   ansible.builtin.debug:
     msg:
       - "clickhouse role: {{ clickhouse_s3_role_arn }}"
-      - "  assumable only by system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
+      - "  assumable only by {{ _ch_s3_subjects | join(' and ') }}"
       - "ebs csi role:    {{ ebs_csi_role_arn }}"
       - "  assumable only by system:serviceaccount:kube-system:ebs-csi-controller-sa"
       - "note: the bucket is never deleted by teardown -- it holds data."
