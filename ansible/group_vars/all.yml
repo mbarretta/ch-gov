@@ -402,6 +402,57 @@ clickhouse:
   # guidance calls this out explicitly.
   bucket_name: "clickhouse-private-{{ aws.target_account_id }}-{{ aws.target_region }}"
 
+# --- running SQL inside a server pod ------------------------------------------
+# How Step 11 (clickhouse_verify) and the second service's checks
+# (clickhouse_second_service) run clickhouse-client as the admin user. A task
+# runs
+#   argv:  "{{ clickhouse_exec_argv + [<pod>, '--', 'sh', '-c', clickhouse_exec_sh, <user>, <query>] }}"
+#   stdin: "{{ <password> }}\n"
+# and sets no_log, because stdin carries the password.
+#
+# `kubectl exec -i`: the password travels on stdin, which kubectl forwards
+# into the container. NOT via `environment:` -- that sets the environment of
+# the local kubectl process, and kubectl exec does not carry it across (the
+# password would arrive empty and the login would fail). And not on argv,
+# where `ps` on the node would show it. The container is named
+# c-<cluster>-server; the pod label says clickhouse-server, the container
+# does not. The argv targets the cluster above; a task that execs into
+# another cluster sets clickhouse_exec_target to a dict holding that
+# cluster's namespace and cluster_name (clickhouse.second_service has both).
+clickhouse_exec_argv:
+  - kubectl
+  - exec
+  - -i
+  - "--namespace={{ (clickhouse_exec_target | default(clickhouse)).namespace }}"
+  - -c
+  - "c-{{ (clickhouse_exec_target | default(clickhouse)).cluster_name }}-server"
+# fips: true adds --secure --port 9440: the exec runs inside the server pod
+# itself (no --host, implicit localhost), and server.openSSL.required zeroes
+# localhost's own plaintext 9000 the same as everyone else's (confirmed by
+# rendering the chart). No --config-file/CA argument -- this is an
+# in-cluster loopback admin check that had no certificate verification at
+# all on the removed plaintext port either, so accepting whatever cert the
+# server presents is not a downgrade from before.
+clickhouse_client_tls_args: "{{ '--secure --port 9440' if fips else '' }}"
+# $0 = user, $1 = query; the password is the first line of stdin, which the
+# shell exports as CLICKHOUSE_PASSWORD for clickhouse-client to pick up. It
+# never becomes a client argument, so it is not in the in-pod process list
+# either (a process environment is readable only by the same user and root,
+# unlike argv). The client then gets /dev/null as stdin: `kubectl exec -i`
+# leaves the stream attached after the read, and clickhouse-client treats an
+# open stdin on an INSERT as external data -- which async inserts refuse:
+#   Code: 48. Processing async inserts with both inlined and external data
+#   (from stdin or infile) is not supported. (NOT_IMPLEMENTED)
+#
+# Remaining copies of the same preamble, each shaped to its own role, are in
+# roles/clickhouse_jwt, roles/langfuse, roles/langfuse_clickhouse and
+# roles/grafana_clickhouse.
+clickhouse_exec_sh: >-
+  IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
+  exec clickhouse-client --user "$0"
+  {{ clickhouse_client_tls_args }}
+  --multiquery --query "$1" </dev/null
+
 versions:
   server: "26.2.1.525"
   keeper: "26.2.1.258"

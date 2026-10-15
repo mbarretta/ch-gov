@@ -40,44 +40,16 @@
     fail_msg: "only {{ _vf_pods.stdout_lines | length }} server pod(s) Running -- run --tags cluster first"
 
 - name: Pick two replicas
+  # Every command below runs clickhouse-client inside one of them through
+  # clickhouse_exec_argv and clickhouse_exec_sh (group_vars/all.yml), which
+  # say why the password goes on stdin.
   ansible.builtin.set_fact:
     _vf_a: "{{ _vf_pods.stdout_lines[0] }}"
     _vf_b: "{{ _vf_pods.stdout_lines[1] }}"
-    # `kubectl exec -i`: the password travels on stdin, which kubectl forwards
-    # into the container. NOT via `environment:` -- that sets the environment
-    # of the local kubectl process, and kubectl exec does not carry it across
-    # (the password would arrive empty and the login would fail). And not
-    # on argv, where `ps` on the node would show it. The container is named
-    # c-<cluster>-server; the pod label says clickhouse-server, the container
-    # does not.
-    _vf_exec: ["kubectl", "exec", "-i", "--namespace={{ clickhouse.namespace }}", "-c", "c-{{ clickhouse.cluster_name }}-server"]
-    # $0 = user, $1 = query; the password is the first line of stdin, which
-    # the shell exports as CLICKHOUSE_PASSWORD for clickhouse-client to pick
-    # up. It never becomes a client argument, so it is not in the in-pod
-    # process list either (a process environment is readable only by the same
-    # user and root, unlike argv). The client then gets /dev/null as stdin:
-    # `kubectl exec -i` leaves the stream attached after the read, and
-    # clickhouse-client treats an open stdin on an INSERT as external data --
-    # which async inserts refuse:
-    #   Code: 48. Processing async inserts with both inlined and external data
-    #   (from stdin or infile) is not supported. (NOT_IMPLEMENTED)
-    #
-    # fips: true adds --secure --port 9440: this exec runs inside the server
-    # pod itself (no --host, implicit localhost), and server.openSSL.required
-    # zeroes localhost's own plaintext 9000 the same as everyone else's
-    # (confirmed by rendering the chart). No --config-file/CA argument here --
-    # this is an in-cluster loopback admin check that had no certificate
-    # verification at all on the removed plaintext port either, so accepting
-    # whatever cert the server presents is not a downgrade from before.
-    _vf_sh: >-
-      IFS= read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD;
-      exec clickhouse-client --user "$0"
-      {{ '--secure --port 9440' if fips else '' }}
-      --multiquery --query "$1" </dev/null
 
 - name: Version and host, from replica A
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'SELECT version(), hostName() FORMAT TSV'] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_a, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'SELECT version(), hostName() FORMAT TSV'] }}"
     stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
@@ -91,7 +63,7 @@
   # exact-count check below is wrong for the wrong reason. SYNC waits for the
   # drop to complete on every replica before returning.
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_a, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
     stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
@@ -104,7 +76,7 @@
   # once, and every replica sees them through Keeper. The database engine is
   # the Shared Catalog default the chart enables, so no ON CLUSTER needed.
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, _q] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_a, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
     stdin: "{{ _vf_pw }}\n"
   vars:
     _q: |
@@ -122,7 +94,7 @@
   # Parts written by A become visible to B once Keeper propagates the
   # metadata -- normally sub-second, retried for a minute just in case.
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'SELECT count(), max(id), hostName() FROM step11.probe FORMAT TSV'] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_b, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'SELECT count(), max(id), hostName() FROM step11.probe FORMAT TSV'] }}"
     stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
@@ -136,7 +108,7 @@
 
 - name: Where the data physically lives
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_b, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, _q] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_b, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, _q] }}"
     stdin: "{{ _vf_pw }}\n"
   vars:
     _q: "SELECT disk_name, sum(rows) AS rows, count() AS parts FROM system.parts WHERE database = 'step11' AND active GROUP BY disk_name FORMAT TSV"
@@ -149,7 +121,7 @@
 
 - name: Clean up
   ansible.builtin.command:
-    argv: "{{ _vf_exec + [_vf_a, '--', 'sh', '-c', _vf_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
+    argv: "{{ clickhouse_exec_argv + [_vf_a, '--', 'sh', '-c', clickhouse_exec_sh, clickhouse.admin_username, 'DROP DATABASE IF EXISTS step11 SYNC'] }}"
     stdin: "{{ _vf_pw }}\n"
   environment:
     KUBECONFIG: "{{ kubeconfig_path }}"
