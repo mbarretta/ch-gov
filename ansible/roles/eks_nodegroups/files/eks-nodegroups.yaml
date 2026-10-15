@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   ClickHouse Private on EKS -- managed node groups for keeper, server and
-  operator workloads, plus the shared node IAM role and launch templates.
+  operator workloads (plus, optionally, the second service's servers), and
+  the shared node IAM role and launch templates.
   Separate from the cluster stack so nodes can be resized or destroyed
   without touching the control plane.
 
@@ -46,6 +47,27 @@ Parameters:
   ServerMaxNodes:
     Type: Number
 
+  # The optional second service: a further ClickHouse cluster that shares the
+  # parent's Keeper and S3 data but runs its queries on compute of its own.
+  # A minimum of 0 (the value passed while clickhouse.second_service.enabled
+  # is false) creates nothing.
+  SecondServerInstanceType:
+    Type: String
+    Default: ''
+    Description: >-
+      Same "d" family rule as ServerInstanceType, for the same reason: the
+      second service's pods keep their read cache on local NVMe too.
+  SecondServerMinNodes:
+    Type: Number
+    Default: 0
+    MinValue: 0
+  SecondServerMaxNodes:
+    Type: Number
+    # EKS requires a maximum of at least 1 for a group it creates, so the
+    # default is 1 too: a minimum of 0 is what leaves the group out.
+    Default: 1
+    MinValue: 1
+
   OperatorInstanceType:
     Type: String
   OperatorMinNodes:
@@ -65,10 +87,13 @@ Conditions:
   # Drives which taints the keeper group gets. Needed as a real Condition
   # because CloudFormation cannot compute a list from a string at will.
   IsArm: !Equals [!Ref NodeAmiType, AL2023_ARM_64_STANDARD]
+  # Conditions have no greater-than, but MinValue: 0 on the parameter makes
+  # "not 0" the same thing as "more than 0".
+  HasSecondServer: !Not [!Equals [!Ref SecondServerMinNodes, '0']]
 
 Resources:
   # =========================================================================
-  # Node IAM role -- shared by all three groups
+  # Node IAM role -- shared by every group
   # =========================================================================
   # Every EC2 node assumes this. Deliberately NO RoleName: an explicit name
   # collides with leftovers from other attempts in the same account, and
@@ -219,7 +244,7 @@ Resources:
   # =========================================================================
   # Node groups
   # =========================================================================
-  # None of the three sets NodegroupName. Changing an instance type forces
+  # None of the groups sets NodegroupName. Changing an instance type forces
   # CloudFormation to REPLACE a node group, and it cannot create the
   # replacement while a same-named one still exists -- an explicit name turns
   # every resize into a failed update. Find them by label instead:
@@ -289,9 +314,38 @@ Resources:
         Project: clickhouse-private
         Role: server
 
+  # The second service's servers. A copy of ServerNodeGroup with its own
+  # label, so the second service's pods land here and never on the parent's
+  # nodes. It reuses ServerLaunchTemplate, which is what assembles and mounts
+  # the local NVMe at /nvme/disk, and carries the same single taint.
+  SecondServerNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Condition: HasSecondServer
+    Properties:
+      ClusterName: !Ref EksClusterName
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets: !Ref SubnetIds
+      AmiType: !Ref NodeAmiType
+      InstanceTypes: [!Ref SecondServerInstanceType]
+      CapacityType: ON_DEMAND
+      LaunchTemplate:
+        Id: !Ref ServerLaunchTemplate
+        Version: !GetAtt ServerLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: !Ref SecondServerMinNodes
+        DesiredSize: !Ref SecondServerMinNodes
+        MaxSize: !Ref SecondServerMaxNodes
+      Labels:
+        clickhouseGroup: !Sub 'second-server${LabelSuffix}'
+      Taints:
+        - {Key: clickhouse.com/do-not-schedule, Value: 'true', Effect: NO_SCHEDULE}
+      Tags:
+        Project: clickhouse-private
+        Role: second-server
+
   # Runs the operator itself plus the cluster add-ons (CoreDNS, EBS CSI
   # controller, metrics). Untainted and unlabelled on purpose -- it is the
-  # only place ordinary pods can land once the other two groups are tainted.
+  # only place ordinary pods can land once the other groups are tainted.
   # x86_64 in both builds, which is what the tutorial specifies.
   OperatorNodeGroup:
     Type: AWS::EKS::Nodegroup
@@ -321,5 +375,8 @@ Outputs:
     Value: !Ref KeeperNodeGroup
   ServerNodeGroupName:
     Value: !Ref ServerNodeGroup
+  SecondServerNodeGroupName:
+    Condition: HasSecondServer
+    Value: !Ref SecondServerNodeGroup
   OperatorNodeGroupName:
     Value: !Ref OperatorNodeGroup
