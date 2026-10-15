@@ -3,5 +3,6 @@
   "size": "minimal",
   "langfuse": { "enabled": false },
   "grafana": { "enabled": false },
-  "sso": { "enabled": false }
+  "sso": { "enabled": false },
+  "clickhouse": { "second_service": { "enabled": false } }
 }

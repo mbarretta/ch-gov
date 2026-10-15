@@ -18,6 +18,9 @@
 #   --sso                 Amazon Cognito single sign-on (Steps 6b and 11b): ClickHouse
 #                         token logins, plus Langfuse sign-in when Langfuse is on.
 #                         Needs --sso-domain-prefix the first time
+#   --second-service      a second ClickHouse service (second-us-01) on its own nodes,
+#                         sharing the first one's Keeper and data and refusing inserts
+#                         and mutations
 #   --fips                the FIPS build (x86_64, FIPS image tags and AWS endpoints)
 #   --size minimal|tutorial   node and pod sizing (default: minimal)
 #
@@ -67,7 +70,7 @@ source "$CH_ROOT/scripts/lib/common.sh"
 # ---- arguments --------------------------------------------------------------
 # The component variables stay empty unless a flag sets them, so "not mentioned"
 # (keep the current setting) and "explicitly off" stay distinct.
-LANGFUSE=""; GRAFANA=""; SSO=""; FIPS=""; SIZE=""
+LANGFUSE=""; GRAFANA=""; SSO=""; SECOND=""; FIPS=""; SIZE=""
 SSO_PREFIX=""; SSO_LOGIN=""
 YES=0; SKIP_IMAGES=0; FROM=""; DRY=0
 
@@ -80,6 +83,8 @@ while (($#)); do
     --no-grafana)                 GRAFANA=false ;;
     --sso)                        SSO=true ;;
     --no-sso)                     SSO=false ;;
+    --second-service)             SECOND=true ;;
+    --no-second-service)          SECOND=false ;;
     --fips)                       FIPS=true ;;
     --no-fips)                    FIPS=false ;;
     --size)                       need_val "$@"; SIZE="$2"; shift ;;
@@ -141,6 +146,7 @@ PATCH='{}'
 patch_add() { PATCH="$(jq -c --argjson p "$1" '. * $p' <<<"$PATCH")"; }
 [[ -n "$LANGFUSE" ]] && patch_add "{\"langfuse\":{\"enabled\":$LANGFUSE}}"
 [[ -n "$GRAFANA"  ]] && patch_add "{\"grafana\":{\"enabled\":$GRAFANA}}"
+[[ -n "$SECOND"   ]] && patch_add "{\"clickhouse\":{\"second_service\":{\"enabled\":$SECOND}}}"
 [[ -n "$FIPS"     ]] && patch_add "{\"fips\":$FIPS}"
 [[ -n "$SIZE"     ]] && patch_add "$(jq -nc --arg s "$SIZE" '{size:$s}')"
 if [[ "$SSO" == true ]]; then
@@ -206,6 +212,7 @@ if ((PROBLEMS)); then
 fi
 
 LF_ON="$(lf_var '  enabled:')"; GF_ON="$(gf_var '  enabled:')"; SSO_ON="$(sso_var enabled)"
+SECOND_ON="$(ch_var clickhouse.second_service.enabled)"
 if is_true "$GF_ON" && [[ "$(ch_var dhi_configured)" != true ]]; then
   fail "Grafana is on but there is no Docker Hardened Images login: set DHI_USERNAME and DHI_TOKEN in the environment, or dhi.username and dhi.token in config/deploy-vars.yml"
   note_problem
@@ -225,6 +232,7 @@ fi
 COMPONENTS="ClickHouse"
 is_true "$LF_ON"  && COMPONENTS+=", Langfuse"
 is_true "$GF_ON"  && COMPONENTS+=", Grafana"
+is_true "$SECOND_ON" && COMPONENTS+=", second service"
 is_true "$SSO_ON" && COMPONENTS+=", single sign-on (Cognito)"
 ok "components:  $COMPONENTS"
 ok "build:       $(ch_fips_enabled && echo 'FIPS (x86_64)' || echo 'standard (arm64)'), size $(ch_var size), $(ch_var aws.target_region)"

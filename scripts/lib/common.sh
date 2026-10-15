@@ -40,10 +40,11 @@ die()   { fail "$*"; exit 1; }
 CH_VARS_JSON=""
 
 # The second override layer, written by scripts/go.sh from its component
-# flags (--langfuse, --grafana, --sso, --fips, --size). It is JSON, which YAML
-# accepts, so go.sh can merge into it with jq instead of editing the
-# commented config/deploy-vars.yml. It loads after deploy-vars.yml, so a key set
-# in both takes this file's value, and it holds only the keys a flag has set.
+# flags (--langfuse, --grafana, --sso, --second-service, --fips, --size). It
+# is JSON, which YAML accepts, so go.sh can merge into it with jq instead of
+# editing the commented config/deploy-vars.yml. It loads after
+# deploy-vars.yml, so a key set in both takes this file's value, and it holds
+# only the keys a flag has set.
 # The variable can be pointed elsewhere before the first resolve (go.sh
 # --dry-run does this to preview a plan without writing anything).
 CH_FLAGS_FILE="${CH_FLAGS_FILE:-$CH_PROJECT_ROOT/config/deploy-flags.json}"
@@ -90,17 +91,24 @@ ch_fips_enabled() { [[ "$(ch_var fips)" == "true" ]]; }
 # The all-in hourly estimate for the configured size and fips: the pricing:
 # table times the keeper, server and operator node counts at their minimums,
 # plus the EKS control plane and the NAT gateway(s). Same formula as the cost
-# line the nodes step prints, so the two agree. Prints two decimals, such as 2.32.
+# line the nodes step prints, so the two agree. When the optional second
+# service is on, its node group at its minimum and its own load balancer
+# (unless that is type none) are added too. Prints two decimals, such as 2.32.
 ch_hourly_cost() {
   ch_resolve || return 1
   local total
-  total="$(jq -r '.pricing as $p | .infrastructure as $i
+  total="$(jq -r '.pricing as $p | .infrastructure as $i | .clickhouse.second_service as $s
     | ([[$i.keeper.instance_type, $i.keeper.node_count],
         [$i.server.instance_type, $i.server.min_nodes],
         [$i.operator.instance_type, $i.operator.min_nodes]]
        | map(($p.instance_hourly_usd[.[0]] // 0) * (.[1] | tonumber)) | add) as $compute
+    | (if ($s.enabled | tostring) == "true"
+       then ($p.instance_hourly_usd[$i.second_server.instance_type] // 0) * ($i.second_server.min_nodes | tonumber)
+            + (if $s.load_balancer.type == "none" then 0 else $p.nlb_hourly_usd end)
+       else 0 end) as $second
     | $compute + $p.eks_control_plane_hourly_usd
       + $p.nat_gateway_hourly_usd * (if $i.nat_mode == "single" then 1 else 3 end)
+      + $second
     ' <<<"$CH_VARS_JSON")" || return 1
   printf '%.2f' "$total"
 }
@@ -225,9 +233,10 @@ dhi:
 # Optional switches. Uncomment only the ones you want; every other key keeps
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
-# scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
-# command-line flags instead. It records them in config/deploy-flags.json, which is
-# layered on top of this file, so a value set by a flag wins over the same key here.
+# scripts/go.sh sets the langfuse, grafana, sso, second service, fips and size
+# switches from command-line flags instead. It records them in
+# config/deploy-flags.json, which is layered on top of this file, so a value set
+# by a flag wins over the same key here.
 #
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's
 # larger node and pod sizes). See ansible/group_vars/all.yml for both profiles.
@@ -251,6 +260,18 @@ dhi:
 #   load_balancer:
 #     type: "internal"   # none | internal | public
 #     tls: false
+#
+# Second service: a second ClickHouse service (second-us-01) on its own node
+# group that shares the first service's Keeper and S3 data and refuses inserts
+# and mutations. Its pods are sized like clickhouse.server. Set only the keys
+# you change; the rest keep their all.yml values. See ansible/group_vars/all.yml.
+# clickhouse:
+#   second_service:
+#     enabled: false
+#     replicas: 1
+#     load_balancer:
+#       type: "internal"   # none | internal | public
+#       allowed_cidrs: []
 EOF
   chmod 600 "$out"
 }

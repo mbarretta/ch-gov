@@ -40,9 +40,10 @@ dhi:
 # Optional switches. Uncomment only the ones you want; every other key keeps
 # its all.yml value. Defaults shown match ansible/group_vars/all.yml.
 #
-# scripts/go.sh sets the langfuse, grafana, sso, fips and size switches from
-# command-line flags instead. It records them in config/deploy-flags.json, which is
-# layered on top of this file, so a value set by a flag wins over the same key here.
+# scripts/go.sh sets the langfuse, grafana, sso, second service, fips and size
+# switches from command-line flags instead. It records them in
+# config/deploy-flags.json, which is layered on top of this file, so a value set
+# by a flag wins over the same key here.
 #
 # Deployment size: minimal (the default) or tutorial (the upstream tutorial's
 # larger node and pod sizes). See ansible/group_vars/all.yml for both profiles.
@@ -66,6 +67,18 @@ dhi:
 #   load_balancer:
 #     type: "internal"   # none | internal | public
 #     tls: false
+#
+# Second service: a second ClickHouse service (second-us-01) on its own node
+# group that shares the first service's Keeper and S3 data and refuses inserts
+# and mutations. Its pods are sized like clickhouse.server. Set only the keys
+# you change; the rest keep their all.yml values. See ansible/group_vars/all.yml.
+# clickhouse:
+#   second_service:
+#     enabled: false
+#     replicas: 1
+#     load_balancer:
+#       type: "internal"   # none | internal | public
+#       allowed_cidrs: []
 #
 # Single sign-on (optional Steps 6b and 11b): an Amazon Cognito user pool for
 # Langfuse sign-in and ClickHouse token (JWT) sign-in. Ansible merges nested
