@@ -7,7 +7,9 @@
 #   scripts/up.sh --from nodes    # start at a step: images|vpc|eks|nodes|storage|
 #                                 #   prereqs|operator|cluster|preflight|verify|lb
 #                                 #   (plus sso-idp after storage and ch-jwt after
-#                                 #   verify when single sign-on is switched on)
+#                                 #   verify when single sign-on is switched on,
+#                                 #   and second-service after verify and second-lb
+#                                 #   after lb when the second service is)
 #   scripts/up.sh --yes           # no confirmation prompt
 #
 # Every step is idempotent, so running the whole thing over an existing stack
@@ -35,14 +37,22 @@ ch_resolve || exit 1
 # cluster answers. sso_enabled/sso_jwt_enabled (lib/common.sh) read the merged
 # sso: block, so a config/deploy-vars.yml override counts. --from slices this
 # same list, so it keeps the order.
-SSO_ENABLED=false; SSO_JWT=false
+#
+# The second service (clickhouse.second_service) splices in the same way, at
+# the two places deploy.yml runs it: second-service right after verify, once
+# the parent it attaches to has passed its checks, and its own load balancer
+# (second-lb) right after the main one.
+SSO_ENABLED=false; SSO_JWT=false; SECOND_ENABLED=false
 sso_enabled && SSO_ENABLED=true
 sso_jwt_enabled && SSO_JWT=true
+[[ "$(ch_var clickhouse.second_service.enabled)" == true ]] && SECOND_ENABLED=true
 STEPS=(images vpc eks nodes storage)
 [[ "$SSO_ENABLED" == true ]] && STEPS+=(sso-idp)
 STEPS+=(prereqs operator cluster preflight verify)
+[[ "$SECOND_ENABLED" == true ]] && STEPS+=(second-service)
 [[ "$SSO_JWT" == true ]] && STEPS+=(ch-jwt)
 STEPS+=(lb)
+[[ "$SECOND_ENABLED" == true ]] && STEPS+=(second-lb)
 
 # Langfuse (Steps 13-15) is optional and joins the list only when switched on.
 # lf_var (lib/common.sh) reads the merged langfuse: block, so a deploy-vars
@@ -76,6 +86,7 @@ fi
 TAGS=("${TAGS[@]}"); TAGS=($(printf '%s\n' "${TAGS[@]}" | grep -v '^$'))
 
 LB_TYPE="$(ch_var clickhouse.load_balancer.type)"
+SECOND_LB_TYPE="$(ch_var clickhouse.second_service.load_balancer.type)"
 # The all-in hourly figure follows the configured size and fips, so it agrees
 # with the cost table in docs/part-2-image-sync.md for that profile.
 SIZE="$(ch_var size)"
@@ -87,6 +98,13 @@ info "load balancer type (clickhouse.load_balancer.type): ${LB_TYPE:-none}"
 [[ "$LF_ENABLED" == true ]] && info "langfuse: enabled -- Steps 13-15 run after the load balancer (adds ~\$0.02/hr for its NLB)"
 [[ "$SSO_ENABLED" == true ]] && info "sso: enabled -- Step 6b (Cognito) runs after storage$([[ "$SSO_JWT" == true ]] && echo ', Step 11b (ClickHouse token roles) after verify')"
 [[ "$GF_ENABLED" == true ]] && info "grafana: enabled -- Steps 16-18 run after Langfuse (adds ~\$0.02/hr for its NLB)"
+if [[ "$SECOND_ENABLED" == true ]]; then
+  if [[ "${SECOND_LB_TYPE:-none}" != none ]]; then
+    info "second service: enabled -- runs after verify on its own node group, its own $SECOND_LB_TYPE load balancer after the main one; both are in the hourly figure above"
+  else
+    info "second service: enabled -- runs after verify on its own node group, with no load balancer of its own (type none); its nodes are in the hourly figure above"
+  fi
+fi
 info "each step is idempotent; anything already in place is left alone"
 if ((!YES)); then
   read -r -p "  Proceed? [y/N] " ans; [[ "$ans" =~ ^[Yy]$ ]] || die "aborted"
@@ -102,6 +120,10 @@ if ((rc == 0)); then
   ok "connect:  scripts/ch-client.sh            (port-forward from this machine)"
   [[ "${LB_TYPE:-none}" != none ]] && ok "          scripts/ch-client.sh --lb       (via the $LB_TYPE NLB, where its address is reachable)"
   [[ "$SSO_JWT" == true ]] && ok "          scripts/ch-client.sh --sso      (sign in as yourself with Cognito)"
+  if [[ "$SECOND_ENABLED" == true ]]; then
+    ok "          scripts/ch-client.sh --second   (the second service: same data, refuses inserts and mutations)"
+    [[ "${SECOND_LB_TYPE:-none}" != none ]] && ok "          scripts/ch-client.sh --second --lb  (via its own $SECOND_LB_TYPE NLB)"
+  fi
   [[ "$SSO_ENABLED" == true ]] && ok "sso:      scripts/sso-smoke.sh            (checks the Cognito issuer, Langfuse sign-in and a ClickHouse token login)"
   if [[ "$LF_ENABLED" == true ]]; then
     # The address NEXTAUTH_URL was baked with: langfuse.url if set, else the
