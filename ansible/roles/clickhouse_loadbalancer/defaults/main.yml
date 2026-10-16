@@ -26,11 +26,11 @@ clickhouse_lb_config_name: "clickhouse.load_balancer"
 # The cluster's TLS Secret (fips: true), whose ca.crt the probe trusts. The
 # names follow clickhouse_cluster's release.yml: the main cluster keeps the
 # group_vars name, any other cluster gets the chart's default,
-# <name>-server-cert-secret.
+# <name>-server-cert-secret (clickhouse_tls_secret_suffix in group_vars).
 clickhouse_lb_tls_secret_name: >-
   {{ clickhouse_tls_secret_name
      if clickhouse_lb_cluster_name == clickhouse.cluster_name
-     else clickhouse_lb_cluster_name ~ '-server-cert-secret' }}
+     else clickhouse_lb_cluster_name ~ clickhouse_tls_secret_suffix }}
 
 # The variable that says present or absent for this run (absent removes the
 # Service and ends the play), the deploy.yml tag that runs it, and the
