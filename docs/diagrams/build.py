@@ -206,19 +206,21 @@ FOOTER = 'ch-gov · ClickHouse Private on AWS EKS · generated from ansible/grou
 # =====================================================================================
 def aws_view():
     o = []
+    DY = 24  # the second-service NLB row pushes the node rows down by this much
+    SB = 100  # the optional second-server band adds this much height under the operator row
     # ---- boundaries first
-    o.append(region(240, 30, 1105, 880, 'AWS account <YOUR_ACCOUNT_ID> · us-east-1 (target, profile ch-gov-target)'))
-    o.append(region(260, 165, 800, 725, 'VPC 10.20.0.0/16 · clickhouse-private-vpc', color='#ffc300', dash='6,3', rx=10,
+    o.append(region(240, 30, 1105, 880 + SB, 'AWS account <YOUR_ACCOUNT_ID> · us-east-1 (target, profile ch-gov-target)'))
+    o.append(region(260, 165, 800, 725 + SB, 'VPC 10.20.0.0/16 · clickhouse-private-vpc', color='#ffc300', dash='6,3', rx=10,
                     fill='rgba(255, 195, 0, 0.02)'))
     azs = [('us-east-1a', 275, '10.20.192.0/20', '10.20.0.0/18'),
            ('us-east-1b', 537, '10.20.208.0/20', '10.20.64.0/18'),
            ('us-east-1c', 799, '10.20.224.0/20', '10.20.128.0/18')]
     AW = 246
     for name, x, pub, priv in azs:
-        o.append(region(x, 210, AW, 668, name, color='#9a9ea7', dash='4,4', rx=8, fill='none', lsize=9))
+        o.append(region(x, 210, AW, 668 + SB, name, color='#9a9ea7', dash='4,4', rx=8, fill='none', lsize=9))
         o.append(f'<rect x="{x + 8}" y="228" width="{AW - 16}" height="56" rx="6" fill="rgba(0, 203, 235, 0.05)" stroke="#00cbeb" stroke-width="1" stroke-dasharray="3,3"/>')
         o.append(text(x + 16, 242, 'public subnet ' + pub, size=8, color='#00cbeb'))
-        o.append(f'<rect x="{x + 8}" y="296" width="{AW - 16}" height="572" rx="6" fill="rgba(109, 248, 225, 0.03)" stroke="#6df8e1" stroke-width="1" stroke-dasharray="3,3"/>')
+        o.append(f'<rect x="{x + 8}" y="296" width="{AW - 16}" height="{572 + SB}" rx="6" fill="rgba(109, 248, 225, 0.03)" stroke="#6df8e1" stroke-width="1" stroke-dasharray="3,3"/>')
         o.append(text(x + 16, 310, 'private subnet ' + priv, size=8, color='#6df8e1'))
 
     # ---- left column source account (boundary)
@@ -238,11 +240,11 @@ def aws_view():
     o.append(badge(550, 160, 'image pulls (ECR API via NAT)', 'gen'))
     # clients -> NLB
     o.append(arrow([(210, 440), (250, 440), (250, 340), (283, 340)], 'fe'))
+    o.append(arrow([(250, 422), (283, 422)], 'fe', dashed=True))
     # NLB -> server pods (one per AZ)
     for _, x, _, _ in azs:
-        o.append(arrow([(x + 70, 353), (x + 70, 438)], 'fe'))
+        o.append(arrow([(x + 70, 353), (x + 70, 438 + DY)], 'fe'))
     o.append(badge(345, 395, ':8123 · :9000', 'fe'))
-    # Langfuse NLB -> langfuse pods on operator nodes (AZ a)
     # server pods -> S3 GW endpoint
     o.append(arrow([(1023, 470), (1045, 470)], 'db'))
     o.append(arrow([(1132, 470), (1148, 470)], 'db'))
@@ -295,9 +297,11 @@ def aws_view():
                  tsize=9, title_y=378, dashed=True))
     o.append(box(283, 388, 770, 21, 'aws', 'Grafana NLB (opt.) · svc grafana-lb · :3000, or TLS terminated with an ACM cert', [],
                  tsize=9, title_y=402, dashed=True))
+    o.append(box(283, 412, 770, 21, 'aws', 'Second service NLB (opt.) · svc second-us-01-lb · :8123 · :9000, its own endpoint', [],
+                 tsize=9, title_y=426, dashed=True))
 
-    # ---- nodes
-    SC = '#6df8e1'
+    # ---- nodes, shifted down by DY under the NLB rows
+    o.append(f'<g transform="translate(0 {DY})">')
     for i, (name, x, _, _) in enumerate(azs):
         nx, nw = x + 16, AW - 32
         # server node
@@ -336,6 +340,17 @@ def aws_view():
             o.append(text(nx + nw / 2, 760, 'operator node group', size=9, color=MUTED, font='Inter', anchor='middle'))
             o.append(text(nx + nw / 2, 774, 'min 2 · max 4 — ASG can', size=8, anchor='middle'))
             o.append(text(nx + nw / 2, 786, 'place a node in any AZ', size=8, anchor='middle'))
+    o.append('</g>')
+
+    # ---- optional second-server node group, spanning the AZs like the NLBs
+    o.append(box(283, 892, 770, 60, 'aws', 'second-server node group (opt.) · m7gd.2xlarge · 1–2 nodes, ASG places them in any AZ', [],
+                 tsize=10, align='start', title_y=906, dashed=True))
+    # No logo here: every logo use advances _uid, which would renumber the ids on the pages built after this one.
+    o.append(box(291, 916, 430, 28, 'db', 'clickhouse-server · c-second-us-01 · ns-second-us-01', [],
+                 align='start', tsize=9, title_y=934, dashed=True))
+    o.append(text(733, 925, 'label clickhouseGroup=second-server-arm64 · tainted', size=7))
+    o.append(text(733, 936, 'its own compute and NVMe read cache, sharing', size=7))
+    o.append(text(733, 947, 'Keeper and the S3 table data with the parent', size=7))
 
     # ---- S3 gateway endpoint + right column
     o.append(box(1048, 452, 84, 40, 'aws', 'S3 gateway', ['VPC endpoint'], tsize=9, lsize=7, title_y=467))
@@ -349,23 +364,24 @@ def aws_view():
     o.append(box(1150, 718, 180, 66, 'aws', 'S3 · Grafana plugins (opt.)', [
         'grafana-<acct>-us-east-1', 'grafana-clickhouse-datasource', 'zip, under plugins/ prefix'],
         logo_name='aws-s3', align='start', dashed=True, line_gap=11))
-    o.append(box(1150, 180, 180, 80, 'gen', 'Where ClickHouse lives', [
+    o.append(box(1150, 172, 180, 92, 'gen', 'Where ClickHouse lives', [
         ('3 × server  → server nodes', {}), ('3 × keeper  → keeper nodes', {}), ('operator    → operator nodes', {}),
-        ('data        → S3, never local', {})], align='start', tsize=10, lsize=7.5, line_gap=12))
+        ('second svc  → second-server', {}), ('data        → S3, never local', {})],
+        align='start', tsize=10, lsize=7.5, line_gap=12))
     o.append(box(1150, 280, 180, 110, 'gen', 'fips: true changes', [
         'arm64 → x86_64 (m7i, m6id)', 'image tags gain -fips', 'ECR/S3/STS → FIPS endpoints',
         'native TLS on every CH port', 'RSA 3072 · KMS CMKs', 'Langfuse NLB forced to TLS'],
         align='start', tsize=10, lsize=7.5, line_gap=12, icon_name='lock'))
 
-    o.append(legend(250, 925, [('aws', 'AWS service / EC2 node'), ('db', 'ClickHouse pod'), ('be', 'Operator'),
+    o.append(legend(250, 925 + SB, [('aws', 'AWS service / EC2 node'), ('db', 'ClickHouse pod'), ('be', 'Operator'),
                                ('fe', 'Client / ingress'), ('sec', 'Identity & keys'), ('gen', 'Generic / storage'),
-                               (('dashbox', 'gen'), 'Optional (langfuse.enabled)'), (('dashbox', 'aws'), 'Optional (grafana.enabled)'),
+                               (('dashbox', 'aws'), 'Optional (Langfuse, Grafana, second service)'),
                                (('line', 'bus', False), 'Image mirror')]))
 
     cards = [
         ('sunrise', 'Compute & placement', [
-            'Three managed node groups across 3 AZs: keeper (3 × m7g.xlarge), server (3–6 × m7gd.2xlarge), operator (2–4 × m7i.xlarge)',
-            'Keeper and server groups carry the <code>clickhouse.com/do-not-schedule</code> taint; only ClickHouse pods tolerate it',
+            'Three managed node groups across 3 AZs, four with the optional second service: keeper (3 × m7g.xlarge), server (3–6 × m7gd.2xlarge), operator (2–4 × m7i.xlarge), second-server (1–2 × m7gd.2xlarge)',
+            'Keeper, server and second-server groups carry the <code>clickhouse.com/do-not-schedule</code> taint; only ClickHouse pods tolerate it',
             'Server nodes bind instance-store NVMe to <code>/nvme/disk</code> at boot for the 300Gi read cache',
             'Operator group is untainted, so it also hosts CoreDNS, EBS CSI and (optionally) Langfuse',
         ], ['AL2023 arm64', 'fips → x86_64']),
@@ -374,6 +390,7 @@ def aws_view():
             'One NAT gateway by default (<code>nat_mode: single</code>); <code>per-az</code> adds one per zone',
             'S3 gateway endpoint keeps table-data traffic off NAT',
             'ClickHouse NLB is internal by default (none | internal | public, public needs allowed_cidrs)',
+            'The optional second service gets its own NLB, <code>second-us-01-lb</code>, with the same choices',
         ], ['8123 / 9000', 'fips: 8443 / 9440']),
         ('red', 'Storage, identity & keys', [
             'All table data in one S3 bucket under a per-cluster key prefix; server pods keep no PVC',
@@ -384,7 +401,7 @@ def aws_view():
     ]
     page('aws-infrastructure.html', 'AWS Infrastructure',
          'Everything <code>scripts/up.sh</code> provisions in the target account, and which ClickHouse components run on which nodes',
-         1360, 950, '\n'.join(o), cards, FOOTER)
+         1360, 950 + SB, '\n'.join(o), cards, FOOTER)
 
 
 # =====================================================================================
