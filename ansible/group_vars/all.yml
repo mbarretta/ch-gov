@@ -705,7 +705,13 @@ clickhouse_tls_key_file:     "{{ state_dir }}/clickhouse-tls-key.pem"
 # separate certs), and this file does not read keeper's own default
 # secret-name convention from the operator chart, so it sets the name
 # explicitly for both.
-clickhouse_tls_secret_name: "{{ clickhouse.cluster_name }}-server-cert-secret"
+#
+# clickhouse_tls_secret_suffix is the one place that naming rule is spelled.
+# Every cluster's Secret name is built from it: this one, the second
+# service's in clickhouse_cluster's release.yml, and the one the load
+# balancer's probe mounts (clickhouse_loadbalancer's defaults).
+clickhouse_tls_secret_suffix: "-server-cert-secret"
+clickhouse_tls_secret_name: "{{ clickhouse.cluster_name ~ clickhouse_tls_secret_suffix }}"
 
 # Langfuse's generated secrets (Steps 14-15), kept under state/ exactly like the
 # ClickHouse admin password above: created on first run, read back afterwards.

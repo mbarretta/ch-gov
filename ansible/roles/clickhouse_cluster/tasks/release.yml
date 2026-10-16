@@ -31,10 +31,11 @@
     # The cluster named by clickhouse.cluster_name keeps the TLS file and
     # Secret names group_vars gives it. Any other cluster gets its own,
     # derived from its name: the leaf files clickhouse-tls-<name>-*.pem under
-    # state/, and the chart's default Secret name, <name>-server-cert-secret.
+    # state/, and the chart's default Secret name, <name>-server-cert-secret
+    # (clickhouse_tls_secret_suffix in group_vars).
     _rel_primary: "{{ _rel.name == clickhouse.cluster_name }}"
     _rel_tls:
-      secret_name: "{{ clickhouse_tls_secret_name if _rel_primary else _rel.name ~ '-server-cert-secret' }}"
+      secret_name: "{{ clickhouse_tls_secret_name if _rel_primary else _rel.name ~ clickhouse_tls_secret_suffix }}"
       cert_file: "{{ clickhouse_tls_cert_file if _rel_primary else state_dir ~ '/clickhouse-tls-' ~ _rel.name ~ '-cert.pem' }}"
       key_file: "{{ clickhouse_tls_key_file if _rel_primary else state_dir ~ '/clickhouse-tls-' ~ _rel.name ~ '-key.pem' }}"
       csr_file: "{{ state_dir ~ '/clickhouse-tls-leaf.csr' if _rel_primary else state_dir ~ '/clickhouse-tls-' ~ _rel.name ~ '-leaf.csr' }}"
