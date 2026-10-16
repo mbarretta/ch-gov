@@ -61,6 +61,11 @@ Resources:
                 # service reads this cluster's data in the same bucket, so it
                 # shares this role, its KMS grant and the ClickHouseS3RoleArn
                 # output instead of getting a role of its own.
+{# The second service needs the same S3 rights, not a read-only subset: it
+   still writes and deletes objects on the shared prefix. Each S3 disk writes,
+   reads and deletes an access-check object at startup, its own system log
+   tables live on the S3 disk, and it helps clean up outdated shared parts.
+   It is read-only at the query layer, not at the IAM layer. #}
                 "{{ _oidc_issuer_host }}:sub":
                   - "system:serviceaccount:{{ clickhouse.namespace }}:{{ clickhouse.service_account }}"
                   - "system:serviceaccount:{{ clickhouse.second_service.namespace }}:{{ clickhouse.second_service.service_account }}"

@@ -86,6 +86,8 @@ Because the namespace is part of the `:sub` string, the namespace is not a free 
 
 `StringEquals` against a list matches any one of its values and nothing else, so the policy still names each service account exactly. The role, its KMS grant under `fips: true` and the `ClickHouseS3RoleArn` output are the same ones the main cluster uses. With the switch off, the template renders the single value shown earlier.
 
+The second service gets the same S3 permissions as the main cluster, not a read-only subset, because it still writes to the bucket. Three things make it write. Each S3 disk writes, reads and deletes a small access-check object when the server starts, to confirm the bucket is usable. The second service's own system log tables live on the S3 disk, so it writes them, merges them and drops old rows by TTL like any other table. And it takes part in cleaning up outdated shared parts, which means deleting objects. A role limited to reads would stop the second service at its first startup check. So the second service is read-only at the query layer, where it refuses inserts and mutations, not at the IAM layer.
+
 Notice the shape of the condition keys: the issuer URL is part of the key *name*, not the value. That detail matters in the next section.
 
 ### The one place CloudFormation cannot do the job
