@@ -22,8 +22,54 @@
 #                by the _rel dict described at its top
 #   tls.yml      the fips: true native-TLS CA, leaf and Secret, imported by
 #                release.yml
-#   main.yml     this file: builds _rel from clickhouse.* for this cluster,
-#                then the teardown and the checks only this cluster needs
+#   main.yml     this file: a guard that refuses teardown while the second
+#                service is attached, then builds _rel from clickhouse.* for
+#                this cluster, then the teardown and the checks only this
+#                cluster needs
+
+# --- teardown guard -----------------------------------------------------------
+# The second service runs on this cluster's Keeper. Removing this cluster
+# while the second service is still attached would delete the Keeper under
+# it, so a teardown stops here, before anything changes, if the second
+# service's ClickHouseCluster is still there. scripts/down.sh never trips
+# this: its plan removes the second service first.
+
+- name: Look for an attached second service before tearing down
+  # --ignore-not-found: rc 0 and no output means it is not there. A non-zero
+  # rc means the cluster could not be asked, or the operator's CRD is not
+  # installed, so there is no second service to protect.
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - clickhousecluster
+      - c-{{ clickhouse.second_service.cluster_name }}
+      - --namespace={{ clickhouse.second_service.namespace }}
+      - --ignore-not-found
+      - --request-timeout=20s
+      - -o=name
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: _cl_child
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (cluster_state | default('present')) == 'absent'
+
+- name: Stop if the second service is still attached
+  ansible.builtin.fail:
+    msg: >-
+      The second service, ClickHouseCluster c-{{ clickhouse.second_service.cluster_name }}
+      in {{ clickhouse.second_service.namespace }}, is still attached to
+      c-{{ clickhouse.cluster_name }} and runs on its Keeper. Removing this cluster now
+      would delete that Keeper from under it. Nothing has been changed. Tear the second
+      service down first: scripts/play.sh --tags second-lb -e second_lb_state=absent, then
+      scripts/play.sh --tags second-service -e second_service_state=absent. Then re-run
+      this teardown. scripts/down.sh does all of it in the right order.
+  when:
+    - (cluster_state | default('present')) == 'absent'
+    - (_cl_child.rc | default(1)) == 0
+    - (_cl_child.stdout | default('') | trim) != ''
 
 - name: Install the cluster release
   ansible.builtin.import_tasks: release.yml

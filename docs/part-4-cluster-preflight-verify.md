@@ -408,7 +408,7 @@ From your machine, `scripts/ch-client.sh --second` port-forwards to a second-ser
 
 ### Teardown order
 
-The child goes before the parent, and before anything it depends on. `scripts/down.sh` handles that: its plan removes the second service's load balancer, then the second service, then the parent's load balancer and the parent cluster. It includes those two steps only when the second service is actually there, so it also removes a second service you have already switched off. To remove only the second service, use the `scripts/play.sh` form:
+The child goes before the parent, and before anything it depends on. The parent's own teardown (`--tags cluster -e cluster_state=absent`) enforces this: while the second service's ClickHouseCluster is still there, it stops before changing anything and names the two commands below, because removing the parent would delete the Keeper the second service runs on. `scripts/down.sh` handles the order for you: its plan removes the second service's load balancer, then the second service, then the parent's load balancer and the parent cluster. It includes those two steps only when the second service is actually there, so it also removes a second service you have already switched off. To remove only the second service, use the `scripts/play.sh` form:
 
 ```bash
 scripts/play.sh --tags second-lb -e second_lb_state=absent
