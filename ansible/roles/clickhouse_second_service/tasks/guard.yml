@@ -17,19 +17,51 @@
 # switch off too, and this guard is what keeps the operator's flag on until
 # they have.
 #
-# Nothing here runs while the switch is on, or while any <name>_state=absent
-# teardown is in progress (scripts/down.sh passes one on every step, and its
-# plan removes the second service before anything it depends on). On a fresh
-# deployment there is no kubeconfig yet, and with no cluster behind the
-# kubeconfig there is no second service either, so both pass.
+# Nothing here runs while the switch is on. It also stands aside for the
+# second service's own teardowns (second_service_state or second_lb_state
+# set to absent), and for a single scripts/down.sh step: one tag from
+# down.sh's plan with that step's own <name>_state set to absent. down.sh
+# removes the second service before anything it depends on, and of its steps
+# only operator, nodes and storage carry a tag this guard runs under; the
+# rest of the table is there so it matches down.sh line for line. Any other
+# <name>_state=absent, or a teardown state passed on a run with more tags than
+# that one step, gets checked like any other run.
+#
+# On a fresh deployment there is no kubeconfig yet, and after scripts/down.sh
+# --all the kubeconfig names an EKS cluster that no longer exists; neither has
+# a second service, so both pass. A kubeconfig whose cluster does not answer
+# (expired credentials, an unreachable API endpoint) is different: the run
+# cannot tell whether the second service is still there, so it stops.
 
 - name: Guard against a second service left running with its switch off
   vars:
-    # Every <name>_state the run was given, such as second_service_state or
-    # nodegroups_state. The leading [a-z] leaves out the roles' own
-    # underscore-prefixed facts.
-    _ssg_states: "{{ query('ansible.builtin.varnames', '^[a-z][a-z0-9_]*_state$') }}"
-    _ssg_teardown: "{{ 'absent' in (query('ansible.builtin.vars', *_ssg_states) if _ssg_states else []) }}"
+    # scripts/down.sh's teardown plan, tag to state variable.
+    _ssg_down_steps:
+      lf-app: langfuse_state
+      lf-db: langfuse_db_state
+      gf-app: grafana_state
+      gf-db: grafana_db_state
+      second-lb: second_lb_state
+      second-service: second_service_state
+      lb: lb_state
+      cluster: cluster_state
+      sso-idp: sso_idp_state
+      operator: operator_state
+      prereqs: prereqs_state
+      lf-storage: langfuse_storage_state
+      gf-storage: grafana_storage_state
+      nodes: nodegroups_state
+      storage: storage_state
+      eks: eks_state
+      vpc: vpc_state
+    _ssg_down_step: >-
+      {{ (ansible_run_tags | length) == 1
+         and ansible_run_tags[0] in _ssg_down_steps
+         and lookup('ansible.builtin.vars', _ssg_down_steps[ansible_run_tags[0]], default='present') == 'absent' }}
+    _ssg_teardown: >-
+      {{ (second_service_state | default('present')) == 'absent'
+         or (second_lb_state | default('present')) == 'absent'
+         or (_ssg_down_step | bool) }}
   when:
     - not (clickhouse.second_service.enabled | bool)
     - not (_ssg_teardown | bool)
@@ -80,6 +112,51 @@
       check_mode: false
       when: _ssg_kubeconfig.stat.exists
 
+    - name: Ask AWS whether the EKS cluster is there, when the cluster did not answer
+      # Both lookups failing with a kubeconfig on disk means either the EKS
+      # cluster is gone (scripts/down.sh --all keeps state/kubeconfig) or it
+      # could not be reached. Only the first is safe to pass.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - eks
+          - describe-cluster
+          - --name={{ infrastructure.eks_cluster_name }}
+          - --profile={{ aws.target_profile }}
+          - --region={{ aws.target_region }}
+          - --query=cluster.status
+          - --output=text
+      register: _ssg_eks
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - _ssg_kubeconfig.stat.exists
+        - (_ssg_cr.rc | default(1)) != 0
+        - (_ssg_release.rc | default(1)) != 0
+
+    - name: Stop if the cluster did not answer
+      vars:
+        _ssg_unanswered: "{{ _ssg_eks is not skipped }}"
+        _ssg_no_eks: "{{ 'ResourceNotFoundException' in (_ssg_eks.stderr | default('')) }}"
+        # The first line of what each tool said; msg when it could not even start.
+        _ssg_kubectl_said: "{{ ((_ssg_cr.stderr | default('', true)) or (_ssg_cr.msg | default('nothing', true))) | trim | split('\\n') | first }}"
+        _ssg_helm_said: "{{ ((_ssg_release.stderr | default('', true)) or (_ssg_release.msg | default('nothing', true))) | trim | split('\\n') | first }}"
+      ansible.builtin.assert:
+        that: not (_ssg_unanswered | bool) or (_ssg_no_eks | bool)
+        fail_msg: >-
+          clickhouse.second_service.enabled is false, so this run checks first that the
+          second service is not still deployed, but the cluster in {{ kubeconfig_path }}
+          did not answer: kubectl said '{{ _ssg_kubectl_said }}' and helm said
+          '{{ _ssg_helm_said }}'.
+          Without an answer it cannot tell, and this run would take away the second
+          service's nodes, its access to the S3 data and the operator's private-Hydra flag
+          if it is still there. Nothing has been changed. Check that your AWS credentials
+          for {{ aws.target_profile }} are current and that the API endpoint of EKS cluster
+          {{ infrastructure.eks_cluster_name }} can be reached, then re-run once the
+          cluster answers (KUBECONFIG={{ kubeconfig_path }} kubectl get nodes is a quick test).
+        quiet: true
+
     - name: Stop if the second service is still deployed
       vars:
         _ssg_found: >-
@@ -103,8 +180,8 @@
           scripts/play.sh --tags second-service -e second_service_state=absent.
           Then re-run with the switch off.
         success_msg: >-
-          {{ 'no second service in ' ~ clickhouse.second_service.namespace
-             if ((_ssg_cr.rc | default(1)) == 0 or (_ssg_release.rc | default(1)) == 0)
-             else ('no kubeconfig yet, so no second service to find'
-                   if not _ssg_kubeconfig.stat.exists
-                   else 'the cluster did not answer, so no second service to find') }}
+          {{ 'no kubeconfig yet, so no second service to find'
+             if not _ssg_kubeconfig.stat.exists
+             else ('no EKS cluster ' ~ infrastructure.eks_cluster_name ~ ', so no second service to find'
+                   if _ssg_eks is not skipped
+                   else 'no second service in ' ~ clickhouse.second_service.namespace) }}
