@@ -473,6 +473,11 @@ The operator flag has to stay on until the child is gone, for the reason given e
 - *Cause:* the switch is off while the second service is still in the cluster. Continuing would remove its nodes, its access to S3 and the operator's feature flag while it is still attached to the parent, so the playbook stops before it changes anything.
 - *Fix:* to keep it, turn the switch back on with `scripts/go.sh --second-service`. To remove it, run the two teardown commands in [Teardown order](#teardown-order), then run again with the switch off. `scripts/down.sh` removes it for you in the right order.
 
+**A run stops at the start with `clickhouse.second_service.enabled is false, so this run checks first that the second service is not still deployed, but the cluster in ... did not answer`**
+
+- *Cause:* with the switch off, the playbook asks the cluster named in `state/kubeconfig` whether the second service is still there before it changes anything. Here both `kubectl` and `helm` failed to get an answer, and AWS still reports the EKS cluster (or could not be asked either), so the cluster is most likely there but could not be reached. Usually the AWS credentials for the target profile have expired, or the cluster's API endpoint cannot be reached from where you run the playbook. Without an answer the playbook cannot rule the second service out, so it stops. The message quotes the first line of what `kubectl` and `helm` each said, which usually names the problem.
+- *Fix:* refresh your AWS credentials for the target profile (`aws sso login --profile "$AWS_PROFILE"` after `source scripts/env.sh`, or your organization's own way in `profile` mode), or wait until the API endpoint can be reached, then run again. `KUBECONFIG=state/kubeconfig kubectl get nodes` is a quick test: once it lists the nodes, the check gets its answer. A fresh deployment with no kubeconfig yet, or one whose EKS cluster `scripts/down.sh --all` has already removed, passes this check: neither can still hold a second service.
+
 ---
 
 ## Cost check
